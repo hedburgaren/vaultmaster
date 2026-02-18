@@ -34,6 +34,13 @@ export default function StoragePage() {
   const [b2KeyId, setB2KeyId] = useState('');
   const [b2AppKey, setB2AppKey] = useState('');
   const [b2Bucket, setB2Bucket] = useState('');
+  const [gdriveClientId, setGdriveClientId] = useState('');
+  const [gdriveClientSecret, setGdriveClientSecret] = useState('');
+  const [gdriveFolderId, setGdriveFolderId] = useState('');
+  const [onedriveClientId, setOnedriveClientId] = useState('');
+  const [onedriveClientSecret, setOnedriveClientSecret] = useState('');
+  const [onedriveDriveId, setOnedriveDriveId] = useState('');
+  const [onedriveFolderPath, setOnedriveFolderPath] = useState('/Backups');
 
   const [testResults, setTestResults] = useState<Record<string, any>>({});
 
@@ -46,6 +53,8 @@ export default function StoragePage() {
       case 's3': return { endpoint: s3Endpoint, bucket: s3Bucket, region: s3Region, access_key: s3AccessKey, secret_key: s3SecretKey };
       case 'sftp': return { host: sftpHost, port: parseInt(sftpPort), user: sftpUser, password: sftpPassword, path: sftpPath };
       case 'b2': return { key_id: b2KeyId, application_key: b2AppKey, bucket: b2Bucket };
+      case 'gdrive': return { client_id: gdriveClientId, client_secret: gdriveClientSecret, folder_id: gdriveFolderId };
+      case 'onedrive': return { client_id: onedriveClientId, client_secret: onedriveClientSecret, drive_id: onedriveDriveId, folder_path: onedriveFolderPath };
       default: return {};
     }
   };
@@ -108,6 +117,8 @@ export default function StoragePage() {
                 <option value="s3">☁️ S3 / DO Spaces</option>
                 <option value="sftp">🖥️ SFTP Server</option>
                 <option value="b2">🔷 Backblaze B2</option>
+                <option value="gdrive">📁 Google Drive</option>
+                <option value="onedrive">☁️ OneDrive / SharePoint</option>
               </select>
             </div>
           </div>
@@ -186,6 +197,44 @@ export default function StoragePage() {
                 <div className="col-span-2">
                   <FormLabel label="Bucket" tooltip="B2 bucket name to store backups in." />
                   <input value={b2Bucket} onChange={e => setB2Bucket(e.target.value)} className={INPUT} placeholder="my-backups" />
+                </div>
+              </div>
+            )}
+
+            {backend === 'gdrive' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <FormLabel label="Client ID" tooltip="Google OAuth2 Client ID from Google Cloud Console. Required for rclone authentication." />
+                  <input value={gdriveClientId} onChange={e => setGdriveClientId(e.target.value)} className={INPUT} placeholder="123456789.apps.googleusercontent.com" />
+                </div>
+                <div>
+                  <FormLabel label="Client Secret" tooltip="Google OAuth2 Client Secret. Will be encrypted before storage." />
+                  <SecretInput value={gdriveClientSecret} onChange={setGdriveClientSecret} placeholder="Enter client secret" />
+                </div>
+                <div className="col-span-2">
+                  <FormLabel label="Folder ID" tooltip="Google Drive folder ID where backups will be stored. Find it in the folder URL after /folders/." />
+                  <input value={gdriveFolderId} onChange={e => setGdriveFolderId(e.target.value)} className={INPUT} placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms" />
+                </div>
+              </div>
+            )}
+
+            {backend === 'onedrive' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <FormLabel label="Client ID" tooltip="Microsoft Azure App Registration Client ID (Application ID)." />
+                  <input value={onedriveClientId} onChange={e => setOnedriveClientId(e.target.value)} className={INPUT} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                </div>
+                <div>
+                  <FormLabel label="Client Secret" tooltip="Microsoft Azure App Registration Client Secret. Will be encrypted before storage." />
+                  <SecretInput value={onedriveClientSecret} onChange={setOnedriveClientSecret} placeholder="Enter client secret" />
+                </div>
+                <div>
+                  <FormLabel label="Drive ID" tooltip="OneDrive or SharePoint drive ID. Leave empty for the user's default drive." />
+                  <input value={onedriveDriveId} onChange={e => setOnedriveDriveId(e.target.value)} className={INPUT} placeholder="Optional — leave empty for default" />
+                </div>
+                <div>
+                  <FormLabel label="Folder Path" tooltip="Path within the drive where backups will be stored." />
+                  <input value={onedriveFolderPath} onChange={e => setOnedriveFolderPath(e.target.value)} className={INPUT} placeholder="/Backups" />
                 </div>
               </div>
             )}

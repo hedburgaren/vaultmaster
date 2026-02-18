@@ -6,6 +6,7 @@ import {
   getProfile, updateProfile, changePassword, generateApiKey, revokeApiKey,
 } from '@/lib/api';
 import { Plus, Trash2, Eye, Settings, User, Key, Mail, Lock, Copy, RefreshCw } from 'lucide-react';
+import FormLabel from '@/components/FormLabel';
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<'profile' | 'retention'>('profile');
@@ -113,7 +114,7 @@ export default function SettingsPage() {
               </div>
               <div>
                 <div className="font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-1">Role</div>
-                <div className="font-mono text-sm text-vm-text-bright">{profile.is_admin ? 'Administrator' : 'User'}</div>
+                <div className="font-mono text-sm text-vm-text-bright">{profile.role === 'admin' || profile.is_admin ? 'Administrator' : profile.role === 'operator' ? 'Operator' : 'Viewer'}</div>
               </div>
             </div>
           </div>
@@ -201,31 +202,31 @@ export default function SettingsPage() {
               <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">New Retention Policy (GFS)</h3>
               <div className="grid grid-cols-4 gap-4 mb-4">
                 <div className="col-span-2">
-                  <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Name</label>
+                  <FormLabel label="Name" tooltip="A descriptive name for this retention policy, e.g. 'PostgreSQL Critical' or 'Weekly Files'." />
                   <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="PostgreSQL Critical" />
                 </div>
                 <div>
-                  <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Hourly</label>
+                  <FormLabel label="Hourly" tooltip="Number of hourly backups to keep. Set to 0 to skip hourly retention." />
                   <input type="number" value={form.keep_hourly} onChange={e => setForm({...form, keep_hourly: Number(e.target.value)})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
                 </div>
                 <div>
-                  <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Daily</label>
+                  <FormLabel label="Daily" tooltip="Number of daily backups to keep. The most recent backup each day is preserved." />
                   <input type="number" value={form.keep_daily} onChange={e => setForm({...form, keep_daily: Number(e.target.value)})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
                 </div>
                 <div>
-                  <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Weekly</label>
+                  <FormLabel label="Weekly" tooltip="Number of weekly backups to keep. The most recent backup each week is preserved." />
                   <input type="number" value={form.keep_weekly} onChange={e => setForm({...form, keep_weekly: Number(e.target.value)})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
                 </div>
                 <div>
-                  <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Monthly</label>
+                  <FormLabel label="Monthly" tooltip="Number of monthly backups to keep. The most recent backup each month is preserved." />
                   <input type="number" value={form.keep_monthly} onChange={e => setForm({...form, keep_monthly: Number(e.target.value)})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
                 </div>
                 <div>
-                  <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Yearly</label>
+                  <FormLabel label="Yearly" tooltip="Number of yearly backups to keep. The most recent backup each year is preserved." />
                   <input type="number" value={form.keep_yearly} onChange={e => setForm({...form, keep_yearly: Number(e.target.value)})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
                 </div>
                 <div>
-                  <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Max Days</label>
+                  <FormLabel label="Max Days" tooltip="Maximum age in days. Backups older than this are always deleted, regardless of GFS rules." />
                   <input type="number" value={form.max_age_days} onChange={e => setForm({...form, max_age_days: Number(e.target.value)})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
                 </div>
               </div>

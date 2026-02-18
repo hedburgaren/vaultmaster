@@ -318,3 +318,10 @@ class DashboardOut(BaseModel):
     next_runs: list[dict]
     active_runs: list[dict]
     recent_errors: list[dict]
+    # Health widgets
+    server_health: list[dict] = []
+    total_artifacts: int = 0
+    total_artifact_bytes: int = 0
+    last_successful_backup: str | None = None
+    hours_since_last_backup: float | None = None
+    storage_warnings: list[dict] = []
