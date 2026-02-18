@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Clock, RotateCcw, Database, FileText, Bell, Settings, Server, Archive } from 'lucide-react';
+import { LayoutDashboard, Clock, RotateCcw, Database, Bell, Settings, Server, Archive, Shield, Users, Webhook } from 'lucide-react';
 import clsx from 'clsx';
 
 const navItems = [
@@ -13,6 +13,8 @@ const navItems = [
   { href: '/artifacts', label: 'Restore', icon: RotateCcw },
   { href: '/storage', label: 'Storage', icon: Database },
   { href: '/notifications', label: 'Notifications', icon: Bell },
+  { href: '/audit', label: 'Audit Log', icon: Shield },
+  { href: '/users', label: 'Users', icon: Users },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
 

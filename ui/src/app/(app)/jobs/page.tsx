@@ -1,22 +1,33 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { getJobs, createJob, deleteJob, triggerJob, getServers } from '@/lib/api';
 import { backupTypeIcon } from '@/lib/utils';
 import Badge from '@/components/Badge';
-import { Plus, Play, Trash2, Clock } from 'lucide-react';
+import FormLabel from '@/components/FormLabel';
+import TagInput from '@/components/TagInput';
+import CronBuilder from '@/components/CronBuilder';
+import { Plus, Play, Trash2, Clock, Lock } from 'lucide-react';
+
+const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<any[]>([]);
   const [servers, setServers] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', backup_type: 'postgresql', server_id: '', schedule_cron: '0 3 * * *', domain: '', tags: '', encrypt: false });
+  const [form, setForm] = useState({ name: '', backup_type: 'postgresql', server_id: '', schedule_cron: '0 3 * * *', domain: '', tags: [] as string[], encrypt: false });
 
   const load = () => { getJobs().then(setJobs).catch(() => {}); getServers().then(setServers).catch(() => {}); };
   useEffect(() => { load(); }, []);
 
+  const allTags = useMemo(() => {
+    const set = new Set<string>();
+    jobs.forEach(j => j.tags?.forEach((t: string) => set.add(t)));
+    return Array.from(set).sort();
+  }, [jobs]);
+
   const handleCreate = async () => {
-    await createJob({ ...form, tags: form.tags ? form.tags.split(',').map((t: string) => t.trim()) : [], source_config: {} });
+    await createJob({ ...form, tags: form.tags, source_config: {} });
     setShowForm(false);
     load();
   };
@@ -47,37 +58,48 @@ export default function JobsPage() {
           <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">New Backup Job</h3>
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Name</label>
-              <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
+              <FormLabel label="Name" tooltip="A descriptive name for this backup job, e.g. 'Nightly PostgreSQL' or 'Weekly Files'." />
+              <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className={INPUT} />
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Type</label>
-              <select value={form.backup_type} onChange={e => setForm({...form, backup_type: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent">
-                <option value="postgresql">PostgreSQL</option>
-                <option value="docker_volumes">Docker Volumes</option>
-                <option value="files">Files</option>
-                <option value="do_snapshot">DO Snapshot</option>
-                <option value="custom">Custom Script</option>
+              <FormLabel label="Backup Type" tooltip="What kind of data to back up. Each type uses a specialized strategy." />
+              <select value={form.backup_type} onChange={e => setForm({...form, backup_type: e.target.value})} className={INPUT}>
+                <option value="postgresql">🐘 PostgreSQL Database</option>
+                <option value="docker_volumes">🐳 Docker Volumes</option>
+                <option value="files">📁 Files & Directories</option>
+                <option value="do_snapshot">📸 DigitalOcean Snapshot</option>
+                <option value="custom">⚡ Custom Script</option>
               </select>
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Server</label>
-              <select value={form.server_id} onChange={e => setForm({...form, server_id: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent">
+              <FormLabel label="Server" tooltip="Which server to run this backup on. Add servers in the Servers page first." />
+              <select value={form.server_id} onChange={e => setForm({...form, server_id: e.target.value})} className={INPUT}>
                 <option value="">Select server...</option>
-                {servers.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {servers.map((s: any) => <option key={s.id} value={s.id}>{s.name} ({s.host})</option>)}
               </select>
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Schedule (cron)</label>
-              <input value={form.schedule_cron} onChange={e => setForm({...form, schedule_cron: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="0 3 * * *" />
+              <FormLabel label="Project / Domain" tooltip="Group backups by project or domain name. Useful for filtering and organizing artifacts. Example: 'plastshop.se', 'myapp-prod'." />
+              <input value={form.domain} onChange={e => setForm({...form, domain: e.target.value})} className={INPUT} placeholder="myproject.com" />
             </div>
-            <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Domain</label>
-              <input value={form.domain} onChange={e => setForm({...form, domain: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="plastshop" />
+            <div className="col-span-2">
+              <FormLabel label="Schedule" tooltip="When this backup should run automatically. Choose a preset or write a custom cron expression." />
+              <CronBuilder value={form.schedule_cron} onChange={cron => setForm({...form, schedule_cron: cron})} />
             </div>
-            <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Tags</label>
-              <input value={form.tags} onChange={e => setForm({...form, tags: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="critical, daily" />
+            <div className="col-span-2">
+              <FormLabel label="Tags" tooltip="Categorize this job with tags. Press Enter or comma to add. Useful for filtering and retention policies." />
+              <TagInput value={form.tags} onChange={tags => setForm({...form, tags})} suggestions={allTags} placeholder="critical, daily, production" />
+            </div>
+            <div className="col-span-2 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setForm({...form, encrypt: !form.encrypt})}
+                className={`flex items-center gap-2 px-4 py-2 rounded border text-sm font-bold tracking-wider uppercase transition-all ${form.encrypt ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : 'bg-vm-surface2 border-vm-border text-vm-text-dim hover:border-vm-accent'}`}
+              >
+                <Lock className="w-4 h-4" />
+                {form.encrypt ? 'Encryption ON' : 'Encrypt backup'}
+              </button>
+              <span className="font-mono text-[10px] text-vm-text-dim">Encrypts backup files using age (AES-256). Requires AGE_PUBLIC_KEY in .env.</span>
             </div>
           </div>
           <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Save</button>
@@ -91,7 +113,7 @@ export default function JobsPage() {
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Type</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Name</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Schedule</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Domain</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Project</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Status</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal"></th>
             </tr>
@@ -105,10 +127,24 @@ export default function JobsPage() {
                     {j.backup_type}
                   </div>
                 </td>
-                <td className="px-4 py-3 text-sm font-semibold text-vm-text-bright">{j.name}</td>
+                <td className="px-4 py-3">
+                  <div className="text-sm font-semibold text-vm-text-bright">{j.name}</div>
+                  {j.tags?.length > 0 && (
+                    <div className="flex gap-1 mt-1">
+                      {j.tags.map((t: string) => (
+                        <span key={t} className="font-mono text-[9px] px-1.5 py-0.5 rounded-sm border border-vm-accent/30 bg-vm-accent/[0.06] text-vm-accent uppercase tracking-wider">{t}</span>
+                      ))}
+                    </div>
+                  )}
+                </td>
                 <td className="px-4 py-3 font-mono text-xs text-vm-text-dim"><Clock className="w-3 h-3 inline mr-1" />{j.schedule_cron}</td>
                 <td className="px-4 py-3 font-mono text-xs text-vm-accent">{j.domain || '—'}</td>
-                <td className="px-4 py-3"><Badge status={j.is_active ? 'success' : 'cancelled'} label={j.is_active ? 'ACTIVE' : 'INACTIVE'} /></td>
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-1.5">
+                    <Badge status={j.is_active ? 'success' : 'cancelled'} label={j.is_active ? 'ACTIVE' : 'INACTIVE'} />
+                    {j.encrypt && <Lock className="w-3 h-3 text-vm-accent" />}
+                  </div>
+                </td>
                 <td className="px-4 py-3">
                   <div className="flex gap-2">
                     <button onClick={() => handleTrigger(j.id)} className="flex items-center gap-1 px-3 py-1.5 bg-vm-accent text-vm-bg rounded text-xs font-bold tracking-wider uppercase"><Play className="w-3 h-3" /> Run</button>

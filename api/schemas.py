@@ -278,8 +278,10 @@ class UserOut(BaseModel):
     id: uuid.UUID
     username: str
     email_addresses: list[str] | None = []
+    role: str | None = None
     is_active: bool
     is_admin: bool
+    totp_enabled: bool = False
     api_key_prefix: str | None = None
     created_at: datetime
     updated_at: datetime | None = None

@@ -6,6 +6,8 @@ from api.models.backup_run import BackupRun
 from api.models.backup_artifact import BackupArtifact
 from api.models.notification_channel import NotificationChannel
 from api.models.user import User
+from api.models.audit_log import AuditLog
+from api.models.webhook import Webhook
 
 __all__ = [
     "Server",
@@ -16,4 +18,6 @@ __all__ = [
     "BackupArtifact",
     "NotificationChannel",
     "User",
+    "AuditLog",
+    "Webhook",
 ]
