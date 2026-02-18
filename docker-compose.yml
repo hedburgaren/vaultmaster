@@ -1,0 +1,113 @@
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vaultmaster-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8100:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./api:/app/api
+      - ./migrations:/app/migrations
+      - /mnt/backup:/mnt/backup
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ssh-keys:/app/.ssh:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vaultmaster
+
+  db:
+    image: postgres:16-alpine
+    container_name: vaultmaster-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vaultmaster}
+      POSTGRES_USER: ${POSTGRES_USER:-vaultmaster}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vaultmaster}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - vaultmaster
+
+  redis:
+    image: redis:7-alpine
+    container_name: vaultmaster-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - vaultmaster
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vaultmaster-worker
+    restart: unless-stopped
+    command: celery -A api.tasks.celery_app worker -l info -c 4 -Q backup,rotation,notification
+    env_file:
+      - .env
+    volumes:
+      - ./api:/app/api
+      - /mnt/backup:/mnt/backup
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ssh-keys:/app/.ssh:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vaultmaster
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vaultmaster-beat
+    restart: unless-stopped
+    command: celery -A api.tasks.celery_app beat -l info --schedule /tmp/celerybeat-schedule
+    env_file:
+      - .env
+    volumes:
+      - ./api:/app/api
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vaultmaster
+
+volumes:
+  pgdata:
+  redisdata:
+  ssh-keys:
+
+networks:
+  vaultmaster:
+    driver: bridge
