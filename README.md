@@ -72,8 +72,12 @@ npx next start --port 3100
 |---|---|
 | `GET /api/v1/auth/setup-status` | Check if initial setup is needed |
 | `POST /api/v1/auth/setup` | Create first admin (only when no users exist) |
-| `POST /api/v1/auth/login` | JWT authentication |
+| `POST /api/v1/auth/login` | JWT authentication (rate limited: 5/min) |
 | `GET /api/v1/auth/me` | Current user info |
+| `PUT /api/v1/auth/profile` | Update email addresses |
+| `POST /api/v1/auth/change-password` | Change password |
+| `POST /api/v1/auth/api-key` | Generate API key (shown once) |
+| `DELETE /api/v1/auth/api-key` | Revoke API key |
 | `GET /api/v1/dashboard` | Aggregated overview |
 | `/api/v1/servers` | CRUD + test + file browser |
 | `/api/v1/jobs` | CRUD + trigger + schedule preview |
@@ -89,6 +93,31 @@ Full interactive API docs available at `/api/docs` (Swagger) and `/api/redoc`.
 ## First Login
 
 On first launch, navigate to the UI. If no admin account exists, you'll be automatically redirected to `/setup` where you can create your admin account. No default credentials are shipped with the application.
+
+## API Keys & External Integrations
+
+VaultMaster supports API key authentication for headless/external use:
+
+1. Go to **Settings → Profile & API → API Key**
+2. Click **Generate API Key**
+3. Copy the key (it's only shown once)
+4. Pass it as `X-API-Key` header in your requests
+
+```bash
+curl -H "X-API-Key: vm_your_key_here" https://your-vaultmaster/api/v1/jobs
+```
+
+See **[n8n Integration Guide](docs/n8n-integration.md)** for detailed workflow examples.
+
+## Security
+
+- **Rate limiting** — Login: 5 req/min, API: 120 req/min per IP
+- **Security headers** — HSTS, X-Frame-Options DENY, X-Content-Type-Options, Referrer-Policy, Permissions-Policy
+- **API key hashing** — Keys are SHA-256 hashed before storage; raw keys are never persisted
+- **Configurable CORS** — Set `ALLOWED_ORIGINS` in `.env` to restrict cross-origin access
+- **bcrypt passwords** — All passwords hashed with bcrypt (cost factor 12)
+- **JWT tokens** — Short-lived (24h default), HS256 signed with your `SECRET_KEY`
+- **No default credentials** — First-run setup wizard, no hardcoded accounts
 
 ## Environment Variables
 

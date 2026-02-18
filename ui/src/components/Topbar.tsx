@@ -21,7 +21,7 @@ export default function Topbar() {
           <span className="text-vm-success text-sm">ONLINE</span>
         </div>
         <button onClick={logout} className="font-mono text-xs text-vm-text-dim hover:text-vm-danger transition-colors">
-          Logga ut
+          Log out
         </button>
       </div>
     </header>

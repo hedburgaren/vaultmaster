@@ -277,11 +277,29 @@ class SetupStatus(BaseModel):
 class UserOut(BaseModel):
     id: uuid.UUID
     username: str
+    email_addresses: list[str] | None = []
     is_active: bool
     is_admin: bool
+    api_key_prefix: str | None = None
     created_at: datetime
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+
+class ProfileUpdate(BaseModel):
+    email_addresses: list[str] | None = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ApiKeyOut(BaseModel):
+    api_key: str
+    prefix: str
+    message: str = "Store this key securely — it will not be shown again."
 
 
 # ── Dashboard ──

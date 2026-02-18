@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -25,6 +27,18 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
+def generate_api_key() -> tuple[str, str, str]:
+    """Generate an API key. Returns (raw_key, key_hash, key_prefix)."""
+    raw_key = "vm_" + secrets.token_urlsafe(48)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:11] + "…"
+    return raw_key, key_hash, key_prefix
+
+
+def hash_api_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode()).hexdigest()
+
+
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
@@ -37,9 +51,10 @@ async def get_current_user(
     api_key: str | None = Security(api_key_header),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    # Try API key first
+    # Try API key first (compare by SHA-256 hash)
     if api_key:
-        result = await db.execute(select(User).where(User.api_key == api_key, User.is_active == True))
+        key_hash = hash_api_key(api_key)
+        result = await db.execute(select(User).where(User.api_key_hash == key_hash, User.is_active == True))
         user = result.scalar_one_or_none()
         if user:
             return user

@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 1440
     algorithm: str = "HS256"
 
+    # CORS
+    allowed_origins: str = ""  # comma-separated, e.g. "https://example.com,http://localhost:3100"
+
     # Encryption
     age_public_key: str = ""
 
