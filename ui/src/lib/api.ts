@@ -131,5 +131,21 @@ export const changePassword = (currentPassword: string, newPassword: string) =>
 export const generateApiKey = () => apiFetch('/v1/auth/api-key', { method: 'POST' });
 export const revokeApiKey = () => apiFetch('/v1/auth/api-key', { method: 'DELETE' });
 
+// Audit
+export const getAuditLogs = (params?: string) => apiFetch(`/v1/audit${params ? '?' + params : ''}`);
+
+// Webhooks
+export const getWebhooks = () => apiFetch('/v1/webhooks');
+export const createWebhook = (data: any) => apiFetch('/v1/webhooks', { method: 'POST', body: JSON.stringify(data) });
+export const updateWebhook = (id: string, data: any) => apiFetch(`/v1/webhooks/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+export const deleteWebhook = (id: string) => apiFetch(`/v1/webhooks/${id}`, { method: 'DELETE' });
+export const testWebhook = (id: string) => apiFetch(`/v1/webhooks/${id}/test`, { method: 'POST' });
+
+// Users (admin)
+export const getUsers = () => apiFetch('/v1/users');
+export const createUser = (data: any) => apiFetch('/v1/users', { method: 'POST', body: JSON.stringify(data) });
+export const updateUser = (id: string, data: any) => apiFetch(`/v1/users/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+export const deleteUser = (id: string) => apiFetch(`/v1/users/${id}`, { method: 'DELETE' });
+
 // Health
 export const getHealth = () => fetch(`${API_BASE}/health`).then(r => r.json());

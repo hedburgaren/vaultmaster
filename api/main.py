@@ -74,7 +74,7 @@ app.add_middleware(
 )
 
 # Register routers
-from api.routers import auth, servers, jobs, runs, artifacts, storage, retention, notifications, dashboard
+from api.routers import auth, servers, jobs, runs, artifacts, storage, retention, notifications, dashboard, audit, webhooks, users, metrics
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(servers.router, prefix="/api/v1")
@@ -85,6 +85,10 @@ app.include_router(storage.router, prefix="/api/v1")
 app.include_router(retention.router, prefix="/api/v1")
 app.include_router(notifications.router, prefix="/api/v1")
 app.include_router(dashboard.router, prefix="/api/v1")
+app.include_router(audit.router, prefix="/api/v1")
+app.include_router(webhooks.router, prefix="/api/v1")
+app.include_router(users.router, prefix="/api/v1")
+app.include_router(metrics.router, prefix="/api")
 
 
 @app.get("/api/health")

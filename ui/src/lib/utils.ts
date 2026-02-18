@@ -8,7 +8,7 @@ export function formatBytes(bytes: number | null | undefined): string {
 
 export function formatDate(date: string | null | undefined): string {
   if (!date) return '—';
-  return new Date(date).toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' });
+  return new Date(date).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' });
 }
 
 export function formatRelative(date: string | null | undefined): string {
@@ -16,10 +16,10 @@ export function formatRelative(date: string | null | undefined): string {
   const now = Date.now();
   const d = new Date(date).getTime();
   const diff = now - d;
-  if (diff < 60000) return 'Just nu';
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m sedan`;
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h sedan`;
-  return `${Math.floor(diff / 86400000)}d sedan`;
+  if (diff < 60000) return 'Just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return `${Math.floor(diff / 86400000)}d ago`;
 }
 
 export function formatCountdown(seconds: number): string {

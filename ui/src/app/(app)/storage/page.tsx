@@ -3,20 +3,58 @@
 import { useEffect, useState } from 'react';
 import { getStorageDestinations, createStorageDestination, deleteStorageDestination, testStorage } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
-import { Plus, Trash2, TestTube, Database, HardDrive, Cloud } from 'lucide-react';
+import FormLabel from '@/components/FormLabel';
+import CapacityInput from '@/components/CapacityInput';
+import { Plus, Trash2, TestTube, Database, HardDrive, Cloud, Globe, Server, Eye, EyeOff } from 'lucide-react';
+
+const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
+
+const BACKEND_LABELS: Record<string, string> = { local: 'Local Disk', s3: 'S3 / DO Spaces', sftp: 'SFTP Server', b2: 'Backblaze B2', gdrive: 'Google Drive', onedrive: 'OneDrive' };
 
 export default function StoragePage() {
   const [dests, setDests] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', backend: 'local', config: '{}', capacity_bytes: '' });
+  const [backend, setBackend] = useState('local');
+  const [name, setName] = useState('');
+  const [capacityBytes, setCapacityBytes] = useState<number | null>(null);
+  const [showSecret, setShowSecret] = useState(false);
+
+  // Per-backend config fields
+  const [localPath, setLocalPath] = useState('/mnt/backups');
+  const [s3Endpoint, setS3Endpoint] = useState('');
+  const [s3Bucket, setS3Bucket] = useState('');
+  const [s3Region, setS3Region] = useState('us-east-1');
+  const [s3AccessKey, setS3AccessKey] = useState('');
+  const [s3SecretKey, setS3SecretKey] = useState('');
+  const [sftpHost, setSftpHost] = useState('');
+  const [sftpPort, setSftpPort] = useState('22');
+  const [sftpUser, setSftpUser] = useState('');
+  const [sftpPassword, setSftpPassword] = useState('');
+  const [sftpPath, setSftpPath] = useState('/backups');
+  const [b2KeyId, setB2KeyId] = useState('');
+  const [b2AppKey, setB2AppKey] = useState('');
+  const [b2Bucket, setB2Bucket] = useState('');
+
   const [testResults, setTestResults] = useState<Record<string, any>>({});
 
   const load = () => getStorageDestinations().then(setDests).catch(() => {});
   useEffect(() => { load(); }, []);
 
+  const buildConfig = (): Record<string, any> => {
+    switch (backend) {
+      case 'local': return { path: localPath };
+      case 's3': return { endpoint: s3Endpoint, bucket: s3Bucket, region: s3Region, access_key: s3AccessKey, secret_key: s3SecretKey };
+      case 'sftp': return { host: sftpHost, port: parseInt(sftpPort), user: sftpUser, password: sftpPassword, path: sftpPath };
+      case 'b2': return { key_id: b2KeyId, application_key: b2AppKey, bucket: b2Bucket };
+      default: return {};
+    }
+  };
+
   const handleCreate = async () => {
-    await createStorageDestination({ ...form, config: JSON.parse(form.config || '{}'), capacity_bytes: form.capacity_bytes ? Number(form.capacity_bytes) : null });
-    setShowForm(false); load();
+    await createStorageDestination({ name, backend, config: buildConfig(), capacity_bytes: capacityBytes });
+    setShowForm(false);
+    setName(''); setBackend('local'); setCapacityBytes(null);
+    load();
   };
 
   const handleTest = async (id: string) => {
@@ -24,7 +62,23 @@ export default function StoragePage() {
     setTestResults((p: any) => ({ ...p, [id]: res }));
   };
 
-  const backendIcon = (b: string) => b === 'local' ? <HardDrive className="w-5 h-5" /> : <Cloud className="w-5 h-5" />;
+  const backendIcon = (b: string) => {
+    switch (b) {
+      case 'local': return <HardDrive className="w-5 h-5" />;
+      case 'sftp': return <Server className="w-5 h-5" />;
+      case 'gdrive': case 'onedrive': return <Globe className="w-5 h-5" />;
+      default: return <Cloud className="w-5 h-5" />;
+    }
+  };
+
+  const SecretInput = ({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder: string }) => (
+    <div className="relative">
+      <input type={showSecret ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)} className={INPUT + ' pr-10'} placeholder={placeholder} />
+      <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
+        {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+      </button>
+    </div>
+  );
 
   return (
     <div>
@@ -40,30 +94,108 @@ export default function StoragePage() {
 
       {showForm && (
         <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
+          <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">New Storage Destination</h3>
+
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Name</label>
-              <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
+              <FormLabel label="Name" tooltip="A friendly name for this storage destination." />
+              <input value={name} onChange={e => setName(e.target.value)} className={INPUT} placeholder="Primary backup disk" />
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Backend</label>
-              <select value={form.backend} onChange={e => setForm({...form, backend: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent">
-                <option value="local">Local</option>
-                <option value="s3">S3 / DO Spaces</option>
-                <option value="gdrive">Google Drive</option>
-                <option value="sftp">SFTP</option>
-                <option value="b2">Backblaze B2</option>
+              <FormLabel label="Backend" tooltip="The type of storage to use. Each backend has its own configuration." />
+              <select value={backend} onChange={e => setBackend(e.target.value)} className={INPUT}>
+                <option value="local">💾 Local Disk</option>
+                <option value="s3">☁️ S3 / DO Spaces</option>
+                <option value="sftp">🖥️ SFTP Server</option>
+                <option value="b2">🔷 Backblaze B2</option>
               </select>
             </div>
-            <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Config (JSON)</label>
-              <input value={form.config} onChange={e => setForm({...form, config: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder='{"path": "/mnt/backup"}' />
-            </div>
-            <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Capacity (bytes)</label>
-              <input value={form.capacity_bytes} onChange={e => setForm({...form, capacity_bytes: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="2000000000000" />
-            </div>
           </div>
+
+          {/* Per-backend config fields */}
+          <div className="bg-vm-surface2 border border-vm-border rounded p-4 mb-4">
+            <div className="font-mono text-[10px] text-vm-accent tracking-[2px] uppercase mb-3">// {BACKEND_LABELS[backend] || backend} Configuration</div>
+
+            {backend === 'local' && (
+              <div>
+                <FormLabel label="Path" tooltip="Absolute path on the VaultMaster host where backups will be stored." />
+                <input value={localPath} onChange={e => setLocalPath(e.target.value)} className={INPUT} placeholder="/mnt/backups" />
+              </div>
+            )}
+
+            {backend === 's3' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <FormLabel label="Endpoint" tooltip="S3-compatible endpoint URL. Leave empty for AWS S3. For DigitalOcean Spaces: https://ams3.digitaloceanspaces.com" />
+                  <input value={s3Endpoint} onChange={e => setS3Endpoint(e.target.value)} className={INPUT} placeholder="https://ams3.digitaloceanspaces.com" />
+                </div>
+                <div>
+                  <FormLabel label="Bucket" tooltip="The S3 bucket name to store backups in." />
+                  <input value={s3Bucket} onChange={e => setS3Bucket(e.target.value)} className={INPUT} placeholder="my-backups" />
+                </div>
+                <div>
+                  <FormLabel label="Region" tooltip="AWS region or equivalent for your S3 provider." />
+                  <input value={s3Region} onChange={e => setS3Region(e.target.value)} className={INPUT} placeholder="us-east-1" />
+                </div>
+                <div>
+                  <FormLabel label="Access Key" tooltip="Your S3 access key ID." />
+                  <input value={s3AccessKey} onChange={e => setS3AccessKey(e.target.value)} className={INPUT} placeholder="AKIAIOSFODNN7EXAMPLE" />
+                </div>
+                <div className="col-span-2">
+                  <FormLabel label="Secret Key" tooltip="Your S3 secret access key. Will be encrypted before storage." />
+                  <SecretInput value={s3SecretKey} onChange={setS3SecretKey} placeholder="Enter secret key" />
+                </div>
+              </div>
+            )}
+
+            {backend === 'sftp' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <FormLabel label="Host" tooltip="Hostname or IP of the SFTP server." />
+                  <input value={sftpHost} onChange={e => setSftpHost(e.target.value)} className={INPUT} placeholder="backup.example.com" />
+                </div>
+                <div>
+                  <FormLabel label="Port" tooltip="SFTP port. Default is 22." />
+                  <input type="number" value={sftpPort} onChange={e => setSftpPort(e.target.value)} className={INPUT} />
+                </div>
+                <div>
+                  <FormLabel label="Username" tooltip="SFTP username for authentication." />
+                  <input value={sftpUser} onChange={e => setSftpUser(e.target.value)} className={INPUT} placeholder="backup-user" />
+                </div>
+                <div>
+                  <FormLabel label="Password" tooltip="SFTP password. Will be encrypted before storage." />
+                  <SecretInput value={sftpPassword} onChange={setSftpPassword} placeholder="Enter password" />
+                </div>
+                <div className="col-span-2">
+                  <FormLabel label="Remote Path" tooltip="Directory on the SFTP server where backups will be stored." />
+                  <input value={sftpPath} onChange={e => setSftpPath(e.target.value)} className={INPUT} placeholder="/backups" />
+                </div>
+              </div>
+            )}
+
+            {backend === 'b2' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <FormLabel label="Key ID" tooltip="Backblaze B2 application key ID." />
+                  <input value={b2KeyId} onChange={e => setB2KeyId(e.target.value)} className={INPUT} placeholder="0012345678abcdef0000000001" />
+                </div>
+                <div>
+                  <FormLabel label="Application Key" tooltip="Backblaze B2 application key. Will be encrypted before storage." />
+                  <SecretInput value={b2AppKey} onChange={setB2AppKey} placeholder="Enter application key" />
+                </div>
+                <div className="col-span-2">
+                  <FormLabel label="Bucket" tooltip="B2 bucket name to store backups in." />
+                  <input value={b2Bucket} onChange={e => setB2Bucket(e.target.value)} className={INPUT} placeholder="my-backups" />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="mb-4">
+            <FormLabel label="Capacity" tooltip="Total storage capacity. Used for usage monitoring and alerts." />
+            <CapacityInput value={capacityBytes} onChange={setCapacityBytes} />
+          </div>
+
           <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Save</button>
         </div>
       )}
@@ -77,7 +209,7 @@ export default function StoragePage() {
                 <div className="w-9 h-9 rounded bg-vm-accent/10 flex items-center justify-center text-vm-accent">{backendIcon(d.backend)}</div>
                 <div>
                   <div className="font-semibold text-vm-text-bright">{d.name}</div>
-                  <div className="font-mono text-[11px] text-vm-text-dim">{d.backend}</div>
+                  <div className="font-mono text-[11px] text-vm-text-dim">{BACKEND_LABELS[d.backend] || d.backend}</div>
                 </div>
               </div>
               {pct !== null && (
@@ -100,7 +232,7 @@ export default function StoragePage() {
                 <button onClick={() => handleTest(d.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]">
                   <TestTube className="w-3 h-3" /> Test
                 </button>
-                <button onClick={async () => { if (confirm('Delete?')) { await deleteStorageDestination(d.id); load(); }}} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
+                <button onClick={async () => { if (confirm('Delete this storage destination?')) { await deleteStorageDestination(d.id); load(); }}} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>

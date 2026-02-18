@@ -1,25 +1,40 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { getServers, createServer, deleteServer, testServer } from '@/lib/api';
 import { formatRelative } from '@/lib/utils';
 import Badge from '@/components/Badge';
-import { Plus, Wifi, WifiOff, Trash2, TestTube, Server } from 'lucide-react';
+import FormLabel from '@/components/FormLabel';
+import TagInput from '@/components/TagInput';
+import { Plus, Trash2, TestTube, Server, Eye, EyeOff } from 'lucide-react';
+
+const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
 export default function ServersPage() {
   const [servers, setServers] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: 'root', ssh_key_path: '', tags: '' });
+  const [form, setForm] = useState({ name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: 'root', ssh_key_path: '', ssh_password: '', api_token: '', tags: [] as string[] });
+  const [showSecret, setShowSecret] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, any>>({});
 
   const load = () => getServers().then(setServers).catch(() => {});
   useEffect(() => { load(); }, []);
 
+  const allTags = useMemo(() => {
+    const set = new Set<string>();
+    servers.forEach(s => s.tags?.forEach((t: string) => set.add(t)));
+    return Array.from(set).sort();
+  }, [servers]);
+
   const handleCreate = async () => {
-    await createServer({ ...form, port: Number(form.port), tags: form.tags ? form.tags.split(',').map(t => t.trim()) : [] });
+    const payload: any = { name: form.name, host: form.host, port: Number(form.port), auth_type: form.auth_type, provider: form.provider, ssh_user: form.ssh_user, tags: form.tags };
+    if (form.auth_type === 'ssh_key') payload.ssh_key_path = form.ssh_key_path;
+    if (form.auth_type === 'ssh_password') payload.meta = { ssh_password: form.ssh_password };
+    if (form.auth_type === 'api') payload.api_token = form.api_token;
+    await createServer(payload);
     setShowForm(false);
-    setForm({ name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: 'root', ssh_key_path: '', tags: '' });
+    setForm({ name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: 'root', ssh_key_path: '', ssh_password: '', api_token: '', tags: [] });
     load();
   };
 
@@ -55,37 +70,86 @@ export default function ServersPage() {
           <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">New Server</h3>
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Name</label>
-              <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="my-server" />
+              <FormLabel label="Name" tooltip="A friendly name to identify this server in VaultMaster." />
+              <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className={INPUT} placeholder="my-server" />
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Host</label>
-              <input value={form.host} onChange={e => setForm({...form, host: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="192.168.1.42" />
+              <FormLabel label="Host" tooltip="IP address or hostname of the server. Must be reachable from VaultMaster." />
+              <input value={form.host} onChange={e => setForm({...form, host: e.target.value})} className={INPUT} placeholder="192.168.1.42" />
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">SSH User</label>
-              <input value={form.ssh_user} onChange={e => setForm({...form, ssh_user: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="root" />
+              <FormLabel label="SSH User" tooltip="The SSH username used to connect. Typically 'root' or a dedicated backup user." />
+              <input value={form.ssh_user} onChange={e => setForm({...form, ssh_user: e.target.value})} className={INPUT} placeholder="root" />
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Auth Type</label>
-              <select value={form.auth_type} onChange={e => setForm({...form, auth_type: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent">
+              <FormLabel label="SSH Port" tooltip="SSH port number. Default is 22." />
+              <input type="number" value={form.port} onChange={e => setForm({...form, port: Number(e.target.value)})} className={INPUT} />
+            </div>
+            <div>
+              <FormLabel label="Auth Type" tooltip="How VaultMaster authenticates to this server. SSH Key is recommended for security." />
+              <select value={form.auth_type} onChange={e => setForm({...form, auth_type: e.target.value})} className={INPUT}>
                 <option value="ssh_key">SSH Key</option>
                 <option value="ssh_password">SSH Password</option>
-                <option value="api">API</option>
-                <option value="local">Local</option>
+                <option value="api">API Token</option>
+                <option value="local">Local (no SSH)</option>
               </select>
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Provider</label>
-              <select value={form.provider} onChange={e => setForm({...form, provider: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent">
-                <option value="custom">Custom</option>
+              <FormLabel label="Provider" tooltip="Cloud provider for provider-specific features like snapshots." />
+              <select value={form.provider} onChange={e => setForm({...form, provider: e.target.value})} className={INPUT}>
+                <option value="custom">Custom / Bare Metal</option>
                 <option value="digitalocean">DigitalOcean</option>
                 <option value="hetzner">Hetzner</option>
+                <option value="linode">Linode</option>
+                <option value="aws">AWS</option>
               </select>
             </div>
-            <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Tags (comma-separated)</label>
-              <input value={form.tags} onChange={e => setForm({...form, tags: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="docker, postgresql, odoo" />
+
+            {/* Dynamic auth fields */}
+            {form.auth_type === 'ssh_key' && (
+              <div className="col-span-2">
+                <FormLabel label="SSH Key Path" tooltip="Absolute path to the private SSH key on the VaultMaster host. Example: /root/.ssh/id_ed25519" />
+                <input value={form.ssh_key_path} onChange={e => setForm({...form, ssh_key_path: e.target.value})} className={INPUT} placeholder="/root/.ssh/id_ed25519" />
+              </div>
+            )}
+            {form.auth_type === 'ssh_password' && (
+              <div className="col-span-2">
+                <FormLabel label="SSH Password" tooltip="Password for SSH authentication. Will be encrypted before storage." />
+                <div className="relative">
+                  <input
+                    type={showSecret ? 'text' : 'password'}
+                    value={form.ssh_password}
+                    onChange={e => setForm({...form, ssh_password: e.target.value})}
+                    className={INPUT + ' pr-10'}
+                    placeholder="Enter SSH password"
+                  />
+                  <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
+                    {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            )}
+            {form.auth_type === 'api' && (
+              <div className="col-span-2">
+                <FormLabel label="API Token" tooltip="Provider API token for cloud operations (snapshots, etc). Will be encrypted before storage." />
+                <div className="relative">
+                  <input
+                    type={showSecret ? 'text' : 'password'}
+                    value={form.api_token}
+                    onChange={e => setForm({...form, api_token: e.target.value})}
+                    className={INPUT + ' pr-10'}
+                    placeholder="Enter API token"
+                  />
+                  <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
+                    {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="col-span-2">
+              <FormLabel label="Tags" tooltip="Organize servers with tags. Press Enter or comma to add. Click existing tags to reuse them." />
+              <TagInput value={form.tags} onChange={tags => setForm({...form, tags})} suggestions={allTags} placeholder="docker, postgresql, odoo" />
             </div>
           </div>
           <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Save</button>
