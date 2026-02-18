@@ -14,9 +14,9 @@ export default function Tooltip({ text }: { text: string }) {
         onMouseLeave={() => setShow(false)}
       />
       {show && (
-        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-vm-surface2 border border-vm-border-bright rounded shadow-lg text-xs text-vm-text font-normal normal-case tracking-normal whitespace-normal w-56 leading-relaxed">
+        <div className="absolute z-[9999] bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-[#1a2233] border border-vm-border-bright rounded shadow-2xl text-xs text-vm-text font-normal normal-case tracking-normal whitespace-normal w-56 leading-relaxed pointer-events-none">
           {text}
-          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px w-2 h-2 bg-vm-surface2 border-r border-b border-vm-border-bright rotate-45" />
+          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px w-2 h-2 bg-[#1a2233] border-r border-b border-vm-border-bright rotate-45" />
         </div>
       )}
     </span>

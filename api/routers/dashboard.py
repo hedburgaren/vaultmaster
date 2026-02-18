@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func
+from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from croniter import croniter
 
@@ -11,6 +11,7 @@ from api.models.server import Server
 from api.models.backup_job import BackupJob
 from api.models.backup_run import BackupRun
 from api.models.storage_destination import StorageDestination
+from api.models.backup_artifact import BackupArtifact
 from api.schemas import DashboardOut
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(get_current_user)])
@@ -103,6 +104,56 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         for r in error_result.scalars().all()
     ]
 
+    # Server health (per-server status)
+    server_health = []
+    for s in servers:
+        online = bool(s.is_active and s.last_seen and s.last_seen > now - timedelta(minutes=10))
+        last_seen_ago = None
+        if s.last_seen:
+            last_seen_ago = round((now - s.last_seen.replace(tzinfo=timezone.utc) if s.last_seen.tzinfo is None else now - s.last_seen).total_seconds() / 3600, 1)
+        server_health.append({
+            "id": str(s.id),
+            "name": s.name,
+            "host": s.host,
+            "online": online,
+            "last_seen_hours_ago": last_seen_ago,
+            "tags": s.tags or [],
+        })
+
+    # Artifacts totals
+    artifact_count = (await db.execute(select(func.count()).select_from(BackupArtifact))).scalar() or 0
+    artifact_bytes = (await db.execute(select(func.sum(BackupArtifact.size_bytes)))).scalar() or 0
+
+    # Last successful backup
+    last_ok_result = await db.execute(
+        select(BackupRun)
+        .where(BackupRun.status == "success")
+        .order_by(desc(BackupRun.finished_at))
+        .limit(1)
+    )
+    last_ok = last_ok_result.scalar_one_or_none()
+    last_ok_iso = None
+    hours_since = None
+    if last_ok and last_ok.finished_at:
+        finished = last_ok.finished_at.replace(tzinfo=timezone.utc) if last_ok.finished_at.tzinfo is None else last_ok.finished_at
+        last_ok_iso = finished.isoformat()
+        hours_since = round((now - finished).total_seconds() / 3600, 1)
+
+    # Storage warnings (>70% used)
+    storage_warnings = []
+    for s in storage_dests:
+        if s.capacity_bytes and s.used_bytes:
+            pct = round(s.used_bytes / s.capacity_bytes * 100, 1)
+            if pct > 70:
+                level = "critical" if pct > 90 else "warning"
+                storage_warnings.append({
+                    "id": str(s.id),
+                    "name": s.name,
+                    "backend": s.backend,
+                    "percent_used": pct,
+                    "level": level,
+                })
+
     return DashboardOut(
         servers_online=servers_online,
         servers_total=len(servers),
@@ -116,4 +167,10 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         next_runs=next_runs[:10],
         active_runs=active_runs,
         recent_errors=recent_errors,
+        server_health=server_health,
+        total_artifacts=artifact_count,
+        total_artifact_bytes=artifact_bytes,
+        last_successful_backup=last_ok_iso,
+        hours_since_last_backup=hours_since,
+        storage_warnings=storage_warnings,
     )
