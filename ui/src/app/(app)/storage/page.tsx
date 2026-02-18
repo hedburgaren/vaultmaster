@@ -30,11 +30,11 @@ export default function StoragePage() {
     <div>
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Lagring</h1>
-          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// STORAGE DESTINATIONS · {dests.length} ST</div>
+          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Storage</h1>
+          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// STORAGE DESTINATIONS · {dests.length} TOTAL</div>
         </div>
         <button onClick={() => setShowForm(!showForm)} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
-          <Plus className="w-4 h-4" /> Lägg till
+          <Plus className="w-4 h-4" /> Add New
         </button>
       </div>
 
@@ -42,13 +42,13 @@ export default function StoragePage() {
         <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Namn</label>
+              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Name</label>
               <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
             </div>
             <div>
               <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Backend</label>
               <select value={form.backend} onChange={e => setForm({...form, backend: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent">
-                <option value="local">Lokal</option>
+                <option value="local">Local</option>
                 <option value="s3">S3 / DO Spaces</option>
                 <option value="gdrive">Google Drive</option>
                 <option value="sftp">SFTP</option>
@@ -60,11 +60,11 @@ export default function StoragePage() {
               <input value={form.config} onChange={e => setForm({...form, config: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder='{"path": "/mnt/backup"}' />
             </div>
             <div>
-              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Kapacitet (bytes)</label>
+              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">Capacity (bytes)</label>
               <input value={form.capacity_bytes} onChange={e => setForm({...form, capacity_bytes: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="2000000000000" />
             </div>
           </div>
-          <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Spara</button>
+          <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Save</button>
         </div>
       )}
 
@@ -83,7 +83,7 @@ export default function StoragePage() {
               {pct !== null && (
                 <div className="mb-3">
                   <div className="flex justify-between font-mono text-[11px] text-vm-text-dim mb-1.5">
-                    <span>Använt</span>
+                    <span>Used</span>
                     <strong className="text-vm-text">{formatBytes(d.used_bytes)} / {formatBytes(d.capacity_bytes)}</strong>
                   </div>
                   <div className="h-1.5 bg-vm-surface3 rounded overflow-hidden">
@@ -98,9 +98,9 @@ export default function StoragePage() {
               )}
               <div className="flex gap-2">
                 <button onClick={() => handleTest(d.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]">
-                  <TestTube className="w-3 h-3" /> Testa
+                  <TestTube className="w-3 h-3" /> Test
                 </button>
-                <button onClick={async () => { if (confirm('Ta bort?')) { await deleteStorageDestination(d.id); load(); }}} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
+                <button onClick={async () => { if (confirm('Delete?')) { await deleteStorageDestination(d.id); load(); }}} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>
@@ -110,7 +110,7 @@ export default function StoragePage() {
         {dests.length === 0 && (
           <div className="col-span-3 text-center py-12 text-vm-text-dim font-mono">
             <Database className="w-12 h-12 mx-auto mb-3 opacity-40" />
-            <div className="tracking-[2px]">Inga lagringsplatser konfigurerade</div>
+            <div className="tracking-[2px]">No storage destinations configured</div>
           </div>
         )}
       </div>

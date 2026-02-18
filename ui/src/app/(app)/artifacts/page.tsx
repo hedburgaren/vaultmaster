@@ -21,34 +21,34 @@ export default function ArtifactsPage() {
   useEffect(() => { load(); }, [search, typeFilter]);
 
   const handleRestore = async (id: string) => {
-    if (confirm('Starta återställning?')) {
+    if (confirm('Start restore?')) {
       const res = await restoreArtifact(id);
-      alert(`Återställning köad: ${res.task_id}`);
+      alert(`Restore queued: ${res.task_id}`);
     }
   };
 
   const handleVerify = async (id: string) => {
     const res = await verifyArtifact(id);
-    alert(`Verifiering köad: ${res.task_id}`);
+    alert(`Verification queued: ${res.task_id}`);
   };
 
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Återställning</h1>
-        <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// BACKUP ARTIFACTS · VÄLJ OCH ÅTERSTÄLL</div>
+        <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Restore</h1>
+        <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// BACKUP ARTIFACTS · SEARCH & RESTORE</div>
       </div>
 
       <div className="flex gap-4 mb-6">
         <div className="flex-1 relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-vm-text-dim" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Sök backups..." className="w-full bg-vm-surface border border-vm-border rounded pl-10 pr-4 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search backups..." className="w-full bg-vm-surface border border-vm-border rounded pl-10 pr-4 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
         </div>
         <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} className="bg-vm-surface border border-vm-border rounded px-4 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent">
-          <option value="">Alla typer</option>
+          <option value="">All types</option>
           <option value="postgresql">PostgreSQL</option>
           <option value="docker_volumes">Docker</option>
-          <option value="files">Filer</option>
+          <option value="files">Files</option>
           <option value="do_snapshot">Snapshot</option>
         </select>
       </div>
@@ -67,10 +67,10 @@ export default function ArtifactsPage() {
               <div className="font-code text-sm font-bold text-vm-accent">{formatBytes(a.size_bytes)}</div>
               <div className="flex gap-1.5 mt-2">
                 <button onClick={() => handleRestore(a.id)} className="flex items-center gap-1 px-2.5 py-1 bg-vm-success text-vm-bg rounded text-[10px] font-bold tracking-wider uppercase glow-success">
-                  <RotateCcw className="w-3 h-3" /> Återställ
+                  <RotateCcw className="w-3 h-3" /> Restore
                 </button>
                 <button onClick={() => handleVerify(a.id)} className="flex items-center gap-1 px-2.5 py-1 border border-vm-accent text-vm-accent rounded text-[10px] font-bold tracking-wider uppercase">
-                  <ShieldCheck className="w-3 h-3" /> Verifiera
+                  <ShieldCheck className="w-3 h-3" /> Verify
                 </button>
               </div>
             </div>
@@ -80,7 +80,7 @@ export default function ArtifactsPage() {
       {artifacts.length === 0 && (
         <div className="text-center py-12 text-vm-text-dim font-mono">
           <RotateCcw className="w-12 h-12 mx-auto mb-3 opacity-40" />
-          <div className="tracking-[2px]">Inga backups hittade</div>
+          <div className="tracking-[2px]">No backups found</div>
         </div>
       )}
     </div>

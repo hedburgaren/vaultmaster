@@ -7,13 +7,13 @@ import clsx from 'clsx';
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/servers', label: 'Servrar', icon: Server },
+  { href: '/servers', label: 'Servers', icon: Server },
   { href: '/jobs', label: 'Backup Jobs', icon: Clock },
-  { href: '/runs', label: 'Körningar', icon: Archive },
-  { href: '/artifacts', label: 'Återställning', icon: RotateCcw },
-  { href: '/storage', label: 'Lagring', icon: Database },
-  { href: '/notifications', label: 'Notifikationer', icon: Bell },
-  { href: '/settings', label: 'Inställningar', icon: Settings },
+  { href: '/runs', label: 'Runs', icon: Archive },
+  { href: '/artifacts', label: 'Restore', icon: RotateCcw },
+  { href: '/storage', label: 'Storage', icon: Database },
+  { href: '/notifications', label: 'Notifications', icon: Bell },
+  { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
 export default function Sidebar() {
