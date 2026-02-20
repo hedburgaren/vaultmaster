@@ -120,6 +120,8 @@ async def list_remote_databases(server, db_type: str = "postgresql") -> list[dic
     """List databases on a remote server via SSH.
 
     Uses the server's meta.db_* fields for connection info.
+    For PostgreSQL on localhost, uses 'sudo -u $db_user psql' for peer auth
+    which is the standard approach for native PostgreSQL installs.
     """
     meta = getattr(server, 'meta', None) or {}
     db_host = meta.get('db_host', '127.0.0.1')
@@ -130,23 +132,40 @@ async def list_remote_databases(server, db_type: str = "postgresql") -> list[dic
     try:
         kwargs = _build_connect_kwargs(server)
         async with asyncssh.connect(**kwargs) as conn:
+            sql_query = "SELECT datname, pg_database_size(datname) FROM pg_database WHERE datistemplate = false ORDER BY datname;"
+
             if db_type == 'postgresql':
-                env = f"PGPASSWORD='{db_password}' " if db_password else ""
-                cmd = f"{env}psql -h {db_host} -p {db_port} -U {db_user} -t -A -c \"SELECT datname, pg_database_size(datname) FROM pg_database WHERE datistemplate = false ORDER BY datname;\""
+                is_local = db_host in ('127.0.0.1', 'localhost', '::1', '')
+                if is_local and not db_password:
+                    # Peer auth: switch to the OS user that owns the DB (e.g. postgres, odoo18)
+                    cmd = f"sudo -n -u {db_user} psql -p {db_port} -t -A -c \"{sql_query}\""
+                elif db_password:
+                    # Password auth via PGPASSWORD
+                    cmd = f"PGPASSWORD='{db_password}' psql -h {db_host} -p {db_port} -U {db_user} -w -t -A -c \"{sql_query}\""
+                else:
+                    # No password, remote host — try direct connection
+                    cmd = f"psql -h {db_host} -p {db_port} -U {db_user} -t -A -c \"{sql_query}\""
             elif db_type in ('mysql', 'mariadb'):
                 pw_flag = f"-p'{db_password}'" if db_password else ""
                 cmd = f"mysql -h {db_host} -P {db_port} -u {db_user} {pw_flag} -N -e \"SELECT schema_name, IFNULL(SUM(data_length + index_length), 0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON schema_name = table_schema WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') GROUP BY schema_name ORDER BY schema_name;\""
+                use_sudo = meta.get('use_sudo', False)
+                ssh_user = getattr(server, 'ssh_user', None) or "root"
+                if use_sudo and ssh_user != "root":
+                    cmd = f"sudo -n sh -c '{cmd}'"
             else:
                 return [{"error": f"Unsupported database type: {db_type}"}]
 
-            use_sudo = meta.get('use_sudo', False)
-            ssh_user = getattr(server, 'ssh_user', None) or "root"
-            if use_sudo and ssh_user != "root":
-                cmd = f"sudo -n sh -c '{cmd}'"
-
             result = await conn.run(cmd, check=False, timeout=30)
             if result.exit_status != 0:
-                return [{"error": result.stderr.strip() or "Command failed"}]
+                stderr = result.stderr.strip()
+                # Provide helpful error context
+                if "peer" in stderr.lower() or "ident" in stderr.lower():
+                    stderr += " (Hint: try leaving DB password empty for peer/ident auth)"
+                elif "password authentication failed" in stderr.lower():
+                    stderr += " (Hint: check DB password)"
+                elif "sudo" in stderr.lower():
+                    stderr += " (Hint: SSH user needs passwordless sudo — add to sudoers with NOPASSWD)"
+                return [{"error": stderr or "Command failed"}]
 
             databases = []
             for line in result.stdout.strip().split("\n"):
@@ -247,3 +266,32 @@ async def list_remote_docker(server) -> dict:
     except Exception as e:
         logger.error(f"Failed to list Docker on {getattr(server, 'name', '?')}: {e}")
         return {"containers": [], "volumes": [], "error": str(e)}
+
+
+async def prune_docker_volumes(server) -> dict:
+    """Remove unused Docker volumes on a remote server via SSH."""
+    try:
+        kwargs = _build_connect_kwargs(server)
+        meta = getattr(server, 'meta', None) or {}
+        use_sudo = meta.get('use_sudo', False)
+        ssh_user = getattr(server, 'ssh_user', None) or "root"
+        prefix = "sudo -n " if use_sudo and ssh_user != "root" else ""
+
+        async with asyncssh.connect(**kwargs) as conn:
+            cmd = f'{prefix}docker volume prune -f'
+            result = await conn.run(cmd, check=False, timeout=30)
+            if result.exit_status != 0:
+                return {"success": False, "error": result.stderr.strip() or "Command failed", "removed": []}
+
+            # Parse removed volume names from output
+            removed = []
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip()
+                if line and not line.startswith("Total") and not line.startswith("Deleted"):
+                    removed.append(line)
+
+            return {"success": True, "removed": removed, "error": None, "output": result.stdout.strip()}
+
+    except Exception as e:
+        logger.error(f"Failed to prune Docker volumes on {getattr(server, 'name', '?')}: {e}")
+        return {"success": False, "removed": [], "error": str(e)}

@@ -69,6 +69,7 @@ export const getSSHKeys = () => apiFetch('/v1/servers/ssh-keys');
 export const generateSSHKey = () => apiFetch('/v1/servers/ssh-keys/generate', { method: 'POST' });
 export const getServerDatabases = (id: string, dbType?: string) => apiFetch(`/v1/servers/${id}/databases?db_type=${dbType || 'postgresql'}`);
 export const getServerDocker = (id: string) => apiFetch(`/v1/servers/${id}/docker`);
+export const pruneDockerVolumes = (id: string) => apiFetch(`/v1/servers/${id}/docker/prune-volumes`, { method: 'POST' });
 
 // Jobs
 export const getJobs = (params?: string) => apiFetch(`/v1/jobs${params ? '?' + params : ''}`);
