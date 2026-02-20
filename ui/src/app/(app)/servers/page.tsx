@@ -73,7 +73,9 @@ export default function ServersPage() {
     setFormTesting(true);
     setFormTestResult(null);
     try {
-      const res = await testConnectionPresave({ host: form.host, port: Number(form.port), auth_type: form.auth_type, ssh_user: form.ssh_user || 'root', ssh_key_path: form.ssh_key_path || undefined, ssh_password: form.ssh_password || undefined });
+      const meta: any = { use_sudo: form.use_sudo };
+      if (form.auth_type === 'ssh_password' && form.ssh_password) meta.ssh_password = form.ssh_password;
+      const res = await testConnectionPresave({ host: form.host, port: Number(form.port), auth_type: form.auth_type, ssh_user: form.ssh_user || 'root', ssh_key_path: form.ssh_key_path || undefined, ssh_password: form.ssh_password || undefined, meta });
       setFormTestResult(res);
     } catch (e: any) {
       setFormTestResult({ success: false, message: e.message });
