@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { getAuditLogs } from '@/lib/api';
 import { formatDate } from '@/lib/utils';
 import { Shield, User, Server, Clock, Filter } from 'lucide-react';
+import { useT } from '@/lib/i18n';
 
 const ACTION_COLORS: Record<string, string> = {
   create: 'text-vm-success',
@@ -22,6 +23,7 @@ function actionColor(action: string): string {
 }
 
 export default function AuditPage() {
+  const t = useT();
   const [logs, setLogs] = useState<any[]>([]);
   const [filter, setFilter] = useState('');
 
@@ -38,15 +40,15 @@ export default function AuditPage() {
     <div>
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Audit Log</h1>
-          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// WHO DID WHAT · WHEN · {logs.length} ENTRIES</div>
+          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">{t('audit.title')}</h1>
+          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">{t('audit.subtitle_prefix')} {logs.length} {t('audit.entries')}</div>
         </div>
         <div className="flex items-center gap-2">
           <Filter className="w-4 h-4 text-vm-text-dim" />
           <input
             value={filter}
             onChange={e => setFilter(e.target.value)}
-            placeholder="Filter by action..."
+            placeholder={t('audit.filter_placeholder')}
             className="bg-vm-surface border border-vm-border rounded px-3 py-2 text-vm-text font-mono text-sm outline-none focus:border-vm-accent w-56"
           />
         </div>
@@ -56,12 +58,12 @@ export default function AuditPage() {
         <table className="w-full">
           <thead>
             <tr className="bg-vm-surface2 border-b border-vm-border">
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Time</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">User</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Action</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Resource</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Detail</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">IP</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('audit.time')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('audit.user')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('audit.action')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('audit.resource')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('audit.detail')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('audit.ip')}</th>
             </tr>
           </thead>
           <tbody>
@@ -98,8 +100,8 @@ export default function AuditPage() {
         {logs.length === 0 && (
           <div className="text-center py-12 text-vm-text-dim font-mono">
             <Shield className="w-12 h-12 mx-auto mb-3 opacity-40" />
-            <div className="tracking-[2px]">No audit log entries</div>
-            <div className="text-[11px] mt-1">Actions will be logged here as users interact with VaultMaster.</div>
+            <div className="tracking-[2px]">{t('audit.none')}</div>
+            <div className="text-[11px] mt-1">{t('audit.none_desc')}</div>
           </div>
         )}
       </div>

@@ -86,7 +86,7 @@ async def list_remote_directory(server, path: str = "/") -> list[dict]:
 
 
 async def run_remote_command(server, command: str, timeout: int = 300) -> tuple[int, str, str]:
-    """Execute a command on a remote server via SSH."""
+    """Execute a command on a remote server via SSH. Prepends sudo if use_sudo is set."""
     resolved = _resolve_host(server.host)
     connect_kwargs = {
         "host": resolved,
@@ -97,6 +97,10 @@ async def run_remote_command(server, command: str, timeout: int = 300) -> tuple[
 
     if server.ssh_key_path:
         connect_kwargs["client_keys"] = [server.ssh_key_path]
+
+    use_sudo = getattr(server, 'use_sudo', False) or getattr(server, 'meta', {}).get('use_sudo', False)
+    if use_sudo and (server.ssh_user or "root") != "root":
+        command = f"sudo -n {command}"
 
     async with asyncssh.connect(**connect_kwargs) as conn:
         result = await conn.run(command, check=False, timeout=timeout)

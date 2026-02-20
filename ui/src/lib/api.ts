@@ -65,6 +65,8 @@ export const deleteServer = (id: string) => apiFetch(`/v1/servers/${id}`, { meth
 export const testServer = (id: string) => apiFetch(`/v1/servers/${id}/test`, { method: 'POST' });
 export const testConnectionPresave = (data: any) => apiFetch('/v1/servers/test-connection', { method: 'POST', body: JSON.stringify(data) });
 export const browseServer = (id: string, path: string) => apiFetch(`/v1/servers/${id}/browse?path=${encodeURIComponent(path)}`);
+export const getSSHKeys = () => apiFetch('/v1/servers/ssh-keys');
+export const generateSSHKey = () => apiFetch('/v1/servers/ssh-keys/generate', { method: 'POST' });
 
 // Jobs
 export const getJobs = (params?: string) => apiFetch(`/v1/jobs${params ? '?' + params : ''}`);

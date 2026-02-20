@@ -5,8 +5,10 @@ import { getArtifacts, restoreArtifact, verifyArtifact } from '@/lib/api';
 import { formatBytes, formatDate, formatRelative, backupTypeIcon } from '@/lib/utils';
 import Badge from '@/components/Badge';
 import { RotateCcw, ShieldCheck, Search, Lock, Calendar, Server, Globe, Tag, HardDrive } from 'lucide-react';
+import { useT } from '@/lib/i18n';
 
 export default function ArtifactsPage() {
+  const t = useT();
   const [artifacts, setArtifacts] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
@@ -22,15 +24,15 @@ export default function ArtifactsPage() {
   useEffect(() => { load(); }, [search, typeFilter]);
 
   const handleRestore = async (id: string) => {
-    if (confirm('Start restore from this backup? This will overwrite existing data.')) {
+    if (confirm(t('artifacts.confirm_restore'))) {
       const res = await restoreArtifact(id);
-      alert(`Restore queued: ${res.task_id}`);
+      alert(`${t('artifacts.restore_queued')}: ${res.task_id}`);
     }
   };
 
   const handleVerify = async (id: string) => {
     const res = await verifyArtifact(id);
-    alert(`Verification queued: ${res.task_id}`);
+    alert(`${t('artifacts.verify_queued')}: ${res.task_id}`);
   };
 
   const sel = artifacts.find(a => a.id === selected);
@@ -38,17 +40,17 @@ export default function ArtifactsPage() {
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Restore</h1>
-        <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// BACKUP ARTIFACTS · {artifacts.length} FOUND · SEARCH & RESTORE</div>
+        <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">{t('artifacts.title')}</h1>
+        <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">{t('artifacts.subtitle_prefix')} {artifacts.length} {t('artifacts.found')} · {t('artifacts.search_restore')}</div>
       </div>
 
       <div className="flex gap-4 mb-6">
         <div className="flex-1 relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-vm-text-dim" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by filename, server, domain, tag..." className="w-full bg-vm-surface border border-vm-border rounded pl-10 pr-4 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder={t('artifacts.search_placeholder')} className="w-full bg-vm-surface border border-vm-border rounded pl-10 pr-4 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
         </div>
         <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} className="bg-vm-surface border border-vm-border rounded px-4 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent">
-          <option value="">All types</option>
+          <option value="">{t('common.all_types')}</option>
           <option value="postgresql">🐘 PostgreSQL</option>
           <option value="docker_volumes">🐳 Docker</option>
           <option value="files">📁 Files</option>
@@ -64,11 +66,11 @@ export default function ArtifactsPage() {
             <table className="w-full">
               <thead>
                 <tr className="bg-vm-surface2 border-b border-vm-border">
-                  <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Type</th>
-                  <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Backup</th>
-                  <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Server</th>
-                  <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Date</th>
-                  <th className="px-4 py-3 text-right font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Size</th>
+                  <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('artifacts.type')}</th>
+                  <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('artifacts.backup')}</th>
+                  <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('artifacts.server')}</th>
+                  <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('artifacts.date')}</th>
+                  <th className="px-4 py-3 text-right font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('artifacts.size')}</th>
                   <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal"></th>
                 </tr>
               </thead>
@@ -98,7 +100,7 @@ export default function ArtifactsPage() {
                     <td className="px-4 py-3">
                       <div className="flex gap-1.5">
                         <button onClick={(e) => { e.stopPropagation(); handleRestore(a.id); }} className="flex items-center gap-1 px-2.5 py-1 bg-vm-success text-vm-bg rounded text-[10px] font-bold tracking-wider uppercase">
-                          <RotateCcw className="w-3 h-3" /> Restore
+                          <RotateCcw className="w-3 h-3" /> {t('action.restore')}
                         </button>
                       </div>
                     </td>
@@ -109,8 +111,8 @@ export default function ArtifactsPage() {
             {artifacts.length === 0 && (
               <div className="text-center py-12 text-vm-text-dim font-mono">
                 <RotateCcw className="w-12 h-12 mx-auto mb-3 opacity-40" />
-                <div className="tracking-[2px]">No backups found</div>
-                <div className="text-[11px] mt-1">Run a backup job first, then artifacts will appear here.</div>
+                <div className="tracking-[2px]">{t('artifacts.none')}</div>
+                <div className="text-[11px] mt-1">{t('artifacts.none_desc')}</div>
               </div>
             )}
           </div>
@@ -122,7 +124,7 @@ export default function ArtifactsPage() {
             <div className="flex items-center gap-2 mb-4">
               <span className="text-2xl">{backupTypeIcon(sel.backup_type)}</span>
               <div>
-                <div className="text-lg font-bold text-vm-text-bright">Artifact Details</div>
+                <div className="text-lg font-bold text-vm-text-bright">{t('artifacts.details')}</div>
                 <div className="font-mono text-[10px] text-vm-accent tracking-[2px] uppercase">{sel.backup_type}</div>
               </div>
             </div>
@@ -130,40 +132,40 @@ export default function ArtifactsPage() {
             <div className="space-y-3 mb-5">
               <div className="flex items-center gap-2 text-sm">
                 <HardDrive className="w-4 h-4 text-vm-text-dim shrink-0" />
-                <span className="text-vm-text-dim">Filename:</span>
+                <span className="text-vm-text-dim">{t('artifacts.filename')}:</span>
                 <span className="font-mono text-vm-text-bright truncate">{sel.filename}</span>
               </div>
               <div className="flex items-center gap-2 text-sm">
                 <Server className="w-4 h-4 text-vm-text-dim shrink-0" />
-                <span className="text-vm-text-dim">Server:</span>
+                <span className="text-vm-text-dim">{t('artifacts.server')}:</span>
                 <span className="text-vm-text-bright">{sel.server_name || '—'}</span>
               </div>
               <div className="flex items-center gap-2 text-sm">
                 <Globe className="w-4 h-4 text-vm-text-dim shrink-0" />
-                <span className="text-vm-text-dim">Project:</span>
+                <span className="text-vm-text-dim">{t('artifacts.project')}:</span>
                 <span className="text-vm-accent">{sel.domain || '—'}</span>
               </div>
               {sel.db_name && (
                 <div className="flex items-center gap-2 text-sm">
                   <span className="text-lg">🐘</span>
-                  <span className="text-vm-text-dim">Database:</span>
+                  <span className="text-vm-text-dim">{t('artifacts.database')}:</span>
                   <span className="text-vm-text-bright">{sel.db_name}</span>
                 </div>
               )}
               <div className="flex items-center gap-2 text-sm">
                 <Calendar className="w-4 h-4 text-vm-text-dim shrink-0" />
-                <span className="text-vm-text-dim">Created:</span>
+                <span className="text-vm-text-dim">{t('artifacts.created')}:</span>
                 <span className="text-vm-text-bright">{formatDate(sel.created_at)}</span>
               </div>
               <div className="flex items-center gap-2 text-sm">
                 <HardDrive className="w-4 h-4 text-vm-text-dim shrink-0" />
-                <span className="text-vm-text-dim">Size:</span>
+                <span className="text-vm-text-dim">{t('artifacts.size')}:</span>
                 <span className="font-bold text-vm-accent">{formatBytes(sel.size_bytes)}</span>
               </div>
               {sel.is_encrypted && (
                 <div className="flex items-center gap-2 text-sm">
                   <Lock className="w-4 h-4 text-vm-accent shrink-0" />
-                  <span className="text-vm-accent font-semibold">Encrypted (age/AES-256)</span>
+                  <span className="text-vm-accent font-semibold">{t('artifacts.encrypted')}</span>
                 </div>
               )}
               {sel.tags?.length > 0 && (
@@ -177,7 +179,7 @@ export default function ArtifactsPage() {
               {sel.expires_at && (
                 <div className="flex items-center gap-2 text-sm">
                   <Calendar className="w-4 h-4 text-vm-warning shrink-0" />
-                  <span className="text-vm-warning">Expires: {formatDate(sel.expires_at)}</span>
+                  <span className="text-vm-warning">{t('artifacts.expires')}: {formatDate(sel.expires_at)}</span>
                 </div>
               )}
             </div>
@@ -188,10 +190,10 @@ export default function ArtifactsPage() {
 
             <div className="flex gap-2">
               <button onClick={() => handleRestore(sel.id)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-vm-success text-vm-bg rounded font-bold text-sm tracking-wider uppercase">
-                <RotateCcw className="w-4 h-4" /> Restore
+                <RotateCcw className="w-4 h-4" /> {t('action.restore')}
               </button>
               <button onClick={() => handleVerify(sel.id)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 border border-vm-accent text-vm-accent rounded font-bold text-sm tracking-wider uppercase hover:bg-vm-accent/[0.08]">
-                <ShieldCheck className="w-4 h-4" /> Verify
+                <ShieldCheck className="w-4 h-4" /> {t('action.verify')}
               </button>
             </div>
           </div>
