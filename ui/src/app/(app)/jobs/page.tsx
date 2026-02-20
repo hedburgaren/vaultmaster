@@ -289,14 +289,28 @@ export default function JobsPage() {
                 {dockerInfo.containers?.length > 0 && (
                   <div className="mb-3">
                     <div className="font-mono text-[10px] text-vm-text-dim tracking-[2px] uppercase mb-1.5">// {t('jobs.docker_containers')} ({dockerInfo.containers.length})</div>
-                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                    <div className="space-y-1 max-h-48 overflow-y-auto">
                       {dockerInfo.containers.map((c: any) => (
-                        <div key={c.id} className="flex items-center gap-2 px-2 py-1 bg-vm-surface rounded font-mono text-[11px]">
-                          <div className={`w-2 h-2 rounded-full ${c.state === 'running' ? 'bg-vm-success' : 'bg-vm-text-dim'}`} />
-                          <span className="text-vm-text-bright">{c.name}</span>
-                          <span className="text-vm-text-dim truncate">{c.image}</span>
-                          <span className="ml-auto text-[10px] text-vm-text-dim">{c.status}</span>
-                        </div>
+                        <details key={c.id} className="group">
+                          <summary className="flex items-center gap-2 px-2 py-1 bg-vm-surface rounded font-mono text-[11px] cursor-pointer list-none hover:bg-vm-surface2">
+                            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${c.state === 'running' ? 'bg-vm-success' : 'bg-vm-text-dim'}`} />
+                            <span className="text-vm-text-bright">{c.name}</span>
+                            <span className="text-vm-text-dim truncate">{c.image}</span>
+                            {c.bind_mounts?.length > 0 && (
+                              <span className="text-[9px] px-1 py-0.5 rounded bg-vm-surface2 border border-vm-border text-vm-text-dim flex-shrink-0">{c.bind_mounts.length} bind</span>
+                            )}
+                            <span className="ml-auto text-[10px] text-vm-text-dim flex-shrink-0">{c.status}</span>
+                          </summary>
+                          {c.bind_mounts?.length > 0 && (
+                            <div className="ml-6 mt-1 mb-1 space-y-0.5">
+                              {c.bind_mounts.map((bm: any, i: number) => (
+                                <div key={i} className="font-mono text-[9px] text-vm-text-dim px-2 py-0.5 bg-vm-bg/50 rounded">
+                                  <span className="text-vm-text">{bm.source}</span> → <span className="text-vm-accent/70">{bm.dest}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </details>
                       ))}
                     </div>
                   </div>
