@@ -88,7 +88,7 @@ export default function ServersPage() {
     if (confirm(t('servers.confirm_delete'))) { await deleteServer(id); load(); }
   };
 
-  const ServerForm = () => (
+  const serverForm = (
     <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-bold text-vm-text-bright uppercase tracking-wider">{editId ? t('servers.edit') : t('servers.new')}</h3>
@@ -204,7 +204,7 @@ export default function ServersPage() {
         </button>
       </div>
 
-      {showForm && <ServerForm />}
+      {showForm && serverForm}
 
       <div className="grid grid-cols-2 gap-4">
         {servers.map((s: any) => (

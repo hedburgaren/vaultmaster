@@ -58,7 +58,7 @@ export default function JobsPage() {
     if (confirm(t('jobs.confirm_delete'))) { await deleteJob(id); load(); }
   };
 
-  const JobForm = () => (
+  const jobForm = (
     <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-bold text-vm-text-bright uppercase tracking-wider">{editId ? t('jobs.edit') : t('jobs.new')}</h3>
@@ -126,7 +126,7 @@ export default function JobsPage() {
         </button>
       </div>
 
-      {showForm && <JobForm />}
+      {showForm && jobForm}
 
       <div className="bg-vm-surface border border-vm-border rounded overflow-hidden">
         <table className="w-full">
