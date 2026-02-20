@@ -65,7 +65,7 @@ export default function ServersPage() {
     setFormTesting(true);
     setFormTestResult(null);
     try {
-      const res = await testConnectionPresave({ host: form.host, port: Number(form.port), auth_type: form.auth_type, ssh_user: form.ssh_user, ssh_key_path: form.ssh_key_path || undefined });
+      const res = await testConnectionPresave({ host: form.host, port: Number(form.port), auth_type: form.auth_type, ssh_user: form.ssh_user || 'root', ssh_key_path: form.ssh_key_path || undefined, ssh_password: form.ssh_password || undefined });
       setFormTestResult(res);
     } catch (e: any) {
       setFormTestResult({ success: false, message: e.message });
@@ -82,6 +82,7 @@ export default function ServersPage() {
       setTestResult(prev => ({ ...prev, [id]: { success: false, message: e.message } }));
     }
     setTesting(null);
+    load();
   };
 
   const handleDelete = async (id: string) => {
