@@ -426,6 +426,14 @@ const translations: Dict = {
   'servers.db_password_tip': { sv: 'Lösenord för databasanvändaren. Lämna tomt för lokal PostgreSQL med peer-auth (sudo -u db_user psql). Krypteras innan lagring.', en: 'Password for the database user. Leave empty for local PostgreSQL with peer auth (sudo -u db_user psql). Will be encrypted before storage.' },
   'servers.db_password_placeholder': { sv: 'Tomt = peer-auth (sudo -u db_user)', en: 'Empty = peer auth (sudo -u db_user)' },
 
+  // ── Server DB Requirements ──
+  'servers.db_requirements_title': { sv: 'KRAV PÅ FJÄRRSERVERN', en: 'REMOTE SERVER REQUIREMENTS' },
+  'servers.db_req_sudo': { sv: 'SSH-användaren behöver NOPASSWD sudo till DB-användaren. Lägg till i /etc/sudoers:', en: 'SSH user needs NOPASSWD sudo to DB user. Add to /etc/sudoers:' },
+  'servers.db_req_peer': { sv: 'Utan lösenord: VaultMaster kör "sudo -u db_user psql" (peer-auth). Kräver att psql finns installerat.', en: 'Without password: VaultMaster runs "sudo -u db_user psql" (peer auth). Requires psql to be installed.' },
+  'servers.db_req_password': { sv: 'Med lösenord: VaultMaster kör "PGPASSWORD=xxx psql -h host -U user". Kräver att pg_hba.conf tillåter md5/scram-sha-256.', en: 'With password: VaultMaster runs "PGPASSWORD=xxx psql -h host -U user". Requires pg_hba.conf to allow md5/scram-sha-256.' },
+  'servers.db_req_mysql_client': { sv: 'mysql-klienten måste vara installerad på fjärrservern.', en: 'mysql client must be installed on the remote server.' },
+  'servers.db_req_mysql_password': { sv: 'DB-användaren behöver lösenord och rätt behörigheter (SHOW DATABASES, SELECT på information_schema).', en: 'DB user needs a password and proper privileges (SHOW DATABASES, SELECT on information_schema).' },
+
   // ── Jobs: Type-specific fields ──
   'jobs.source_config': { sv: 'Källkonfiguration', en: 'Source Configuration' },
   'jobs.source_path': { sv: 'Sökväg(ar)', en: 'Path(s)' },

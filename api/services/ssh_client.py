@@ -218,14 +218,15 @@ async def list_remote_docker(server) -> dict:
                         })
                         container_ids.append(parts[0][:12])
 
-            # 2. Get volume→container mapping via docker inspect (full names, not truncated)
+            # 2. Get volume→container mapping + bind mounts via docker inspect
             volume_to_containers: dict[str, list[str]] = {}
+            container_mounts: dict[str, list[dict]] = {}  # cname -> [{type, source, dest}]
             if container_ids:
-                # Inspect all containers at once — output Name and volume mount names
                 ids_str = " ".join(container_ids)
+                # Output: /name|type:name_or_source:destination, ...
                 inspect_cmd = (
                     f"{prefix}docker inspect --format "
-                    f"'{{{{.Name}}}}|{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}},{{{{end}}}}{{{{end}}}}' "
+                    f"'{{{{.Name}}}}|{{{{range .Mounts}}}}{{{{.Type}}}}:{{{{.Name}}}}:{{{{.Source}}}}:{{{{.Destination}}}},{{{{end}}}}' "
                     f"{ids_str}"
                 )
                 i_result = await conn.run(inspect_cmd, check=False, timeout=20)
@@ -237,13 +238,29 @@ async def list_remote_docker(server) -> dict:
                         if len(parts) < 2:
                             continue
                         cname = parts[0].strip().lstrip("/")
-                        vol_names_str = parts[1].strip()
-                        for vn in vol_names_str.split(","):
-                            vn = vn.strip()
-                            if vn:
-                                volume_to_containers.setdefault(vn, [])
-                                if cname not in volume_to_containers[vn]:
-                                    volume_to_containers[vn].append(cname)
+                        mounts_str = parts[1].strip()
+                        binds = []
+                        for m in mounts_str.split(","):
+                            m = m.strip()
+                            if not m:
+                                continue
+                            mp = m.split(":", 3)
+                            mtype = mp[0] if len(mp) > 0 else ""
+                            mname = mp[1] if len(mp) > 1 else ""
+                            msource = mp[2] if len(mp) > 2 else ""
+                            mdest = mp[3] if len(mp) > 3 else ""
+                            if mtype == "volume" and mname:
+                                volume_to_containers.setdefault(mname, [])
+                                if cname not in volume_to_containers[mname]:
+                                    volume_to_containers[mname].append(cname)
+                            elif mtype == "bind" and msource:
+                                binds.append({"source": msource, "dest": mdest})
+                        if binds:
+                            container_mounts[cname] = binds
+
+            # Enrich containers with bind mount info
+            for c in containers:
+                c["bind_mounts"] = container_mounts.get(c["name"], [])
 
             # 3. Get volumes
             volumes_cmd = f'{prefix}docker volume ls --format "{{{{.Name}}}}|{{{{.Driver}}}}"'

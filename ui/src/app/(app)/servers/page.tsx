@@ -229,6 +229,26 @@ export default function ServersPage() {
               </div>
             </>
           )}
+          {form.db_type && form.db_type === 'postgresql' && (
+            <div className="col-span-2 mt-3 p-3 bg-vm-bg/50 border border-vm-border rounded font-mono text-[10px] text-vm-text-dim leading-relaxed">
+              <div className="text-vm-accent font-bold tracking-wider uppercase mb-1.5">// {t('servers.db_requirements_title')}</div>
+              <div className="space-y-1">
+                <div>① {t('servers.db_req_sudo')}</div>
+                <div className="pl-4 text-vm-text bg-vm-surface px-2 py-1 rounded select-all">{form.ssh_user || 'chrille'} ALL=({form.db_user || 'postgres'}) NOPASSWD: /usr/bin/psql</div>
+                <div>② {t('servers.db_req_peer')}</div>
+                <div>③ {t('servers.db_req_password')}</div>
+              </div>
+            </div>
+          )}
+          {form.db_type && form.db_type !== 'postgresql' && (
+            <div className="col-span-2 mt-3 p-3 bg-vm-bg/50 border border-vm-border rounded font-mono text-[10px] text-vm-text-dim leading-relaxed">
+              <div className="text-vm-accent font-bold tracking-wider uppercase mb-1.5">// {t('servers.db_requirements_title')}</div>
+              <div className="space-y-1">
+                <div>① {t('servers.db_req_mysql_client')}</div>
+                <div>② {t('servers.db_req_mysql_password')}</div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
