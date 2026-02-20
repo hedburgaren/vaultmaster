@@ -307,12 +307,21 @@ export default function JobsPage() {
                   <div className="grid grid-cols-2 gap-1.5">
                     {dockerInfo.volumes.map((v: any) => (
                       <button key={v.name} type="button" onClick={() => toggleVolume(v.name)}
-                        className={`flex items-center gap-2 px-3 py-2 rounded border font-mono text-[11px] transition-all text-left ${form.volume_names.includes(v.name) ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : 'bg-vm-surface border-vm-border text-vm-text-dim hover:border-vm-accent/50'}`}>
-                        <span className={`w-3 h-3 rounded-sm border flex-shrink-0 ${form.volume_names.includes(v.name) ? 'bg-vm-accent border-vm-accent' : 'border-vm-border'}`}>
-                          {form.volume_names.includes(v.name) && <span className="block w-full h-full text-center text-[8px] text-vm-bg leading-3">✓</span>}
-                        </span>
-                        <span className="truncate">{v.name}</span>
-                        <span className="ml-auto text-[10px] text-vm-text-dim">{v.driver}</span>
+                        className={`flex flex-col gap-1 px-3 py-2 rounded border font-mono text-[11px] transition-all text-left ${form.volume_names.includes(v.name) ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : 'bg-vm-surface border-vm-border text-vm-text-dim hover:border-vm-accent/50'}`}>
+                        <div className="flex items-center gap-2 w-full">
+                          <span className={`w-3 h-3 rounded-sm border flex-shrink-0 ${form.volume_names.includes(v.name) ? 'bg-vm-accent border-vm-accent' : 'border-vm-border'}`}>
+                            {form.volume_names.includes(v.name) && <span className="block w-full h-full text-center text-[8px] text-vm-bg leading-3">✓</span>}
+                          </span>
+                          <span className="truncate">{v.name}</span>
+                          <span className="ml-auto text-[10px] text-vm-text-dim flex-shrink-0">{v.driver}</span>
+                        </div>
+                        {v.used_by?.length > 0 && (
+                          <div className="flex flex-wrap gap-1 ml-5">
+                            {v.used_by.map((c: string) => (
+                              <span key={c} className="text-[9px] px-1.5 py-0.5 rounded bg-vm-surface2 border border-vm-border text-vm-text-dim">↳ {c}</span>
+                            ))}
+                          </div>
+                        )}
                       </button>
                     ))}
                   </div>
