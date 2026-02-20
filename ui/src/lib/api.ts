@@ -67,6 +67,8 @@ export const testConnectionPresave = (data: any) => apiFetch('/v1/servers/test-c
 export const browseServer = (id: string, path: string) => apiFetch(`/v1/servers/${id}/browse?path=${encodeURIComponent(path)}`);
 export const getSSHKeys = () => apiFetch('/v1/servers/ssh-keys');
 export const generateSSHKey = () => apiFetch('/v1/servers/ssh-keys/generate', { method: 'POST' });
+export const getServerDatabases = (id: string, dbType?: string) => apiFetch(`/v1/servers/${id}/databases?db_type=${dbType || 'postgresql'}`);
+export const getServerDocker = (id: string) => apiFetch(`/v1/servers/${id}/docker`);
 
 // Jobs
 export const getJobs = (params?: string) => apiFetch(`/v1/jobs${params ? '?' + params : ''}`);
@@ -97,6 +99,10 @@ export const deleteStorageDestination = (id: string) => apiFetch(`/v1/storage/${
 export const testStorage = (id: string) => apiFetch(`/v1/storage/${id}/test`, { method: 'POST' });
 export const getStorageUsage = (id: string) => apiFetch(`/v1/storage/${id}/usage`);
 export const browseStorage = (id: string, path: string) => apiFetch(`/v1/storage/${id}/browse?path=${encodeURIComponent(path)}`);
+export const getOAuthRedirectUri = () => apiFetch('/v1/storage/oauth/redirect-uri');
+export const startOAuth = (provider: string, client_id: string, client_secret: string) =>
+  apiFetch('/v1/storage/oauth/start', { method: 'POST', body: JSON.stringify({ provider, client_id, client_secret }) });
+export const pollOAuthToken = (state: string) => apiFetch(`/v1/storage/oauth/token/${state}`);
 
 // Retention
 export const getRetentionPolicies = () => apiFetch('/v1/retention');

@@ -8,16 +8,10 @@ import { Plus, Trash2, TestTube, Bell, Send, Eye, EyeOff, Pencil, X } from 'luci
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
-const TRIGGER_OPTIONS = [
-  { value: 'run.success', label: 'Backup success' },
-  { value: 'run.failed', label: 'Backup failed' },
-  { value: 'run.started', label: 'Backup started' },
-  { value: 'restore.started', label: 'Restore started' },
-  { value: 'restore.completed', label: 'Restore completed' },
-  { value: 'restore.failed', label: 'Restore failed' },
-  { value: 'server.offline', label: 'Server offline' },
-  { value: 'storage.warning', label: 'Storage warning (>70%)' },
-  { value: 'storage.critical', label: 'Storage critical (>90%)' },
+const TRIGGER_VALUES = [
+  'run.success', 'run.failed', 'run.started',
+  'restore.started', 'restore.completed', 'restore.failed',
+  'server.offline', 'storage.warning', 'storage.critical',
 ];
 
 const TYPE_LABELS: Record<string, string> = { slack: 'Slack', ntfy: 'ntfy', telegram: 'Telegram', email: 'Email', webhook: 'Webhook' };
@@ -99,7 +93,7 @@ export default function NotificationsPage() {
     setTriggers(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]);
   };
 
-  const SecretInput = ({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder: string }) => (
+  const secretInput = (value: string, onChange: (v: string) => void, placeholder: string) => (
     <div className="relative">
       <input type={showSecret ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)} className={INPUT + ' pr-10'} placeholder={placeholder} />
       <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
@@ -112,8 +106,8 @@ export default function NotificationsPage() {
     <div>
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Notifications</h1>
-          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// NOTIFICATION CHANNELS · {channels.length} TOTAL</div>
+          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">{t('notif.title')}</h1>
+          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">{t('notif.subtitle_prefix')} {channels.length} {t('common.total')}</div>
         </div>
         <button onClick={openNew} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
           <Plus className="w-4 h-4" /> {t('notif.new')}
@@ -128,11 +122,11 @@ export default function NotificationsPage() {
           </div>
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <FormLabel label="Name" tooltip="A friendly name for this notification channel." />
+              <FormLabel label={t('notif.form_name')} tooltip={t('notif.form_name_tip')} />
               <input value={name} onChange={e => setName(e.target.value)} className={INPUT} placeholder="Production alerts" />
             </div>
             <div>
-              <FormLabel label="Channel Type" tooltip="Where notifications will be sent. Each type has its own configuration." />
+              <FormLabel label={t('notif.form_type')} tooltip={t('notif.form_type_tip')} />
               <select value={channelType} onChange={e => setChannelType(e.target.value)} className={INPUT}>
                 <option value="slack">💬 Slack</option>
                 <option value="ntfy">📱 ntfy</option>
@@ -150,11 +144,11 @@ export default function NotificationsPage() {
             {channelType === 'slack' && (
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2">
-                  <FormLabel label="Webhook URL" tooltip="Slack Incoming Webhook URL. Create one at api.slack.com → Your App → Incoming Webhooks." />
+                  <FormLabel label={t('notif.slack_webhook')} tooltip={t('notif.slack_webhook_tip')} />
                   <input value={slackWebhookUrl} onChange={e => setSlackWebhookUrl(e.target.value)} className={INPUT} placeholder="https://hooks.slack.com/services/T.../B.../..." />
                 </div>
                 <div className="col-span-2">
-                  <FormLabel label="Channel Override" tooltip="Optional. Override the default channel set in the webhook. Example: #backup-alerts" />
+                  <FormLabel label={t('notif.slack_channel')} tooltip={t('notif.slack_channel_tip')} />
                   <input value={slackChannel} onChange={e => setSlackChannel(e.target.value)} className={INPUT} placeholder="#backup-alerts (optional)" />
                 </div>
               </div>
@@ -163,11 +157,11 @@ export default function NotificationsPage() {
             {channelType === 'ntfy' && (
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <FormLabel label="Topic" tooltip="The ntfy topic to publish to. Anyone subscribed to this topic will receive notifications." />
+                  <FormLabel label={t('notif.ntfy_topic')} tooltip={t('notif.ntfy_topic_tip')} />
                   <input value={ntfyTopic} onChange={e => setNtfyTopic(e.target.value)} className={INPUT} placeholder="vaultmaster-alerts" />
                 </div>
                 <div>
-                  <FormLabel label="Server" tooltip="ntfy server URL. Default is the public ntfy.sh server. Use your own for private topics." />
+                  <FormLabel label={t('notif.ntfy_server')} tooltip={t('notif.ntfy_server_tip')} />
                   <input value={ntfyServer} onChange={e => setNtfyServer(e.target.value)} className={INPUT} placeholder="https://ntfy.sh" />
                 </div>
               </div>
@@ -176,11 +170,11 @@ export default function NotificationsPage() {
             {channelType === 'telegram' && (
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <FormLabel label="Bot Token" tooltip="Telegram Bot API token. Create a bot via @BotFather and copy the token." />
-                  <SecretInput value={telegramBotToken} onChange={setTelegramBotToken} placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" />
+                  <FormLabel label={t('notif.telegram_token')} tooltip={t('notif.telegram_token_tip')} />
+                  {secretInput(telegramBotToken, setTelegramBotToken, '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11')}
                 </div>
                 <div>
-                  <FormLabel label="Chat ID" tooltip="Telegram chat/group/channel ID. Send a message to @userinfobot to find your ID." />
+                  <FormLabel label={t('notif.telegram_chat_id')} tooltip={t('notif.telegram_chat_id_tip')} />
                   <input value={telegramChatId} onChange={e => setTelegramChatId(e.target.value)} className={INPUT} placeholder="-1001234567890" />
                 </div>
               </div>
@@ -189,11 +183,11 @@ export default function NotificationsPage() {
             {channelType === 'email' && (
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2">
-                  <FormLabel label="Recipients" tooltip="Comma-separated email addresses to send notifications to. Requires SMTP settings in .env." />
+                  <FormLabel label={t('notif.email_recipients')} tooltip={t('notif.email_recipients_tip')} />
                   <input value={emailRecipients} onChange={e => setEmailRecipients(e.target.value)} className={INPUT} placeholder="admin@example.com, ops@example.com" />
                 </div>
                 <div className="col-span-2">
-                  <FormLabel label="Subject Prefix" tooltip="Prefix added to all email subjects for easy filtering." />
+                  <FormLabel label={t('notif.email_prefix')} tooltip={t('notif.email_prefix_tip')} />
                   <input value={emailSubjectPrefix} onChange={e => setEmailSubjectPrefix(e.target.value)} className={INPUT} placeholder="[VaultMaster]" />
                 </div>
               </div>
@@ -202,12 +196,12 @@ export default function NotificationsPage() {
             {channelType === 'webhook' && (
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2">
-                  <FormLabel label="Webhook URL" tooltip="URL to POST JSON payloads to when events occur." />
+                  <FormLabel label={t('notif.webhook_url')} tooltip={t('notif.webhook_url_tip')} />
                   <input value={webhookUrl} onChange={e => setWebhookUrl(e.target.value)} className={INPUT} placeholder="https://example.com/webhook" />
                 </div>
                 <div className="col-span-2">
-                  <FormLabel label="Signing Secret" tooltip="Optional HMAC secret for verifying webhook authenticity. Sent as X-VaultMaster-Signature header." />
-                  <SecretInput value={webhookSecret} onChange={setWebhookSecret} placeholder="Optional signing secret" />
+                  <FormLabel label={t('notif.webhook_secret')} tooltip={t('notif.webhook_secret_tip')} />
+                  {secretInput(webhookSecret, setWebhookSecret, 'Optional signing secret')}
                 </div>
               </div>
             )}
@@ -215,19 +209,19 @@ export default function NotificationsPage() {
 
           {/* Trigger checkboxes */}
           <div className="mb-4">
-            <FormLabel label="Triggers" tooltip="Select which events should send notifications through this channel." />
+            <FormLabel label={t('notif.form_triggers')} tooltip={t('notif.form_triggers_tip')} />
             <div className="grid grid-cols-3 gap-2 mt-1">
-              {TRIGGER_OPTIONS.map(opt => (
+              {TRIGGER_VALUES.map(val => (
                 <button
-                  key={opt.value}
+                  key={val}
                   type="button"
-                  onClick={() => toggleTrigger(opt.value)}
-                  className={`text-left px-3 py-2 rounded border font-mono text-[11px] transition-all ${triggers.includes(opt.value) ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : 'bg-vm-surface2 border-vm-border text-vm-text-dim hover:border-vm-accent/50'}`}
+                  onClick={() => toggleTrigger(val)}
+                  className={`text-left px-3 py-2 rounded border font-mono text-[11px] transition-all ${triggers.includes(val) ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : 'bg-vm-surface2 border-vm-border text-vm-text-dim hover:border-vm-accent/50'}`}
                 >
-                  <span className={`inline-block w-3 h-3 rounded-sm border mr-2 align-middle ${triggers.includes(opt.value) ? 'bg-vm-accent border-vm-accent' : 'border-vm-border'}`}>
-                    {triggers.includes(opt.value) && <span className="block w-full h-full text-center text-[8px] text-vm-bg leading-3">✓</span>}
+                  <span className={`inline-block w-3 h-3 rounded-sm border mr-2 align-middle ${triggers.includes(val) ? 'bg-vm-accent border-vm-accent' : 'border-vm-border'}`}>
+                    {triggers.includes(val) && <span className="block w-full h-full text-center text-[8px] text-vm-bg leading-3">✓</span>}
                   </span>
-                  {opt.label}
+                  {t(`trigger.${val}`)}
                 </button>
               ))}
             </div>
@@ -276,7 +270,7 @@ export default function NotificationsPage() {
         {channels.length === 0 && (
           <div className="text-center py-12 text-vm-text-dim font-mono">
             <Bell className="w-12 h-12 mx-auto mb-3 opacity-40" />
-            <div className="tracking-[2px]">No notification channels configured</div>
+            <div className="tracking-[2px]">{t('notif.none')}</div>
           </div>
         )}
       </div>

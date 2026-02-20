@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # CORS
     allowed_origins: str = ""  # comma-separated, e.g. "https://example.com,http://localhost:3100"
 
+    # Base URL (for OAuth callbacks etc.)
+    base_url: str = "https://vm.hedburgaren.se"
+
     # Encryption
     age_public_key: str = ""
 

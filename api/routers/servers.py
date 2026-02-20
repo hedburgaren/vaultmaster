@@ -13,7 +13,7 @@ from api.database import get_db
 from api.models.server import Server
 from api.models.user import User
 from api.schemas import ServerCreate, ServerUpdate, ServerOut
-from api.services.ssh_client import test_ssh_connection, list_remote_directory
+from api.services.ssh_client import test_ssh_connection, list_remote_directory, list_remote_databases, list_remote_docker
 
 router = APIRouter(prefix="/servers", tags=["servers"], dependencies=[Depends(get_current_user)])
 
@@ -101,6 +101,28 @@ async def generate_ssh_key():
         raise HTTPException(status_code=500, detail=f"Key generation failed: {result.stderr}")
     pub = key_path.with_suffix('.pub')
     return {"path": str(key_path), "public_key": pub.read_text().strip() if pub.exists() else None, "message": "Key generated"}
+
+
+@router.get("/{server_id}/databases")
+async def list_databases(server_id: uuid.UUID, db_type: str = "postgresql", db: AsyncSession = Depends(get_db)):
+    """List databases on a server using its stored DB credentials."""
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    databases = await list_remote_databases(server, db_type)
+    return {"databases": databases, "db_type": db_type}
+
+
+@router.get("/{server_id}/docker")
+async def list_docker(server_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """List Docker containers and volumes on a server."""
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    docker_info = await list_remote_docker(server)
+    return docker_info
 
 
 @router.get("/{server_id}", response_model=ServerOut)

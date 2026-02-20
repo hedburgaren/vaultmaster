@@ -7,11 +7,11 @@ import { useT } from '@/lib/i18n';
 import Badge from '@/components/Badge';
 import FormLabel from '@/components/FormLabel';
 import TagInput from '@/components/TagInput';
-import { Plus, Trash2, TestTube, Server, Eye, EyeOff, Pencil, X, Wifi } from 'lucide-react';
+import { Plus, Trash2, TestTube, Server, Eye, EyeOff, Pencil, X, Wifi, Database } from 'lucide-react';
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
-const emptyForm = { name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: '', ssh_key_path: '/root/.ssh/vaultmaster_ed25519', ssh_password: '', api_token: '', tags: [] as string[], use_sudo: true };
+const emptyForm = { name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: '', ssh_key_path: '/root/.ssh/vaultmaster_ed25519', ssh_password: '', api_token: '', tags: [] as string[], use_sudo: true, db_type: '' as string, db_host: '127.0.0.1', db_port: '', db_user: '', db_password: '' };
 
 export default function ServersPage() {
   const t = useT();
@@ -37,14 +37,22 @@ export default function ServersPage() {
   const openNew = () => { setEditId(null); setForm({ ...emptyForm }); setShowForm(true); setFormTestResult(null); };
   const openEdit = (s: any) => {
     setEditId(s.id);
-    setForm({ name: s.name, host: s.host, port: s.port, auth_type: s.auth_type, provider: s.provider || 'custom', ssh_user: s.ssh_user || '', ssh_key_path: s.ssh_key_path || '/root/.ssh/vaultmaster_ed25519', ssh_password: '', api_token: '', tags: s.tags || [], use_sudo: s.meta?.use_sudo ?? true });
+    setForm({ name: s.name, host: s.host, port: s.port, auth_type: s.auth_type, provider: s.provider || 'custom', ssh_user: s.ssh_user || '', ssh_key_path: s.ssh_key_path || '/root/.ssh/vaultmaster_ed25519', ssh_password: '', api_token: '', tags: s.tags || [], use_sudo: s.meta?.use_sudo ?? true, db_type: s.meta?.db_type || '', db_host: s.meta?.db_host || '127.0.0.1', db_port: s.meta?.db_port?.toString() || '', db_user: s.meta?.db_user || '', db_password: '' });
     setShowForm(true);
     setFormTestResult(null);
   };
   const closeForm = () => { setShowForm(false); setEditId(null); setFormTestResult(null); };
 
   const buildPayload = () => {
-    const payload: any = { name: form.name, host: form.host, port: Number(form.port), auth_type: form.auth_type, provider: form.provider, ssh_user: form.ssh_user || 'root', tags: form.tags, meta: { use_sudo: form.use_sudo } };
+    const meta: any = { use_sudo: form.use_sudo };
+    if (form.db_type) {
+      meta.db_type = form.db_type;
+      meta.db_host = form.db_host || '127.0.0.1';
+      meta.db_port = form.db_port ? Number(form.db_port) : (form.db_type === 'postgresql' ? 5432 : 3306);
+      meta.db_user = form.db_user;
+      if (form.db_password) meta.db_password = form.db_password;
+    }
+    const payload: any = { name: form.name, host: form.host, port: Number(form.port), auth_type: form.auth_type, provider: form.provider, ssh_user: form.ssh_user || 'root', tags: form.tags, meta };
     if (form.ssh_key_path) payload.ssh_key_path = form.ssh_key_path;
     if (form.auth_type === 'ssh_password') payload.meta = { ...payload.meta, ssh_password: form.ssh_password };
     if (form.auth_type === 'api') payload.api_token = form.api_token;
@@ -174,6 +182,51 @@ export default function ServersPage() {
         <div className="col-span-2">
           <FormLabel label={t('servers.tags')} tooltip={t('servers.tags_tip')} />
           <TagInput value={form.tags} onChange={tags => setForm({...form, tags})} suggestions={allTags} placeholder="docker, postgresql, odoo" />
+        </div>
+      </div>
+
+      {/* Database Configuration */}
+      <div className="bg-vm-surface2 border border-vm-border rounded p-4 mb-4">
+        <div className="flex items-center gap-2 mb-3">
+          <Database className="w-4 h-4 text-vm-accent" />
+          <span className="font-mono text-[10px] text-vm-accent tracking-[2px] uppercase">{t('servers.db_config')}</span>
+          <span className="font-mono text-[10px] text-vm-text-dim ml-2">{t('servers.db_config_tip')}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <FormLabel label={t('servers.db_type')} tooltip={t('servers.db_type_tip')} />
+            <select value={form.db_type} onChange={e => setForm({...form, db_type: e.target.value, db_port: e.target.value === 'postgresql' ? '5432' : e.target.value ? '3306' : '', db_user: e.target.value === 'postgresql' ? 'postgres' : e.target.value ? 'root' : ''})} className={INPUT}>
+              <option value="">{t('servers.db_none')}</option>
+              <option value="postgresql">🐘 PostgreSQL</option>
+              <option value="mysql">🐬 MySQL</option>
+              <option value="mariadb">🦭 MariaDB</option>
+            </select>
+          </div>
+          {form.db_type && (
+            <>
+              <div>
+                <FormLabel label={t('servers.db_host')} tooltip={t('servers.db_host_tip')} />
+                <input value={form.db_host} onChange={e => setForm({...form, db_host: e.target.value})} className={INPUT} placeholder="127.0.0.1" />
+              </div>
+              <div>
+                <FormLabel label={t('servers.db_port')} tooltip={t('servers.db_port_tip')} />
+                <input type="number" value={form.db_port} onChange={e => setForm({...form, db_port: e.target.value})} className={INPUT} placeholder={form.db_type === 'postgresql' ? '5432' : '3306'} />
+              </div>
+              <div>
+                <FormLabel label={t('servers.db_user')} tooltip={t('servers.db_user_tip')} />
+                <input value={form.db_user} onChange={e => setForm({...form, db_user: e.target.value})} className={INPUT} placeholder={form.db_type === 'postgresql' ? 'postgres' : 'root'} />
+              </div>
+              <div className="col-span-2">
+                <FormLabel label={t('servers.db_password')} tooltip={t('servers.db_password_tip')} />
+                <div className="relative">
+                  <input type={showSecret ? 'text' : 'password'} value={form.db_password} onChange={e => setForm({...form, db_password: e.target.value})} className={INPUT + ' pr-10'} placeholder={t('servers.db_password_placeholder')} />
+                  <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
+                    {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
