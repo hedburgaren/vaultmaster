@@ -234,7 +234,7 @@ export default function ServersPage() {
               <div className="text-vm-accent font-bold tracking-wider uppercase mb-1.5">// {t('servers.db_requirements_title')}</div>
               <div className="space-y-1">
                 <div>① {t('servers.db_req_sudo')}</div>
-                <div className="pl-4 text-vm-text bg-vm-surface px-2 py-1 rounded select-all">{form.ssh_user || 'chrille'} ALL=({form.db_user || 'postgres'}) NOPASSWD: /usr/bin/psql</div>
+                <div className="pl-4 text-vm-text bg-vm-surface px-2 py-1 rounded select-all">{form.ssh_user || 'ssh_user'} ALL=({form.db_user || 'postgres'}) NOPASSWD: /usr/bin/psql</div>
                 <div>② {t('servers.db_req_peer')}</div>
                 <div>③ {t('servers.db_req_password')}</div>
               </div>
