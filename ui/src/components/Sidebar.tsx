@@ -2,17 +2,21 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Clock, RotateCcw, Database, Bell, Settings, Server, Archive, Shield, Users } from 'lucide-react';
+import { LayoutDashboard, Clock, RotateCcw, Database, Bell, Settings, Server, Archive, Shield, Users, HardDrive, CalendarClock } from 'lucide-react';
 import clsx from 'clsx';
 import { useT } from '@/lib/i18n';
 
 const navItems = [
+  // Overview
   { href: '/dashboard', i18nKey: 'nav.dashboard', icon: LayoutDashboard },
+  // Setup (logical order: storage → servers → jobs)
+  { href: '/storage', i18nKey: 'nav.storage', icon: HardDrive },
   { href: '/servers', i18nKey: 'nav.servers', icon: Server },
   { href: '/jobs', i18nKey: 'nav.jobs', icon: Clock },
+  // Operations
   { href: '/runs', i18nKey: 'nav.runs', icon: Archive },
   { href: '/artifacts', i18nKey: 'nav.artifacts', icon: RotateCcw },
-  { href: '/storage', i18nKey: 'nav.storage', icon: Database },
+  // System
   { href: '/notifications', i18nKey: 'nav.notifications', icon: Bell },
   { href: '/audit', i18nKey: 'nav.audit', icon: Shield },
   { href: '/users', i18nKey: 'nav.users', icon: Users },

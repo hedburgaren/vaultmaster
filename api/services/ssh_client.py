@@ -166,7 +166,10 @@ async def list_remote_databases(server, db_type: str = "postgresql") -> list[dic
 
 
 async def list_remote_docker(server) -> dict:
-    """List Docker containers and volumes on a remote server via SSH."""
+    """List Docker containers and volumes on a remote server via SSH.
+
+    Correlates volumes with the containers that use them.
+    """
     try:
         kwargs = _build_connect_kwargs(server)
         meta = getattr(server, 'meta', None) or {}
@@ -175,23 +178,35 @@ async def list_remote_docker(server) -> dict:
         prefix = "sudo -n " if use_sudo and ssh_user != "root" else ""
 
         async with asyncssh.connect(**kwargs) as conn:
-            # Get containers
-            containers_cmd = f'{prefix}docker ps -a --format "{{{{.ID}}}}|{{{{.Names}}}}|{{{{.Image}}}}|{{{{.Status}}}}|{{{{.State}}}}"'
+            # Get containers with their volume mounts in one call
+            containers_cmd = f'{prefix}docker ps -a --format "{{{{.ID}}}}|{{{{.Names}}}}|{{{{.Image}}}}|{{{{.Status}}}}|{{{{.State}}}}|{{{{.Mounts}}}}"'
             c_result = await conn.run(containers_cmd, check=False, timeout=15)
             containers = []
+            # Map: volume_name -> [container_names]
+            volume_to_containers: dict[str, list[str]] = {}
             if c_result.exit_status == 0:
                 for line in c_result.stdout.strip().split("\n"):
                     if not line.strip():
                         continue
                     parts = line.split("|")
                     if len(parts) >= 5:
+                        name = parts[1]
+                        mounts_str = parts[5] if len(parts) > 5 else ""
                         containers.append({
                             "id": parts[0][:12],
-                            "name": parts[1],
+                            "name": name,
                             "image": parts[2],
                             "status": parts[3],
                             "state": parts[4],
                         })
+                        # Parse mounts (comma-separated volume names/bind paths)
+                        if mounts_str:
+                            for mount in mounts_str.split(","):
+                                mount = mount.strip()
+                                if mount:
+                                    volume_to_containers.setdefault(mount, [])
+                                    if name not in volume_to_containers[mount]:
+                                        volume_to_containers[mount].append(name)
 
             # Get volumes
             volumes_cmd = f'{prefix}docker volume ls --format "{{{{.Name}}}}|{{{{.Driver}}}}"'
@@ -202,9 +217,11 @@ async def list_remote_docker(server) -> dict:
                     if not line.strip():
                         continue
                     parts = line.split("|")
+                    vol_name = parts[0]
                     volumes.append({
-                        "name": parts[0],
+                        "name": vol_name,
                         "driver": parts[1] if len(parts) > 1 else "local",
+                        "used_by": volume_to_containers.get(vol_name, []),
                     })
 
             return {"containers": containers, "volumes": volumes, "error": None}
