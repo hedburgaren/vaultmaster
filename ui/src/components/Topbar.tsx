@@ -1,10 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Lock, Bell } from 'lucide-react';
+import { Lock, Bell, Globe } from 'lucide-react';
 import { logout, getDashboard } from '@/lib/api';
+import { useLocale, useT } from '@/lib/i18n';
 
 export default function Topbar() {
+  const [locale, setLocale] = useLocale();
+  const t = useT();
   const [failedCount, setFailedCount] = useState(0);
   const [errorCount, setErrorCount] = useState(0);
   const [showPanel, setShowPanel] = useState(false);
@@ -81,6 +84,15 @@ export default function Topbar() {
             </div>
           )}
         </div>
+
+        {/* Language switcher */}
+        <button
+          onClick={() => setLocale(locale === 'sv' ? 'en' : 'sv')}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-vm-border text-vm-text-dim hover:text-vm-accent hover:border-vm-accent transition-colors font-mono text-[11px] tracking-wider uppercase"
+        >
+          <Globe className="w-3.5 h-3.5" />
+          {locale === 'sv' ? 'EN' : 'SV'}
+        </button>
 
         <button onClick={logout} className="font-mono text-xs text-vm-text-dim hover:text-vm-danger transition-colors">
           Log out

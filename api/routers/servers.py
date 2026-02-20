@@ -1,6 +1,8 @@
 import uuid
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +14,14 @@ from api.schemas import ServerCreate, ServerUpdate, ServerOut
 from api.services.ssh_client import test_ssh_connection, list_remote_directory
 
 router = APIRouter(prefix="/servers", tags=["servers"], dependencies=[Depends(get_current_user)])
+
+
+class TestConnectionRequest(BaseModel):
+    host: str
+    port: int = 22
+    auth_type: str = "ssh_key"
+    ssh_user: str | None = "root"
+    ssh_key_path: str | None = None
 
 
 @router.get("", response_model=list[ServerOut])
@@ -73,6 +83,21 @@ async def test_connection(server_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     success, message = await test_ssh_connection(server)
+    return {"success": success, "message": message}
+
+
+@router.post("/test-connection")
+async def test_connection_presave(body: TestConnectionRequest):
+    """Test SSH connection without saving the server first."""
+    fake_server = SimpleNamespace(
+        host=body.host,
+        port=body.port,
+        auth_type=body.auth_type,
+        ssh_user=body.ssh_user or "root",
+        ssh_key_path=body.ssh_key_path,
+        name="(unsaved)",
+    )
+    success, message = await test_ssh_connection(fake_server)
     return {"success": success, "message": message}
 
 

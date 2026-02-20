@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getNotificationChannels, createNotificationChannel, deleteNotificationChannel, testNotificationChannel } from '@/lib/api';
+import { getNotificationChannels, createNotificationChannel, updateNotificationChannel, deleteNotificationChannel, testNotificationChannel } from '@/lib/api';
 import FormLabel from '@/components/FormLabel';
-import { Plus, Trash2, TestTube, Bell, Send, Eye, EyeOff } from 'lucide-react';
+import { useT } from '@/lib/i18n';
+import { Plus, Trash2, TestTube, Bell, Send, Eye, EyeOff, Pencil, X } from 'lucide-react';
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
@@ -22,8 +23,10 @@ const TRIGGER_OPTIONS = [
 const TYPE_LABELS: Record<string, string> = { slack: 'Slack', ntfy: 'ntfy', telegram: 'Telegram', email: 'Email', webhook: 'Webhook' };
 
 export default function NotificationsPage() {
+  const t = useT();
   const [channels, setChannels] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
   const [channelType, setChannelType] = useState('slack');
   const [name, setName] = useState('');
   const [triggers, setTriggers] = useState<string[]>(['run.success', 'run.failed']);
@@ -56,10 +59,34 @@ export default function NotificationsPage() {
     }
   };
 
-  const handleCreate = async () => {
-    await createNotificationChannel({ name, channel_type: channelType, config: buildConfig(), triggers });
-    setShowForm(false);
-    setName(''); setChannelType('slack'); setTriggers(['run.success', 'run.failed']);
+  const resetForm = () => {
+    setName(''); setChannelType('slack'); setTriggers(['run.success', 'run.failed']); setEditId(null);
+    setSlackWebhookUrl(''); setSlackChannel(''); setNtfyTopic(''); setNtfyServer('https://ntfy.sh');
+    setTelegramBotToken(''); setTelegramChatId(''); setEmailRecipients(''); setEmailSubjectPrefix('[VaultMaster]');
+    setWebhookUrl(''); setWebhookSecret('');
+  };
+
+  const openNew = () => { resetForm(); setShowForm(true); };
+  const openEdit = (c: any) => {
+    setEditId(c.id); setName(c.name); setChannelType(c.channel_type); setTriggers(c.triggers || []);
+    const cfg = c.config || {};
+    if (c.channel_type === 'slack') { setSlackWebhookUrl(cfg.webhook_url || ''); setSlackChannel(cfg.channel || ''); }
+    if (c.channel_type === 'ntfy') { setNtfyTopic(cfg.topic || ''); setNtfyServer(cfg.server || 'https://ntfy.sh'); }
+    if (c.channel_type === 'telegram') { setTelegramBotToken(''); setTelegramChatId(cfg.chat_id || ''); }
+    if (c.channel_type === 'email') { setEmailRecipients((cfg.recipients || []).join(', ')); setEmailSubjectPrefix(cfg.subject_prefix || '[VaultMaster]'); }
+    if (c.channel_type === 'webhook') { setWebhookUrl(cfg.url || ''); setWebhookSecret(''); }
+    setShowForm(true);
+  };
+  const closeForm = () => { setShowForm(false); setEditId(null); };
+
+  const handleSave = async () => {
+    const payload = { name, channel_type: channelType, config: buildConfig(), triggers };
+    if (editId) {
+      await updateNotificationChannel(editId, payload);
+    } else {
+      await createNotificationChannel(payload);
+    }
+    closeForm(); resetForm();
     load();
   };
 
@@ -88,14 +115,17 @@ export default function NotificationsPage() {
           <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Notifications</h1>
           <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// NOTIFICATION CHANNELS · {channels.length} TOTAL</div>
         </div>
-        <button onClick={() => setShowForm(!showForm)} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
-          <Plus className="w-4 h-4" /> New Channel
+        <button onClick={openNew} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
+          <Plus className="w-4 h-4" /> {t('notif.new')}
         </button>
       </div>
 
       {showForm && (
         <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
-          <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">New Notification Channel</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-vm-text-bright uppercase tracking-wider">{editId ? t('notif.edit') : t('notif.new')}</h3>
+            <button onClick={closeForm} className="text-vm-text-dim hover:text-vm-text"><X className="w-5 h-5" /></button>
+          </div>
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
               <FormLabel label="Name" tooltip="A friendly name for this notification channel." />
@@ -203,7 +233,10 @@ export default function NotificationsPage() {
             </div>
           </div>
 
-          <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Save</button>
+          <div className="flex gap-3">
+            <button onClick={handleSave} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">{editId ? t('action.update') : t('action.save')}</button>
+            <button onClick={closeForm} className="px-4 py-2.5 text-vm-text-dim font-bold text-sm tracking-wider uppercase hover:text-vm-text">{t('action.cancel')}</button>
+          </div>
         </div>
       )}
 
@@ -228,10 +261,13 @@ export default function NotificationsPage() {
               </div>
             )}
             <div className="flex gap-2">
-              <button onClick={() => handleTest(c.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]">
-                <TestTube className="w-3 h-3" /> Test
+              <button onClick={() => openEdit(c)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]">
+                <Pencil className="w-3 h-3" /> {t('action.edit')}
               </button>
-              <button onClick={async () => { if (confirm('Delete this channel?')) { await deleteNotificationChannel(c.id); load(); }}} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
+              <button onClick={() => handleTest(c.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]">
+                <TestTube className="w-3 h-3" /> {t('action.test')}
+              </button>
+              <button onClick={async () => { if (confirm(t('notif.confirm_delete'))) { await deleteNotificationChannel(c.id); load(); }}} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
                 <Trash2 className="w-3 h-3" />
               </button>
             </div>

@@ -63,6 +63,7 @@ export const createServer = (data: any) => apiFetch('/v1/servers', { method: 'PO
 export const updateServer = (id: string, data: any) => apiFetch(`/v1/servers/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 export const deleteServer = (id: string) => apiFetch(`/v1/servers/${id}`, { method: 'DELETE' });
 export const testServer = (id: string) => apiFetch(`/v1/servers/${id}/test`, { method: 'POST' });
+export const testConnectionPresave = (data: any) => apiFetch('/v1/servers/test-connection', { method: 'POST', body: JSON.stringify(data) });
 export const browseServer = (id: string, path: string) => apiFetch(`/v1/servers/${id}/browse?path=${encodeURIComponent(path)}`);
 
 // Jobs

@@ -6,6 +6,15 @@ import asyncssh
 
 logger = logging.getLogger(__name__)
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def _resolve_host(host: str) -> str:
+    """Rewrite localhost addresses to host.docker.internal so the container can reach the host."""
+    if host.lower() in LOCAL_HOSTS:
+        return "host.docker.internal"
+    return host
+
 
 async def test_ssh_connection(server) -> tuple[bool, str]:
     """Test SSH connectivity to a server."""
@@ -16,8 +25,9 @@ async def test_ssh_connection(server) -> tuple[bool, str]:
         if server.auth_type == "api":
             return True, "API-based server — use provider API to test"
 
+        resolved = _resolve_host(server.host)
         connect_kwargs = {
-            "host": server.host,
+            "host": resolved,
             "port": server.port,
             "username": server.ssh_user or "root",
             "known_hosts": None,
@@ -42,8 +52,9 @@ async def list_remote_directory(server, path: str = "/") -> list[dict]:
         if server.auth_type in ("api",):
             return [{"error": "File browsing not supported for API-based servers"}]
 
+        resolved = _resolve_host(server.host)
         connect_kwargs = {
-            "host": server.host,
+            "host": resolved,
             "port": server.port,
             "username": server.ssh_user or "root",
             "known_hosts": None,
@@ -76,8 +87,9 @@ async def list_remote_directory(server, path: str = "/") -> list[dict]:
 
 async def run_remote_command(server, command: str, timeout: int = 300) -> tuple[int, str, str]:
     """Execute a command on a remote server via SSH."""
+    resolved = _resolve_host(server.host)
     connect_kwargs = {
-        "host": server.host,
+        "host": resolved,
         "port": server.port,
         "username": server.ssh_user or "root",
         "known_hosts": None,
