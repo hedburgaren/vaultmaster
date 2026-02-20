@@ -138,13 +138,13 @@ async def list_remote_databases(server, db_type: str = "postgresql") -> list[dic
                 is_local = db_host in ('127.0.0.1', 'localhost', '::1', '')
                 if is_local and not db_password:
                     # Peer auth: switch to the OS user that owns the DB (e.g. postgres, odoo18)
-                    cmd = f"sudo -n -u {db_user} psql -p {db_port} -t -A -c \"{sql_query}\""
+                    cmd = f"sudo -n -u {db_user} psql -d postgres -p {db_port} -t -A -c \"{sql_query}\""
                 elif db_password:
                     # Password auth via PGPASSWORD
-                    cmd = f"PGPASSWORD='{db_password}' psql -h {db_host} -p {db_port} -U {db_user} -w -t -A -c \"{sql_query}\""
+                    cmd = f"PGPASSWORD='{db_password}' psql -h {db_host} -p {db_port} -U {db_user} -d postgres -w -t -A -c \"{sql_query}\""
                 else:
                     # No password, remote host — try direct connection
-                    cmd = f"psql -h {db_host} -p {db_port} -U {db_user} -t -A -c \"{sql_query}\""
+                    cmd = f"psql -h {db_host} -p {db_port} -U {db_user} -d postgres -t -A -c \"{sql_query}\""
             elif db_type in ('mysql', 'mariadb'):
                 pw_flag = f"-p'{db_password}'" if db_password else ""
                 cmd = f"mysql -h {db_host} -P {db_port} -u {db_user} {pw_flag} -N -e \"SELECT schema_name, IFNULL(SUM(data_length + index_length), 0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON schema_name = table_schema WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') GROUP BY schema_name ORDER BY schema_name;\""
