@@ -1,19 +1,22 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getStorageDestinations, createStorageDestination, deleteStorageDestination, testStorage } from '@/lib/api';
+import { getStorageDestinations, createStorageDestination, updateStorageDestination, deleteStorageDestination, testStorage } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
+import { useT } from '@/lib/i18n';
 import FormLabel from '@/components/FormLabel';
 import CapacityInput from '@/components/CapacityInput';
-import { Plus, Trash2, TestTube, Database, HardDrive, Cloud, Globe, Server, Eye, EyeOff } from 'lucide-react';
+import { Plus, Trash2, TestTube, Database, HardDrive, Cloud, Globe, Server, Eye, EyeOff, Pencil, X } from 'lucide-react';
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
 const BACKEND_LABELS: Record<string, string> = { local: 'Local Disk', s3: 'S3 / DO Spaces', sftp: 'SFTP Server', b2: 'Backblaze B2', gdrive: 'Google Drive', onedrive: 'OneDrive' };
 
 export default function StoragePage() {
+  const t = useT();
   const [dests, setDests] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
   const [backend, setBackend] = useState('local');
   const [name, setName] = useState('');
   const [capacityBytes, setCapacityBytes] = useState<number | null>(null);
@@ -59,10 +62,37 @@ export default function StoragePage() {
     }
   };
 
-  const handleCreate = async () => {
-    await createStorageDestination({ name, backend, config: buildConfig(), capacity_bytes: capacityBytes });
-    setShowForm(false);
-    setName(''); setBackend('local'); setCapacityBytes(null);
+  const resetForm = () => {
+    setName(''); setBackend('local'); setCapacityBytes(null); setEditId(null);
+    setLocalPath('/mnt/backups'); setS3Endpoint(''); setS3Bucket(''); setS3Region('us-east-1'); setS3AccessKey(''); setS3SecretKey('');
+    setSftpHost(''); setSftpPort('22'); setSftpUser(''); setSftpPassword(''); setSftpPath('/backups');
+    setB2KeyId(''); setB2AppKey(''); setB2Bucket('');
+    setGdriveClientId(''); setGdriveClientSecret(''); setGdriveFolderId('');
+    setOnedriveClientId(''); setOnedriveClientSecret(''); setOnedriveDriveId(''); setOnedriveFolderPath('/Backups');
+  };
+
+  const openNew = () => { resetForm(); setShowForm(true); };
+  const openEdit = (d: any) => {
+    setEditId(d.id); setName(d.name); setBackend(d.backend); setCapacityBytes(d.capacity_bytes);
+    const c = d.config || {};
+    if (d.backend === 'local') { setLocalPath(c.path || '/mnt/backups'); }
+    if (d.backend === 's3') { setS3Endpoint(c.endpoint || ''); setS3Bucket(c.bucket || ''); setS3Region(c.region || 'us-east-1'); setS3AccessKey(c.access_key || ''); setS3SecretKey(''); }
+    if (d.backend === 'sftp') { setSftpHost(c.host || ''); setSftpPort(String(c.port || 22)); setSftpUser(c.user || ''); setSftpPassword(''); setSftpPath(c.path || '/backups'); }
+    if (d.backend === 'b2') { setB2KeyId(c.key_id || ''); setB2AppKey(''); setB2Bucket(c.bucket || ''); }
+    if (d.backend === 'gdrive') { setGdriveClientId(c.client_id || ''); setGdriveClientSecret(''); setGdriveFolderId(c.folder_id || ''); }
+    if (d.backend === 'onedrive') { setOnedriveClientId(c.client_id || ''); setOnedriveClientSecret(''); setOnedriveDriveId(c.drive_id || ''); setOnedriveFolderPath(c.folder_path || '/Backups'); }
+    setShowForm(true);
+  };
+  const closeForm = () => { setShowForm(false); setEditId(null); };
+
+  const handleSave = async () => {
+    const payload = { name, backend, config: buildConfig(), capacity_bytes: capacityBytes };
+    if (editId) {
+      await updateStorageDestination(editId, payload);
+    } else {
+      await createStorageDestination(payload);
+    }
+    closeForm(); resetForm();
     load();
   };
 
@@ -96,14 +126,17 @@ export default function StoragePage() {
           <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Storage</h1>
           <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// STORAGE DESTINATIONS · {dests.length} TOTAL</div>
         </div>
-        <button onClick={() => setShowForm(!showForm)} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
-          <Plus className="w-4 h-4" /> Add New
+        <button onClick={openNew} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
+          <Plus className="w-4 h-4" /> {t('storage.add')}
         </button>
       </div>
 
       {showForm && (
         <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
-          <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">New Storage Destination</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-vm-text-bright uppercase tracking-wider">{editId ? t('storage.edit') : t('storage.new')}</h3>
+            <button onClick={closeForm} className="text-vm-text-dim hover:text-vm-text"><X className="w-5 h-5" /></button>
+          </div>
 
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
@@ -245,7 +278,10 @@ export default function StoragePage() {
             <CapacityInput value={capacityBytes} onChange={setCapacityBytes} />
           </div>
 
-          <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Save</button>
+          <div className="flex gap-3">
+            <button onClick={handleSave} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">{editId ? t('action.update') : t('action.save')}</button>
+            <button onClick={closeForm} className="px-4 py-2.5 text-vm-text-dim font-bold text-sm tracking-wider uppercase hover:text-vm-text">{t('action.cancel')}</button>
+          </div>
         </div>
       )}
 
@@ -278,10 +314,13 @@ export default function StoragePage() {
                 </div>
               )}
               <div className="flex gap-2">
-                <button onClick={() => handleTest(d.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]">
-                  <TestTube className="w-3 h-3" /> Test
+                <button onClick={() => openEdit(d)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]">
+                  <Pencil className="w-3 h-3" /> {t('action.edit')}
                 </button>
-                <button onClick={async () => { if (confirm('Delete this storage destination?')) { await deleteStorageDestination(d.id); load(); }}} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
+                <button onClick={() => handleTest(d.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]">
+                  <TestTube className="w-3 h-3" /> {t('action.test')}
+                </button>
+                <button onClick={async () => { if (confirm(t('storage.confirm_delete'))) { await deleteStorageDestination(d.id); load(); }}} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>

@@ -1,22 +1,29 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
-import { getServers, createServer, deleteServer, testServer } from '@/lib/api';
+import { getServers, createServer, updateServer, deleteServer, testServer, testConnectionPresave } from '@/lib/api';
 import { formatRelative } from '@/lib/utils';
+import { useT } from '@/lib/i18n';
 import Badge from '@/components/Badge';
 import FormLabel from '@/components/FormLabel';
 import TagInput from '@/components/TagInput';
-import { Plus, Trash2, TestTube, Server, Eye, EyeOff } from 'lucide-react';
+import { Plus, Trash2, TestTube, Server, Eye, EyeOff, Pencil, X, Wifi } from 'lucide-react';
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
+const emptyForm = { name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: 'root', ssh_key_path: '', ssh_password: '', api_token: '', tags: [] as string[] };
+
 export default function ServersPage() {
+  const t = useT();
   const [servers, setServers] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: 'root', ssh_key_path: '', ssh_password: '', api_token: '', tags: [] as string[] });
+  const [editId, setEditId] = useState<string | null>(null);
+  const [form, setForm] = useState({ ...emptyForm });
   const [showSecret, setShowSecret] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, any>>({});
+  const [formTestResult, setFormTestResult] = useState<any>(null);
+  const [formTesting, setFormTesting] = useState(false);
 
   const load = () => getServers().then(setServers).catch(() => {});
   useEffect(() => { load(); }, []);
@@ -27,15 +34,43 @@ export default function ServersPage() {
     return Array.from(set).sort();
   }, [servers]);
 
-  const handleCreate = async () => {
+  const openNew = () => { setEditId(null); setForm({ ...emptyForm }); setShowForm(true); setFormTestResult(null); };
+  const openEdit = (s: any) => {
+    setEditId(s.id);
+    setForm({ name: s.name, host: s.host, port: s.port, auth_type: s.auth_type, provider: s.provider || 'custom', ssh_user: s.ssh_user || 'root', ssh_key_path: s.ssh_key_path || '', ssh_password: '', api_token: '', tags: s.tags || [] });
+    setShowForm(true);
+    setFormTestResult(null);
+  };
+  const closeForm = () => { setShowForm(false); setEditId(null); setFormTestResult(null); };
+
+  const buildPayload = () => {
     const payload: any = { name: form.name, host: form.host, port: Number(form.port), auth_type: form.auth_type, provider: form.provider, ssh_user: form.ssh_user, tags: form.tags };
     if (form.auth_type === 'ssh_key') payload.ssh_key_path = form.ssh_key_path;
     if (form.auth_type === 'ssh_password') payload.meta = { ssh_password: form.ssh_password };
     if (form.auth_type === 'api') payload.api_token = form.api_token;
-    await createServer(payload);
-    setShowForm(false);
-    setForm({ name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: 'root', ssh_key_path: '', ssh_password: '', api_token: '', tags: [] });
+    return payload;
+  };
+
+  const handleSave = async () => {
+    if (editId) {
+      await updateServer(editId, buildPayload());
+    } else {
+      await createServer(buildPayload());
+    }
+    closeForm();
     load();
+  };
+
+  const handleFormTest = async () => {
+    setFormTesting(true);
+    setFormTestResult(null);
+    try {
+      const res = await testConnectionPresave({ host: form.host, port: Number(form.port), auth_type: form.auth_type, ssh_user: form.ssh_user, ssh_key_path: form.ssh_key_path || undefined });
+      setFormTestResult(res);
+    } catch (e: any) {
+      setFormTestResult({ success: false, message: e.message });
+    }
+    setFormTesting(false);
   };
 
   const handleTest = async (id: string) => {
@@ -50,111 +85,116 @@ export default function ServersPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (confirm('Delete this server?')) { await deleteServer(id); load(); }
+    if (confirm(t('servers.confirm_delete'))) { await deleteServer(id); load(); }
   };
+
+  const ServerForm = () => (
+    <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-bold text-vm-text-bright uppercase tracking-wider">{editId ? t('servers.edit') : t('servers.new')}</h3>
+        <button onClick={closeForm} className="text-vm-text-dim hover:text-vm-text"><X className="w-5 h-5" /></button>
+      </div>
+      <div className="grid grid-cols-2 gap-4 mb-4">
+        <div>
+          <FormLabel label={t('servers.name')} tooltip={t('servers.name_tip')} />
+          <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className={INPUT} placeholder="my-server" />
+        </div>
+        <div>
+          <FormLabel label={t('servers.host')} tooltip={t('servers.host_tip')} />
+          <input value={form.host} onChange={e => setForm({...form, host: e.target.value})} className={INPUT} placeholder="192.168.1.42" />
+        </div>
+        <div>
+          <FormLabel label={t('servers.ssh_user')} tooltip={t('servers.ssh_user_tip')} />
+          <input value={form.ssh_user} onChange={e => setForm({...form, ssh_user: e.target.value})} className={INPUT} placeholder="root" />
+        </div>
+        <div>
+          <FormLabel label={t('servers.ssh_port')} tooltip={t('servers.ssh_port_tip')} />
+          <input type="number" value={form.port} onChange={e => setForm({...form, port: Number(e.target.value)})} className={INPUT} />
+        </div>
+        <div>
+          <FormLabel label={t('servers.auth_type')} tooltip={t('servers.auth_type_tip')} />
+          <select value={form.auth_type} onChange={e => setForm({...form, auth_type: e.target.value})} className={INPUT}>
+            <option value="ssh_key">SSH Key</option>
+            <option value="ssh_password">SSH Password</option>
+            <option value="api">API Token</option>
+            <option value="local">Local (no SSH)</option>
+          </select>
+        </div>
+        <div>
+          <FormLabel label={t('servers.provider')} tooltip={t('servers.provider_tip')} />
+          <select value={form.provider} onChange={e => setForm({...form, provider: e.target.value})} className={INPUT}>
+            <option value="custom">Custom / Bare Metal</option>
+            <option value="digitalocean">DigitalOcean</option>
+            <option value="hetzner">Hetzner</option>
+            <option value="linode">Linode</option>
+            <option value="aws">AWS</option>
+          </select>
+        </div>
+
+        {form.auth_type === 'ssh_key' && (
+          <div className="col-span-2">
+            <FormLabel label={t('servers.ssh_key_path')} tooltip={t('servers.ssh_key_path_tip')} />
+            <input value={form.ssh_key_path} onChange={e => setForm({...form, ssh_key_path: e.target.value})} className={INPUT} placeholder="/root/.ssh/id_ed25519" />
+          </div>
+        )}
+        {form.auth_type === 'ssh_password' && (
+          <div className="col-span-2">
+            <FormLabel label={t('servers.ssh_password')} tooltip={t('servers.ssh_password_tip')} />
+            <div className="relative">
+              <input type={showSecret ? 'text' : 'password'} value={form.ssh_password} onChange={e => setForm({...form, ssh_password: e.target.value})} className={INPUT + ' pr-10'} placeholder="Enter SSH password" />
+              <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
+                {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+        )}
+        {form.auth_type === 'api' && (
+          <div className="col-span-2">
+            <FormLabel label={t('servers.api_token')} tooltip={t('servers.api_token_tip')} />
+            <div className="relative">
+              <input type={showSecret ? 'text' : 'password'} value={form.api_token} onChange={e => setForm({...form, api_token: e.target.value})} className={INPUT + ' pr-10'} placeholder="Enter API token" />
+              <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
+                {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="col-span-2">
+          <FormLabel label={t('servers.tags')} tooltip={t('servers.tags_tip')} />
+          <TagInput value={form.tags} onChange={tags => setForm({...form, tags})} suggestions={allTags} placeholder="docker, postgresql, odoo" />
+        </div>
+      </div>
+
+      {formTestResult && (
+        <div className={`font-mono text-xs p-2.5 rounded mb-4 ${formTestResult.success ? 'bg-vm-success/10 text-vm-success border border-vm-success/30' : 'bg-vm-danger/10 text-vm-danger border border-vm-danger/30'}`}>
+          {formTestResult.message}
+        </div>
+      )}
+
+      <div className="flex gap-3">
+        <button onClick={handleSave} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">{editId ? t('action.update') : t('action.save')}</button>
+        <button onClick={handleFormTest} disabled={formTesting || !form.host} className="flex items-center gap-1.5 px-4 py-2.5 border border-vm-accent text-vm-accent rounded font-bold text-sm tracking-wider uppercase hover:bg-vm-accent/[0.08] disabled:opacity-50">
+          <Wifi className="w-4 h-4" /> {formTesting ? t('action.testing') : t('servers.test_connection')}
+        </button>
+        <button onClick={closeForm} className="px-4 py-2.5 text-vm-text-dim font-bold text-sm tracking-wider uppercase hover:text-vm-text">{t('action.cancel')}</button>
+      </div>
+    </div>
+  );
 
   return (
     <div>
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Servers</h1>
-          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// CONNECTED SERVERS · {servers.length} TOTAL</div>
+          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">{t('servers.title')}</h1>
+          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">{t('servers.subtitle_prefix')} {servers.length} {t('common.total')}</div>
         </div>
-        <button onClick={() => setShowForm(!showForm)} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
-          <Plus className="w-4 h-4" /> Add Server
+        <button onClick={openNew} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
+          <Plus className="w-4 h-4" /> {t('servers.add')}
         </button>
       </div>
 
-      {showForm && (
-        <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
-          <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">New Server</h3>
-          <div className="grid grid-cols-2 gap-4 mb-4">
-            <div>
-              <FormLabel label="Name" tooltip="A friendly name to identify this server in VaultMaster." />
-              <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} className={INPUT} placeholder="my-server" />
-            </div>
-            <div>
-              <FormLabel label="Host" tooltip="IP address or hostname of the server. Must be reachable from VaultMaster." />
-              <input value={form.host} onChange={e => setForm({...form, host: e.target.value})} className={INPUT} placeholder="192.168.1.42" />
-            </div>
-            <div>
-              <FormLabel label="SSH User" tooltip="The SSH username used to connect. Typically 'root' or a dedicated backup user." />
-              <input value={form.ssh_user} onChange={e => setForm({...form, ssh_user: e.target.value})} className={INPUT} placeholder="root" />
-            </div>
-            <div>
-              <FormLabel label="SSH Port" tooltip="SSH port number. Default is 22." />
-              <input type="number" value={form.port} onChange={e => setForm({...form, port: Number(e.target.value)})} className={INPUT} />
-            </div>
-            <div>
-              <FormLabel label="Auth Type" tooltip="How VaultMaster authenticates to this server. SSH Key is recommended for security." />
-              <select value={form.auth_type} onChange={e => setForm({...form, auth_type: e.target.value})} className={INPUT}>
-                <option value="ssh_key">SSH Key</option>
-                <option value="ssh_password">SSH Password</option>
-                <option value="api">API Token</option>
-                <option value="local">Local (no SSH)</option>
-              </select>
-            </div>
-            <div>
-              <FormLabel label="Provider" tooltip="Cloud provider for provider-specific features like snapshots." />
-              <select value={form.provider} onChange={e => setForm({...form, provider: e.target.value})} className={INPUT}>
-                <option value="custom">Custom / Bare Metal</option>
-                <option value="digitalocean">DigitalOcean</option>
-                <option value="hetzner">Hetzner</option>
-                <option value="linode">Linode</option>
-                <option value="aws">AWS</option>
-              </select>
-            </div>
-
-            {/* Dynamic auth fields */}
-            {form.auth_type === 'ssh_key' && (
-              <div className="col-span-2">
-                <FormLabel label="SSH Key Path" tooltip="Absolute path to the private SSH key on the VaultMaster host. Example: /root/.ssh/id_ed25519" />
-                <input value={form.ssh_key_path} onChange={e => setForm({...form, ssh_key_path: e.target.value})} className={INPUT} placeholder="/root/.ssh/id_ed25519" />
-              </div>
-            )}
-            {form.auth_type === 'ssh_password' && (
-              <div className="col-span-2">
-                <FormLabel label="SSH Password" tooltip="Password for SSH authentication. Will be encrypted before storage." />
-                <div className="relative">
-                  <input
-                    type={showSecret ? 'text' : 'password'}
-                    value={form.ssh_password}
-                    onChange={e => setForm({...form, ssh_password: e.target.value})}
-                    className={INPUT + ' pr-10'}
-                    placeholder="Enter SSH password"
-                  />
-                  <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
-                    {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-              </div>
-            )}
-            {form.auth_type === 'api' && (
-              <div className="col-span-2">
-                <FormLabel label="API Token" tooltip="Provider API token for cloud operations (snapshots, etc). Will be encrypted before storage." />
-                <div className="relative">
-                  <input
-                    type={showSecret ? 'text' : 'password'}
-                    value={form.api_token}
-                    onChange={e => setForm({...form, api_token: e.target.value})}
-                    className={INPUT + ' pr-10'}
-                    placeholder="Enter API token"
-                  />
-                  <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
-                    {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className="col-span-2">
-              <FormLabel label="Tags" tooltip="Organize servers with tags. Press Enter or comma to add. Click existing tags to reuse them." />
-              <TagInput value={form.tags} onChange={tags => setForm({...form, tags})} suggestions={allTags} placeholder="docker, postgresql, odoo" />
-            </div>
-          </div>
-          <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Save</button>
-        </div>
-      )}
+      {showForm && <ServerForm />}
 
       <div className="grid grid-cols-2 gap-4">
         {servers.map((s: any) => (
@@ -182,18 +222,21 @@ export default function ServersPage() {
                 ))}
               </div>
             )}
-            <div className="font-mono text-[11px] text-vm-text-dim mb-3">Last seen: {formatRelative(s.last_seen)}</div>
+            <div className="font-mono text-[11px] text-vm-text-dim mb-3">{t('servers.last_seen')}: {formatRelative(s.last_seen)}</div>
             {testResult[s.id] && (
               <div className={`font-mono text-xs p-2 rounded mb-3 ${testResult[s.id].success ? 'bg-vm-success/10 text-vm-success border border-vm-success/30' : 'bg-vm-danger/10 text-vm-danger border border-vm-danger/30'}`}>
                 {testResult[s.id].message}
               </div>
             )}
             <div className="flex gap-2">
+              <button onClick={() => openEdit(s)} className="flex items-center gap-1.5 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08] transition-all">
+                <Pencil className="w-3.5 h-3.5" /> {t('action.edit')}
+              </button>
               <button onClick={() => handleTest(s.id)} disabled={testing === s.id} className="flex items-center gap-1.5 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08] transition-all disabled:opacity-50">
-                <TestTube className="w-3.5 h-3.5" /> {testing === s.id ? 'Testing...' : 'Test'}
+                <TestTube className="w-3.5 h-3.5" /> {testing === s.id ? t('action.testing') : t('action.test')}
               </button>
               <button onClick={() => handleDelete(s.id)} className="flex items-center gap-1.5 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10 transition-all">
-                <Trash2 className="w-3.5 h-3.5" /> Delete
+                <Trash2 className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
@@ -201,7 +244,7 @@ export default function ServersPage() {
         {servers.length === 0 && (
           <div className="col-span-2 text-center py-12 text-vm-text-dim font-mono">
             <Server className="w-12 h-12 mx-auto mb-3 opacity-40" />
-            <div className="tracking-[2px]">No servers configured</div>
+            <div className="tracking-[2px]">{t('servers.none')}</div>
           </div>
         )}
       </div>

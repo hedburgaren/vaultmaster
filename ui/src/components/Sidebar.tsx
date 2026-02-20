@@ -2,24 +2,26 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Clock, RotateCcw, Database, Bell, Settings, Server, Archive, Shield, Users, Webhook } from 'lucide-react';
+import { LayoutDashboard, Clock, RotateCcw, Database, Bell, Settings, Server, Archive, Shield, Users } from 'lucide-react';
 import clsx from 'clsx';
+import { useT } from '@/lib/i18n';
 
 const navItems = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/servers', label: 'Servers', icon: Server },
-  { href: '/jobs', label: 'Backup Jobs', icon: Clock },
-  { href: '/runs', label: 'Runs', icon: Archive },
-  { href: '/artifacts', label: 'Restore', icon: RotateCcw },
-  { href: '/storage', label: 'Storage', icon: Database },
-  { href: '/notifications', label: 'Notifications', icon: Bell },
-  { href: '/audit', label: 'Audit Log', icon: Shield },
-  { href: '/users', label: 'Users', icon: Users },
-  { href: '/settings', label: 'Settings', icon: Settings },
+  { href: '/dashboard', i18nKey: 'nav.dashboard', icon: LayoutDashboard },
+  { href: '/servers', i18nKey: 'nav.servers', icon: Server },
+  { href: '/jobs', i18nKey: 'nav.jobs', icon: Clock },
+  { href: '/runs', i18nKey: 'nav.runs', icon: Archive },
+  { href: '/artifacts', i18nKey: 'nav.artifacts', icon: RotateCcw },
+  { href: '/storage', i18nKey: 'nav.storage', icon: Database },
+  { href: '/notifications', i18nKey: 'nav.notifications', icon: Bell },
+  { href: '/audit', i18nKey: 'nav.audit', icon: Shield },
+  { href: '/users', i18nKey: 'nav.users', icon: Users },
+  { href: '/settings', i18nKey: 'nav.settings', icon: Settings },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const t = useT();
 
   return (
     <aside className="w-[260px] bg-vm-surface border-r border-vm-border py-5 flex flex-col gap-2 shrink-0">
@@ -41,7 +43,7 @@ export default function Sidebar() {
               )}
             >
               <item.icon className="w-[18px] h-[18px]" />
-              {item.label}
+              {t(item.i18nKey)}
             </Link>
           );
         })}
