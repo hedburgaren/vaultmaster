@@ -39,6 +39,7 @@ class ServerOut(BaseModel):
     auth_type: str
     provider: str
     ssh_user: str | None
+    ssh_key_path: str | None = None
     tags: list[str] | None
     is_active: bool
     last_seen: datetime | None
