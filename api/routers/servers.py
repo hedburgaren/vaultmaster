@@ -26,6 +26,8 @@ class TestConnectionRequest(BaseModel):
     auth_type: str = "ssh_key"
     ssh_user: str | None = "root"
     ssh_key_path: str | None = None
+    ssh_password: str | None = None
+    meta: dict = {}
 
 
 @router.get("", response_model=list[ServerOut])
@@ -49,12 +51,16 @@ async def create_server(body: ServerCreate, db: AsyncSession = Depends(get_db)):
 @router.post("/test-connection")
 async def test_connection_presave(body: TestConnectionRequest):
     """Test SSH connection without saving the server first."""
+    meta = {**body.meta}
+    if body.ssh_password:
+        meta["ssh_password"] = body.ssh_password
     fake_server = SimpleNamespace(
         host=body.host,
         port=body.port,
         auth_type=body.auth_type,
         ssh_user=body.ssh_user or "root",
         ssh_key_path=body.ssh_key_path,
+        meta=meta,
         name="(unsaved)",
     )
     success, message = await test_ssh_connection(fake_server)
@@ -138,6 +144,14 @@ async def test_connection(server_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     success, message = await test_ssh_connection(server)
+    if success:
+        from datetime import datetime, timezone
+        server.last_seen = datetime.now(timezone.utc)
+        server.last_error = None
+        await db.flush()
+    else:
+        server.last_error = message
+        await db.flush()
     return {"success": success, "message": message}
 
 
