@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
-import { getJobs, createJob, updateJob, deleteJob, triggerJob, getServers, getStorageDestinations, getRetentionPolicies, getServerDatabases, getServerDocker, browseServer } from '@/lib/api';
+import { getJobs, createJob, updateJob, deleteJob, triggerJob, getServers, getStorageDestinations, getRetentionPolicies, getServerDatabases, getServerDocker, browseServer, pruneDockerVolumes } from '@/lib/api';
 import { backupTypeIcon, formatBytes } from '@/lib/utils';
 import { useT } from '@/lib/i18n';
 import Badge from '@/components/Badge';
@@ -302,32 +302,60 @@ export default function JobsPage() {
                   </div>
                 )}
                 {/* Volume selection */}
-                <FormLabel label={t('jobs.docker_volumes')} tooltip={t('jobs.docker_volumes_tip')} />
-                {dockerInfo.volumes?.length > 0 ? (
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {dockerInfo.volumes.map((v: any) => (
-                      <button key={v.name} type="button" onClick={() => toggleVolume(v.name)}
-                        className={`flex flex-col gap-1 px-3 py-2 rounded border font-mono text-[11px] transition-all text-left ${form.volume_names.includes(v.name) ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : 'bg-vm-surface border-vm-border text-vm-text-dim hover:border-vm-accent/50'}`}>
-                        <div className="flex items-center gap-2 w-full">
-                          <span className={`w-3 h-3 rounded-sm border flex-shrink-0 ${form.volume_names.includes(v.name) ? 'bg-vm-accent border-vm-accent' : 'border-vm-border'}`}>
-                            {form.volume_names.includes(v.name) && <span className="block w-full h-full text-center text-[8px] text-vm-bg leading-3">✓</span>}
-                          </span>
-                          <span className="truncate">{v.name}</span>
-                          <span className="ml-auto text-[10px] text-vm-text-dim flex-shrink-0">{v.driver}</span>
+                {(() => {
+                  const usedVols = (dockerInfo.volumes || []).filter((v: any) => v.used_by?.length > 0);
+                  const orphanVols = (dockerInfo.volumes || []).filter((v: any) => !v.used_by?.length);
+                  const sortedVols = [...usedVols, ...orphanVols];
+                  return <>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <FormLabel label={t('jobs.docker_volumes')} tooltip={t('jobs.docker_volumes_tip')} />
+                      {orphanVols.length > 0 && (
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] text-vm-warning">{orphanVols.length} {t('jobs.docker_orphan_volumes')}</span>
+                          <button type="button" onClick={async () => {
+                            if (!confirm(t('jobs.docker_prune_confirm'))) return;
+                            try {
+                              const res = await pruneDockerVolumes(form.server_id);
+                              if (res.success) { alert(t('jobs.docker_prune_success') + '\n' + (res.output || '')); loadDocker(); }
+                              else { alert(t('jobs.docker_prune_error') + ': ' + res.error); }
+                            } catch (e: any) { alert(e.message); }
+                          }} className="flex items-center gap-1 px-2 py-1 border border-vm-warning/50 text-vm-warning rounded text-[10px] font-bold tracking-wider uppercase hover:bg-vm-warning/10">
+                            <Trash2 className="w-3 h-3" /> {t('jobs.docker_prune')}
+                          </button>
                         </div>
-                        {v.used_by?.length > 0 && (
-                          <div className="flex flex-wrap gap-1 ml-5">
-                            {v.used_by.map((c: string) => (
-                              <span key={c} className="text-[9px] px-1.5 py-0.5 rounded bg-vm-surface2 border border-vm-border text-vm-text-dim">↳ {c}</span>
-                            ))}
-                          </div>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="font-mono text-xs text-vm-text-dim py-2">{t('jobs.docker_no_volumes')}</div>
-                )}
+                      )}
+                    </div>
+                    {sortedVols.length > 0 ? (
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {sortedVols.map((v: any) => {
+                          const isOrphan = !v.used_by?.length;
+                          return (
+                            <button key={v.name} type="button" onClick={() => toggleVolume(v.name)}
+                              className={`flex flex-col gap-1 px-3 py-2 rounded border font-mono text-[11px] transition-all text-left ${form.volume_names.includes(v.name) ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : isOrphan ? 'bg-vm-surface border-vm-border/50 text-vm-text-dim/60 hover:border-vm-warning/50' : 'bg-vm-surface border-vm-border text-vm-text-dim hover:border-vm-accent/50'}`}>
+                              <div className="flex items-center gap-2 w-full">
+                                <span className={`w-3 h-3 rounded-sm border flex-shrink-0 ${form.volume_names.includes(v.name) ? 'bg-vm-accent border-vm-accent' : 'border-vm-border'}`}>
+                                  {form.volume_names.includes(v.name) && <span className="block w-full h-full text-center text-[8px] text-vm-bg leading-3">✓</span>}
+                                </span>
+                                <span className="truncate">{v.name}</span>
+                                {isOrphan && <span className="text-[9px] px-1 py-0.5 rounded bg-vm-warning/10 border border-vm-warning/30 text-vm-warning flex-shrink-0">{t('jobs.docker_orphan')}</span>}
+                                <span className="ml-auto text-[10px] text-vm-text-dim flex-shrink-0">{v.driver}</span>
+                              </div>
+                              {v.used_by?.length > 0 && (
+                                <div className="flex flex-wrap gap-1 ml-5">
+                                  {v.used_by.map((c: string) => (
+                                    <span key={c} className="text-[9px] px-1.5 py-0.5 rounded bg-vm-surface2 border border-vm-border text-vm-text-dim">↳ {c}</span>
+                                  ))}
+                                </div>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="font-mono text-xs text-vm-text-dim py-2">{t('jobs.docker_no_volumes')}</div>
+                    )}
+                  </>;
+                })()}
               </>
             )}
           </div>

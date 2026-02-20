@@ -13,7 +13,7 @@ from api.database import get_db
 from api.models.server import Server
 from api.models.user import User
 from api.schemas import ServerCreate, ServerUpdate, ServerOut
-from api.services.ssh_client import test_ssh_connection, list_remote_directory, list_remote_databases, list_remote_docker
+from api.services.ssh_client import test_ssh_connection, list_remote_directory, list_remote_databases, list_remote_docker, prune_docker_volumes
 
 router = APIRouter(prefix="/servers", tags=["servers"], dependencies=[Depends(get_current_user)])
 
@@ -123,6 +123,16 @@ async def list_docker(server_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Server not found")
     docker_info = await list_remote_docker(server)
     return docker_info
+
+
+@router.post("/{server_id}/docker/prune-volumes")
+async def prune_volumes(server_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Remove unused Docker volumes on a server."""
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    return await prune_docker_volumes(server)
 
 
 @router.get("/{server_id}", response_model=ServerOut)
