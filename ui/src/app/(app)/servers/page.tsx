@@ -45,7 +45,7 @@ export default function ServersPage() {
 
   const buildPayload = () => {
     const payload: any = { name: form.name, host: form.host, port: Number(form.port), auth_type: form.auth_type, provider: form.provider, ssh_user: form.ssh_user || 'root', tags: form.tags, meta: { use_sudo: form.use_sudo } };
-    if (form.auth_type === 'ssh_key') payload.ssh_key_path = form.ssh_key_path;
+    if (form.ssh_key_path) payload.ssh_key_path = form.ssh_key_path;
     if (form.auth_type === 'ssh_password') payload.meta = { ...payload.meta, ssh_password: form.ssh_password };
     if (form.auth_type === 'api') payload.api_token = form.api_token;
     return payload;
