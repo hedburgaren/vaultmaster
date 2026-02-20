@@ -16,7 +16,7 @@ services:
       - ./migrations:/app/migrations
       - /mnt/backup:/mnt/backup
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /root/.ssh:/root/.ssh:ro
+      - /root/.ssh:/root/.ssh
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

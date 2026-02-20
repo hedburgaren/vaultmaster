@@ -11,7 +11,7 @@ import { Plus, Trash2, TestTube, Server, Eye, EyeOff, Pencil, X, Wifi } from 'lu
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
-const emptyForm = { name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: 'root', ssh_key_path: '', ssh_password: '', api_token: '', tags: [] as string[] };
+const emptyForm = { name: '', host: '', port: 22, auth_type: 'ssh_key', provider: 'custom', ssh_user: '', ssh_key_path: '/root/.ssh/vaultmaster_ed25519', ssh_password: '', api_token: '', tags: [] as string[], use_sudo: true };
 
 export default function ServersPage() {
   const t = useT();
@@ -37,16 +37,16 @@ export default function ServersPage() {
   const openNew = () => { setEditId(null); setForm({ ...emptyForm }); setShowForm(true); setFormTestResult(null); };
   const openEdit = (s: any) => {
     setEditId(s.id);
-    setForm({ name: s.name, host: s.host, port: s.port, auth_type: s.auth_type, provider: s.provider || 'custom', ssh_user: s.ssh_user || 'root', ssh_key_path: s.ssh_key_path || '', ssh_password: '', api_token: '', tags: s.tags || [] });
+    setForm({ name: s.name, host: s.host, port: s.port, auth_type: s.auth_type, provider: s.provider || 'custom', ssh_user: s.ssh_user || '', ssh_key_path: s.ssh_key_path || '/root/.ssh/vaultmaster_ed25519', ssh_password: '', api_token: '', tags: s.tags || [], use_sudo: s.meta?.use_sudo ?? true });
     setShowForm(true);
     setFormTestResult(null);
   };
   const closeForm = () => { setShowForm(false); setEditId(null); setFormTestResult(null); };
 
   const buildPayload = () => {
-    const payload: any = { name: form.name, host: form.host, port: Number(form.port), auth_type: form.auth_type, provider: form.provider, ssh_user: form.ssh_user, tags: form.tags };
+    const payload: any = { name: form.name, host: form.host, port: Number(form.port), auth_type: form.auth_type, provider: form.provider, ssh_user: form.ssh_user || 'root', tags: form.tags, meta: { use_sudo: form.use_sudo } };
     if (form.auth_type === 'ssh_key') payload.ssh_key_path = form.ssh_key_path;
-    if (form.auth_type === 'ssh_password') payload.meta = { ssh_password: form.ssh_password };
+    if (form.auth_type === 'ssh_password') payload.meta = { ...payload.meta, ssh_password: form.ssh_password };
     if (form.auth_type === 'api') payload.api_token = form.api_token;
     return payload;
   };
@@ -157,6 +157,16 @@ export default function ServersPage() {
                 {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
+          </div>
+        )}
+
+        {form.auth_type !== 'local' && form.auth_type !== 'api' && (
+          <div className="col-span-2 flex items-center gap-3">
+            <button type="button" onClick={() => setForm({...form, use_sudo: !form.use_sudo})}
+              className={`flex items-center gap-2 px-4 py-2 rounded border text-sm font-bold tracking-wider uppercase transition-all ${form.use_sudo ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : 'bg-vm-surface2 border-vm-border text-vm-text-dim hover:border-vm-accent'}`}>
+              {form.use_sudo ? '✓ ' : ''}{t('servers.use_sudo')}
+            </button>
+            <span className="font-mono text-[10px] text-vm-text-dim">{t('servers.use_sudo_tip')}</span>
           </div>
         )}
 

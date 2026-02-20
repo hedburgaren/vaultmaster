@@ -43,8 +43,8 @@ export default function Topbar() {
       </div>
       <div className="flex items-center gap-5">
         <div className="font-mono text-xs text-vm-text-dim text-right">
-          <div>System</div>
-          <span className="text-vm-success text-sm">ONLINE</span>
+          <div>{t('common.system')}</div>
+          <span className="text-vm-success text-sm">{t('common.online')}</span>
         </div>
 
         {/* Notification bell */}
@@ -60,14 +60,14 @@ export default function Topbar() {
           {showPanel && (
             <div className="absolute right-0 top-full mt-2 w-80 bg-vm-surface2 border border-vm-border-bright rounded shadow-2xl z-50">
               <div className="px-4 py-3 border-b border-vm-border flex items-center justify-between">
-                <span className="font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase">Notifications</span>
-                {failedCount > 0 && <span className="font-mono text-[10px] text-vm-danger">{failedCount} failed (24h)</span>}
+                <span className="font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase">{t('topbar.notifications')}</span>
+                {failedCount > 0 && <span className="font-mono text-[10px] text-vm-danger">{failedCount} {t('topbar.failed_24h')}</span>}
               </div>
               <div className="max-h-64 overflow-y-auto">
                 {errors.length === 0 ? (
                   <div className="px-4 py-6 text-center font-mono text-xs text-vm-text-dim">
                     <Bell className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                    All clear — no recent errors
+                    {t('topbar.all_clear')}
                   </div>
                 ) : (
                   errors.map((e: any, i: number) => (
@@ -76,7 +76,7 @@ export default function Topbar() {
                         <div className="w-1.5 h-1.5 rounded-full bg-vm-danger shrink-0" />
                         <span className="font-mono text-[10px] text-vm-text-dim">{e.created_at ? new Date(e.created_at).toLocaleString('en-GB') : '—'}</span>
                       </div>
-                      <div className="font-mono text-xs text-vm-danger pl-3.5 truncate">{e.error || 'Unknown error'}</div>
+                      <div className="font-mono text-xs text-vm-danger pl-3.5 truncate">{e.error || t('topbar.unknown_error')}</div>
                     </div>
                   ))
                 )}
@@ -95,7 +95,7 @@ export default function Topbar() {
         </button>
 
         <button onClick={logout} className="font-mono text-xs text-vm-text-dim hover:text-vm-danger transition-colors">
-          Log out
+          {t('login.logout')}
         </button>
       </div>
     </header>

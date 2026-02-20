@@ -5,6 +5,7 @@ import { getUsers, createUser, updateUser, deleteUser } from '@/lib/api';
 import Badge from '@/components/Badge';
 import FormLabel from '@/components/FormLabel';
 import { Plus, Trash2, Users, Shield, Eye, EyeOff } from 'lucide-react';
+import { useT } from '@/lib/i18n';
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
@@ -15,6 +16,7 @@ const ROLE_COLORS: Record<string, string> = {
 };
 
 export default function UsersPage() {
+  const t = useT();
   const [users, setUsers] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [showPw, setShowPw] = useState(false);
@@ -52,7 +54,7 @@ export default function UsersPage() {
   };
 
   const handleDelete = async (id: string, username: string) => {
-    if (confirm(`Delete user "${username}"? This cannot be undone.`)) {
+    if (confirm(t('users.confirm_delete').replace('{name}', username))) {
       try {
         await deleteUser(id);
         load();
@@ -64,8 +66,8 @@ export default function UsersPage() {
     return (
       <div className="text-center py-20 text-vm-text-dim font-mono">
         <Shield className="w-16 h-16 mx-auto mb-4 opacity-40" />
-        <div className="text-lg tracking-[2px]">Admin Access Required</div>
-        <div className="text-[11px] mt-2">Only administrators can manage users.</div>
+        <div className="text-lg tracking-[2px]">{t('users.admin_required')}</div>
+        <div className="text-[11px] mt-2">{t('users.admin_required_desc')}</div>
       </div>
     );
   }
@@ -74,11 +76,11 @@ export default function UsersPage() {
     <div>
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Users</h1>
-          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// USER MANAGEMENT · {users.length} ACCOUNTS · RBAC</div>
+          <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">{t('users.title')}</h1>
+          <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">{t('users.subtitle_prefix')} {users.length} {t('users.accounts')} · RBAC</div>
         </div>
         <button onClick={() => setShowForm(!showForm)} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all glow">
-          <Plus className="w-4 h-4" /> New User
+          <Plus className="w-4 h-4" /> {t('users.new')}
         </button>
       </div>
 
@@ -88,35 +90,35 @@ export default function UsersPage() {
 
       {showForm && (
         <div className="bg-vm-surface border border-vm-border-bright rounded p-6 mb-6">
-          <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">Create User</h3>
+          <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider">{t('users.create')}</h3>
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <FormLabel label="Username" tooltip="Unique login name for this user." />
+              <FormLabel label={t('users.username')} tooltip={t('users.username_tip')} />
               <input value={form.username} onChange={e => setForm({...form, username: e.target.value})} className={INPUT} placeholder="johndoe" />
             </div>
             <div>
-              <FormLabel label="Password" tooltip="Minimum 8 characters. The user can change it later." />
+              <FormLabel label={t('users.password')} tooltip={t('users.password_tip')} />
               <div className="relative">
-                <input type={showPw ? 'text' : 'password'} value={form.password} onChange={e => setForm({...form, password: e.target.value})} className={INPUT + ' pr-10'} placeholder="Min. 8 characters" />
+                <input type={showPw ? 'text' : 'password'} value={form.password} onChange={e => setForm({...form, password: e.target.value})} className={INPUT + ' pr-10'} placeholder={t('users.min_chars')} />
                 <button type="button" onClick={() => setShowPw(!showPw)} className="absolute right-3 top-1/2 -translate-y-1/2 text-vm-text-dim hover:text-vm-accent">
                   {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
             </div>
             <div>
-              <FormLabel label="Role" tooltip="Admin: full access. Operator: can manage servers, jobs, and run backups. Viewer: read-only access." />
+              <FormLabel label={t('users.role')} tooltip={t('users.role_tip')} />
               <select value={form.role} onChange={e => setForm({...form, role: e.target.value})} className={INPUT}>
-                <option value="viewer">Viewer — read-only</option>
-                <option value="operator">Operator — manage & run</option>
-                <option value="admin">Admin — full access</option>
+                <option value="viewer">{t('users.viewer')}</option>
+                <option value="operator">{t('users.operator')}</option>
+                <option value="admin">{t('users.admin')}</option>
               </select>
             </div>
             <div>
-              <FormLabel label="Email Addresses" tooltip="Comma-separated email addresses for notifications." />
+              <FormLabel label={t('users.email')} tooltip={t('users.email_tip')} />
               <input value={form.email_addresses} onChange={e => setForm({...form, email_addresses: e.target.value})} className={INPUT} placeholder="user@example.com" />
             </div>
           </div>
-          <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">Create</button>
+          <button onClick={handleCreate} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">{t('action.create')}</button>
         </div>
       )}
 
@@ -124,12 +126,12 @@ export default function UsersPage() {
         <table className="w-full">
           <thead>
             <tr className="bg-vm-surface2 border-b border-vm-border">
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">User</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Role</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Status</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">2FA</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">API Key</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Created</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('users.col_user')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('users.col_role')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('users.col_status')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('users.col_2fa')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('users.col_api_key')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('users.col_created')}</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal"></th>
             </tr>
           </thead>
@@ -162,12 +164,12 @@ export default function UsersPage() {
                 </td>
                 <td className="px-4 py-3">
                   <button onClick={() => handleToggleActive(u.id, u.is_active)}>
-                    <Badge status={u.is_active ? 'success' : 'cancelled'} label={u.is_active ? 'ACTIVE' : 'DISABLED'} />
+                    <Badge status={u.is_active ? 'success' : 'cancelled'} label={u.is_active ? t('users.active') : t('users.disabled')} />
                   </button>
                 </td>
                 <td className="px-4 py-3">
                   <span className={`font-mono text-[10px] ${u.totp_enabled ? 'text-vm-success' : 'text-vm-text-dim'}`}>
-                    {u.totp_enabled ? '✓ Enabled' : '—'}
+                    {u.totp_enabled ? `✓ ${t('common.enabled')}` : '—'}
                   </span>
                 </td>
                 <td className="px-4 py-3 font-mono text-[10px] text-vm-text-dim">
@@ -188,7 +190,7 @@ export default function UsersPage() {
         {users.length === 0 && (
           <div className="text-center py-12 text-vm-text-dim font-mono">
             <Users className="w-12 h-12 mx-auto mb-3 opacity-40" />
-            <div className="tracking-[2px]">No users found</div>
+            <div className="tracking-[2px]">{t('users.none')}</div>
           </div>
         )}
       </div>

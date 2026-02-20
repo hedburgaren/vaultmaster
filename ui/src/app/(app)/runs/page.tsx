@@ -5,32 +5,34 @@ import { getRuns, cancelRun } from '@/lib/api';
 import { formatBytes, formatDate, formatRelative } from '@/lib/utils';
 import Badge from '@/components/Badge';
 import { XCircle, Archive } from 'lucide-react';
+import { useT } from '@/lib/i18n';
 
 export default function RunsPage() {
+  const t = useT();
   const [runs, setRuns] = useState<any[]>([]);
   const load = () => getRuns().then(setRuns).catch(() => {});
   useEffect(() => { load(); const i = setInterval(load, 10000); return () => clearInterval(i); }, []);
 
   const handleCancel = async (id: string) => {
-    if (confirm('Cancel this run?')) { await cancelRun(id); load(); }
+    if (confirm(t('runs.confirm_cancel'))) { await cancelRun(id); load(); }
   };
 
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">Runs</h1>
-        <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">// BACKUP RUNS · {runs.length} TOTAL</div>
+        <h1 className="text-[28px] font-bold text-vm-text-bright tracking-wide uppercase">{t('runs.title')}</h1>
+        <div className="font-mono text-xs text-vm-accent tracking-[2px] mt-1">{t('runs.subtitle_prefix')} {runs.length} {t('common.total')}</div>
       </div>
 
       <div className="bg-vm-surface border border-vm-border rounded overflow-hidden">
         <table className="w-full">
           <thead>
             <tr className="bg-vm-surface2 border-b border-vm-border">
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Status</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Started</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Finished</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Size</th>
-              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Trigger</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.status')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.started')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.finished')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.size')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.trigger')}</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal"></th>
             </tr>
           </thead>
@@ -45,7 +47,7 @@ export default function RunsPage() {
                 <td className="px-4 py-3">
                   {r.status === 'running' && (
                     <button onClick={() => handleCancel(r.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
-                      <XCircle className="w-3 h-3" /> Cancel
+                      <XCircle className="w-3 h-3" /> {t('runs.cancel')}
                     </button>
                   )}
                 </td>
@@ -56,7 +58,7 @@ export default function RunsPage() {
         {runs.length === 0 && (
           <div className="text-center py-12 text-vm-text-dim font-mono">
             <Archive className="w-12 h-12 mx-auto mb-3 opacity-40" />
-            <div className="tracking-[2px]">No runs yet</div>
+            <div className="tracking-[2px]">{t('runs.none')}</div>
           </div>
         )}
       </div>
