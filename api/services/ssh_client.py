@@ -114,3 +114,101 @@ async def run_remote_command(server, command: str, timeout: int = 300) -> tuple[
     async with asyncssh.connect(**kwargs) as conn:
         result = await conn.run(command, check=False, timeout=timeout)
         return result.exit_status, result.stdout, result.stderr
+
+
+async def list_remote_databases(server, db_type: str = "postgresql") -> list[dict]:
+    """List databases on a remote server via SSH.
+
+    Uses the server's meta.db_* fields for connection info.
+    """
+    meta = getattr(server, 'meta', None) or {}
+    db_host = meta.get('db_host', '127.0.0.1')
+    db_port = meta.get('db_port', 5432 if db_type == 'postgresql' else 3306)
+    db_user = meta.get('db_user', 'postgres' if db_type == 'postgresql' else 'root')
+    db_password = meta.get('db_password', '')
+
+    try:
+        kwargs = _build_connect_kwargs(server)
+        async with asyncssh.connect(**kwargs) as conn:
+            if db_type == 'postgresql':
+                env = f"PGPASSWORD='{db_password}' " if db_password else ""
+                cmd = f"{env}psql -h {db_host} -p {db_port} -U {db_user} -t -A -c \"SELECT datname, pg_database_size(datname) FROM pg_database WHERE datistemplate = false ORDER BY datname;\""
+            elif db_type in ('mysql', 'mariadb'):
+                pw_flag = f"-p'{db_password}'" if db_password else ""
+                cmd = f"mysql -h {db_host} -P {db_port} -u {db_user} {pw_flag} -N -e \"SELECT schema_name, IFNULL(SUM(data_length + index_length), 0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON schema_name = table_schema WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') GROUP BY schema_name ORDER BY schema_name;\""
+            else:
+                return [{"error": f"Unsupported database type: {db_type}"}]
+
+            use_sudo = meta.get('use_sudo', False)
+            ssh_user = getattr(server, 'ssh_user', None) or "root"
+            if use_sudo and ssh_user != "root":
+                cmd = f"sudo -n sh -c '{cmd}'"
+
+            result = await conn.run(cmd, check=False, timeout=30)
+            if result.exit_status != 0:
+                return [{"error": result.stderr.strip() or "Command failed"}]
+
+            databases = []
+            for line in result.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                sep = "|" if db_type == "postgresql" else "\t"
+                parts = line.split(sep)
+                name = parts[0].strip()
+                size = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip().isdigit() else 0
+                if name:
+                    databases.append({"name": name, "size_bytes": size})
+            return databases
+
+    except Exception as e:
+        logger.error(f"Failed to list databases on {getattr(server, 'name', '?')}: {e}")
+        return [{"error": str(e)}]
+
+
+async def list_remote_docker(server) -> dict:
+    """List Docker containers and volumes on a remote server via SSH."""
+    try:
+        kwargs = _build_connect_kwargs(server)
+        meta = getattr(server, 'meta', None) or {}
+        use_sudo = meta.get('use_sudo', False)
+        ssh_user = getattr(server, 'ssh_user', None) or "root"
+        prefix = "sudo -n " if use_sudo and ssh_user != "root" else ""
+
+        async with asyncssh.connect(**kwargs) as conn:
+            # Get containers
+            containers_cmd = f'{prefix}docker ps -a --format "{{{{.ID}}}}|{{{{.Names}}}}|{{{{.Image}}}}|{{{{.Status}}}}|{{{{.State}}}}"'
+            c_result = await conn.run(containers_cmd, check=False, timeout=15)
+            containers = []
+            if c_result.exit_status == 0:
+                for line in c_result.stdout.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    parts = line.split("|")
+                    if len(parts) >= 5:
+                        containers.append({
+                            "id": parts[0][:12],
+                            "name": parts[1],
+                            "image": parts[2],
+                            "status": parts[3],
+                            "state": parts[4],
+                        })
+
+            # Get volumes
+            volumes_cmd = f'{prefix}docker volume ls --format "{{{{.Name}}}}|{{{{.Driver}}}}"'
+            v_result = await conn.run(volumes_cmd, check=False, timeout=15)
+            volumes = []
+            if v_result.exit_status == 0:
+                for line in v_result.stdout.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    parts = line.split("|")
+                    volumes.append({
+                        "name": parts[0],
+                        "driver": parts[1] if len(parts) > 1 else "local",
+                    })
+
+            return {"containers": containers, "volumes": volumes, "error": None}
+
+    except Exception as e:
+        logger.error(f"Failed to list Docker on {getattr(server, 'name', '?')}: {e}")
+        return {"containers": [], "volumes": [], "error": str(e)}
