@@ -461,6 +461,8 @@ const translations: Dict = {
   'jobs.docker_prune_confirm': { sv: 'Ta bort alla oanvända Docker-volymer? Detta kan inte ångras!', en: 'Remove all unused Docker volumes? This cannot be undone!' },
   'jobs.docker_prune_success': { sv: 'Oanvända volymer borttagna', en: 'Unused volumes removed' },
   'jobs.docker_prune_error': { sv: 'Kunde inte städa volymer', en: 'Failed to prune volumes' },
+  'jobs.docker_use_as_files': { sv: 'Använd som filbackup', en: 'Use as file backup' },
+  'jobs.docker_bind_info': { sv: 'Containers med bind mounts (mappad värdkatalog) backas upp som filer, inte som Docker-volymer. Klicka "Använd som filbackup" för att byta till filbackup med sökvägarna förfyllda.', en: 'Containers with bind mounts (mapped host directories) are backed up as files, not Docker volumes. Click "Use as file backup" to switch to file backup with paths pre-filled.' },
   'jobs.script_content': { sv: 'Skriptinnehåll', en: 'Script Content' },
   'jobs.script_content_tip': { sv: 'Skriptet som ska köras. Skriv direkt eller ange sökväg till en fil på servern.', en: 'The script to execute. Write inline or specify a path to a file on the server.' },
   'jobs.script_type': { sv: 'Skripttyp', en: 'Script Type' },

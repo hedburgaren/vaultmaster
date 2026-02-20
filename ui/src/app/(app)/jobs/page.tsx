@@ -302,17 +302,31 @@ export default function JobsPage() {
                             <span className="ml-auto text-[10px] text-vm-text-dim flex-shrink-0">{c.status}</span>
                           </summary>
                           {c.bind_mounts?.length > 0 && (
-                            <div className="ml-6 mt-1 mb-1 space-y-0.5">
-                              {c.bind_mounts.map((bm: any, i: number) => (
-                                <div key={i} className="font-mono text-[9px] text-vm-text-dim px-2 py-0.5 bg-vm-bg/50 rounded">
-                                  <span className="text-vm-text">{bm.source}</span> → <span className="text-vm-accent/70">{bm.dest}</span>
-                                </div>
-                              ))}
+                            <div className="ml-6 mt-1 mb-1">
+                              <div className="space-y-0.5 mb-1">
+                                {c.bind_mounts.map((bm: any, i: number) => (
+                                  <div key={i} className="font-mono text-[9px] text-vm-text-dim px-2 py-0.5 bg-vm-bg/50 rounded">
+                                    <span className="text-vm-text">{bm.source}</span> → <span className="text-vm-accent/70">{bm.dest}</span>
+                                  </div>
+                                ))}
+                              </div>
+                              <button type="button" onClick={() => {
+                                const paths = c.bind_mounts.map((bm: any) => bm.source).join('\n');
+                                setForm(f => ({ ...f, backup_type: 'files', source_paths: f.source_paths ? f.source_paths + '\n' + paths : paths }));
+                              }} className="flex items-center gap-1 px-2 py-0.5 text-[9px] font-bold tracking-wider uppercase text-vm-accent border border-vm-accent/30 rounded hover:bg-vm-accent/10">
+                                <FolderOpen className="w-3 h-3" /> {t('jobs.docker_use_as_files')}
+                              </button>
                             </div>
                           )}
                         </details>
                       ))}
                     </div>
+                    {/* Info about bind mounts vs volumes */}
+                    {dockerInfo.containers.some((c: any) => c.bind_mounts?.length > 0) && (
+                      <div className="mt-2 p-2 bg-vm-bg/50 border border-vm-border rounded font-mono text-[9px] text-vm-text-dim leading-relaxed">
+                        <span className="text-vm-accent font-bold">TIP:</span> {t('jobs.docker_bind_info')}
+                      </div>
+                    )}
                   </div>
                 )}
                 {/* Volume selection */}
