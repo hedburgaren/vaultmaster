@@ -17,7 +17,7 @@ const emptyForm = {
   // Source config fields
   source_paths: '', db_names: [] as string[], volume_names: [] as string[], script_type: 'bash', script_content: '', script_path: '',
   // Storage & retention
-  destination_ids: [] as string[], storage_subdir: '', retention_id: '',
+  destination_ids: [] as string[], storage_subdir: '', retention_id: '', retention_overrides: {} as Record<string, string>,
   // Advanced
   pre_script: '', post_script: '', max_retries: 2,
 };
@@ -73,7 +73,7 @@ export default function JobsPage() {
       source_paths: (sc.paths || []).join('\n'), db_names: sc.db_names || [], volume_names: sc.volume_names || [],
       script_type: sc.script_type || 'bash', script_content: sc.script_content || '', script_path: sc.script_path || '',
       destination_ids: (j.destination_ids || []).map((id: any) => String(id)), storage_subdir: sc.subdir || '',
-      retention_id: j.retention_id || '',
+      retention_id: j.retention_id || '', retention_overrides: j.retention_overrides || {},
       pre_script: j.pre_script || '', post_script: j.post_script || '', max_retries: j.max_retries ?? 2,
     });
     setShowForm(true);
@@ -97,6 +97,7 @@ export default function JobsPage() {
       name: form.name, backup_type: form.backup_type, server_id: form.server_id,
       source_config: buildSourceConfig(), schedule_cron: form.schedule_cron,
       destination_ids: form.destination_ids.filter(Boolean), retention_id: form.retention_id || null,
+      retention_overrides: Object.keys(form.retention_overrides).length > 0 ? form.retention_overrides : {},
       tags: form.tags, domain: form.domain || null, encrypt: form.encrypt,
       pre_script: form.pre_script || null, post_script: form.post_script || null, max_retries: form.max_retries,
     };
@@ -509,6 +510,37 @@ export default function JobsPage() {
             </select>
           </div>
         </div>
+        {/* Per-destination retention overrides */}
+        {form.destination_ids.filter(Boolean).length >= 2 && (
+          <div className="mt-3 p-3 bg-vm-bg/50 border border-vm-border rounded">
+            <div className="font-mono text-[10px] text-vm-accent tracking-[2px] uppercase mb-2">// {t('jobs.retention_per_dest')}</div>
+            <div className="font-mono text-[9px] text-vm-text-dim mb-2">{t('jobs.retention_per_dest_tip')}</div>
+            <div className="space-y-1.5">
+              {form.destination_ids.filter(Boolean).map(destId => {
+                const dest = storageDests.find((d: any) => d.id === destId);
+                if (!dest) return null;
+                const overrideValue = form.retention_overrides[destId] || '';
+                return (
+                  <div key={destId} className="flex items-center gap-2">
+                    <span className="font-mono text-[11px] text-vm-text-bright min-w-[140px] truncate">{dest.name}</span>
+                    <span className="font-mono text-[9px] text-vm-text-dim px-1.5 py-0.5 rounded bg-vm-surface border border-vm-border">{dest.backend}</span>
+                    <select value={overrideValue} onChange={e => {
+                      const newOverrides = { ...form.retention_overrides };
+                      if (e.target.value) { newOverrides[destId] = e.target.value; }
+                      else { delete newOverrides[destId]; }
+                      setForm({ ...form, retention_overrides: newOverrides });
+                    }} className={INPUT + ' !py-1.5 !text-[11px] flex-1'}>
+                      <option value="">{t('jobs.retention_use_default')}</option>
+                      {retentionPolicies.map((p: any) => (
+                        <option key={p.id} value={p.id}>{p.name} (D{p.keep_daily}/W{p.keep_weekly}/M{p.keep_monthly})</option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tags & Encrypt */}
