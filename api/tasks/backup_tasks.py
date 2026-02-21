@@ -1,9 +1,13 @@
 import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+
 from api.tasks.celery_app import celery_app
+from api.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +21,29 @@ def _run_async(coro):
         loop.close()
 
 
+@asynccontextmanager
+async def get_task_session():
+    """Create a fresh async engine + session per task invocation.
+
+    This avoids the asyncpg 'another operation is in progress' error
+    caused by sharing the global engine across different event loops.
+    """
+    settings = get_settings()
+    engine = create_async_engine(
+        settings.database_url,
+        echo=False,
+        pool_size=2,
+        max_overflow=3,
+    )
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with session_factory() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+    await engine.dispose()
+
+
 @celery_app.task(bind=True, name="api.tasks.backup_tasks.run_backup_task", max_retries=3)
 def run_backup_task(self, job_id: str):
     """Execute a backup job."""
@@ -25,7 +52,6 @@ def run_backup_task(self, job_id: str):
 
 async def _run_backup(task, job_id: str):
     from sqlalchemy import select
-    from api.database import async_session
     from api.models.backup_job import BackupJob
     from api.models.backup_run import BackupRun
     from api.models.server import Server
@@ -37,7 +63,7 @@ async def _run_backup(task, job_id: str):
         execute_custom_backup,
     )
 
-    async with async_session() as db:
+    async with get_task_session() as db:
         # Load job and server
         result = await db.execute(select(BackupJob).where(BackupJob.id == uuid.UUID(job_id)))
         job = result.scalar_one_or_none()
@@ -168,11 +194,10 @@ def check_scheduled_jobs():
 async def _check_scheduled():
     from sqlalchemy import select
     from croniter import croniter
-    from api.database import async_session
     from api.models.backup_job import BackupJob
     from api.models.backup_run import BackupRun
 
-    async with async_session() as db:
+    async with get_task_session() as db:
         result = await db.execute(select(BackupJob).where(BackupJob.is_active == True))
         jobs = result.scalars().all()
 
@@ -206,12 +231,11 @@ def check_server_health():
 
 async def _check_health():
     from sqlalchemy import select
-    from api.database import async_session
     from api.models.server import Server
     from api.services.ssh_client import test_ssh_connection
     from api.services.notifier import notify_event
 
-    async with async_session() as db:
+    async with get_task_session() as db:
         result = await db.execute(select(Server).where(Server.is_active == True))
         servers = result.scalars().all()
 
