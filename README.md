@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0-00ccff?style=flat-square" alt="Version 2.0" />
+  <img src="https://img.shields.io/badge/version-2.1-00ccff?style=flat-square" alt="Version 2.1" />
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License" />
   <img src="https://img.shields.io/badge/python-3.12-blue?style=flat-square" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/next.js-14-black?style=flat-square" alt="Next.js 14" />
@@ -9,7 +9,7 @@
 
 **Self-hosted backup orchestration with a dark sci-fi control panel.**
 
-Manage PostgreSQL dumps, Docker volume snapshots, file backups, DigitalOcean snapshots, and custom scripts — across multiple servers via SSH. Scheduled with cron, protected by GFS retention policies, encrypted with age, and monitored through multi-channel notifications.
+Manage PostgreSQL dumps, Docker volume snapshots, file backups, DigitalOcean snapshots, and custom scripts — across multiple servers via SSH. Scheduled with cron, protected by GFS retention policies (with per-destination overrides), encrypted with age, and monitored through multi-channel notifications.
 
 ---
 
@@ -60,12 +60,15 @@ cd ui && npm install && npx next build && npx next start --port 3100
 - **5 backup types** — PostgreSQL, Docker volumes, files, DO snapshots, custom scripts
 - **Cron scheduling** — visual builder with presets + custom expressions + live preview
 - **GFS retention** — Grandfather-Father-Son rotation with dry-run preview
+- **Per-destination retention** — Different retention policies per storage destination (e.g. 365 days local, 7 days cloud)
 - **Restore wizard** — search, filter, verify checksum, inspect details, one-click restore
 - **Encryption** — age-based AES-256 encryption for backup artifacts
 
 ### Infrastructure
-- **Multi-server management** — SSH key/password/API token auth, health monitoring
-- **Multi-backend storage** — Local disk, S3/DO Spaces, SFTP, Backblaze B2 (per-backend config UI)
+- **Multi-server management** — SSH key/password/API token auth, automatic health monitoring (5-min interval)
+- **Multi-backend storage** — Local disk, S3/DO Spaces, SFTP, Backblaze B2, Google Drive, OneDrive
+- **Docker intelligence** — Volume picker with container correlation, bind mount visibility, orphan detection, volume pruning
+- **Database discovery** — Auto-list PostgreSQL/MySQL/MariaDB databases via SSH (peer auth + password auth)
 - **Notifications** — Slack, ntfy, Telegram, email, webhooks
 - **Webhook events** — HMAC-signed payloads for backup.started, backup.completed, backup.failed, etc.
 
@@ -88,8 +91,10 @@ cd ui && npm install && npx next build && npx next start --port 3100
 
 ### UX
 - **Dark sci-fi UI** — Cyberpunk-inspired control panel with glow effects
+- **Bilingual** — Full Swedish/English UI with locale switcher
 - **Tooltips** — Every form field has an info tooltip explaining its purpose
 - **Smart inputs** — Cron builder with presets, tag autocomplete, human-readable capacity (TB/GB)
+- **Setup wizards** — DB requirements guide, Docker bind mount → file backup conversion
 - **Notification bell** — Color-coded alerts in the topbar (red = critical, orange = warning)
 - **Detail panels** — Click any artifact to see full metadata, checksum, and restore/verify actions
 
@@ -199,6 +204,8 @@ See [`.env.example`](.env.example) for all options.
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 ARC Gruppen AB
+
+See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## Credits
 
