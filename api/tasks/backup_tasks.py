@@ -129,14 +129,22 @@ async def _run_backup(task, job_id: str):
                         )
                         db.add(artifact)
 
-                # Apply rotation after successful backup
-                if job.retention_id:
-                    from api.models.retention_policy import RetentionPolicy
-                    from api.services.rotation import apply_rotation
-                    ret_result = await db.execute(select(RetentionPolicy).where(RetentionPolicy.id == job.retention_id))
+                # Apply rotation after successful backup — per destination
+                from api.models.retention_policy import RetentionPolicy
+                from api.services.rotation import apply_rotation
+                overrides = job.retention_overrides or {}
+                for dest_id in (job.destination_ids or []):
+                    dest_str = str(dest_id)
+                    # Use override policy if set, otherwise fall back to job default
+                    policy_id = overrides.get(dest_str, str(job.retention_id) if job.retention_id else None)
+                    if not policy_id:
+                        continue
+                    ret_result = await db.execute(
+                        select(RetentionPolicy).where(RetentionPolicy.id == uuid.UUID(policy_id))
+                    )
                     policy = ret_result.scalar_one_or_none()
                     if policy:
-                        await apply_rotation(db, policy, str(job.id))
+                        await apply_rotation(db, policy, str(job.id), storage_id=dest_str)
 
             else:
                 run.status = "failed"

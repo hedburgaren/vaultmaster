@@ -22,13 +22,16 @@ def _assign_bucket(dt: datetime) -> dict:
     }
 
 
-async def apply_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str | None = None) -> dict:
+async def apply_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str | None = None, storage_id: str | None = None) -> dict:
     """Apply GFS rotation: keep configured number per time bucket, mark rest as deleted."""
     query = select(BackupArtifact).where(BackupArtifact.is_deleted == False)
     if job_id:
         from api.models.backup_run import BackupRun
         run_ids = await db.execute(select(BackupRun.id).where(BackupRun.job_id == job_id))
         query = query.where(BackupArtifact.run_id.in_([r for r in run_ids.scalars().all()]))
+    if storage_id:
+        import uuid as _uuid
+        query = query.where(BackupArtifact.storage_id == _uuid.UUID(storage_id))
 
     result = await db.execute(query.order_by(BackupArtifact.created_at.desc()))
     artifacts = result.scalars().all()

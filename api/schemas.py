@@ -127,6 +127,7 @@ class BackupJobCreate(BaseModel):
     schedule_cron: str
     destination_ids: list[uuid.UUID] = []
     retention_id: uuid.UUID | None = None
+    retention_overrides: dict = {}  # {dest_id: policy_id} per-destination override
     tags: list[str] = []
     domain: str | None = None
     encrypt: bool = False
@@ -142,6 +143,7 @@ class BackupJobUpdate(BaseModel):
     schedule_cron: str | None = None
     destination_ids: list[uuid.UUID] | None = None
     retention_id: uuid.UUID | None = None
+    retention_overrides: dict | None = None
     tags: list[str] | None = None
     domain: str | None = None
     is_active: bool | None = None
@@ -160,6 +162,7 @@ class BackupJobOut(BaseModel):
     schedule_cron: str
     destination_ids: list[uuid.UUID] | None
     retention_id: uuid.UUID | None
+    retention_overrides: dict | None = {}
     tags: list[str] | None
     domain: str | None
     is_active: bool

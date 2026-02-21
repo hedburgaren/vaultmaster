@@ -482,6 +482,9 @@ const translations: Dict = {
   'jobs.retention_tip': { sv: 'Hur länge backuper ska behållas. Skapa policyer under Inställningar → Bevarande.', en: 'How long to keep backups. Create policies under Settings → Retention.' },
   'jobs.retention_none': { sv: 'Ingen (behåll alla)', en: 'None (keep all)' },
   'jobs.retention_no_policies': { sv: 'Inga policyer konfigurerade', en: 'No policies configured' },
+  'jobs.retention_per_dest': { sv: 'Bevarande per destination', en: 'Retention per Destination' },
+  'jobs.retention_per_dest_tip': { sv: 'Ange en annan bevarandepolicy per lagringsdestination. Lämna på "Använd standard" för att använda jobbets standardpolicy.', en: 'Set a different retention policy per storage destination. Leave on "Use default" to use the job\'s default policy.' },
+  'jobs.retention_use_default': { sv: 'Använd standard', en: 'Use default' },
 
   // ── Jobs: Advanced ──
   'jobs.advanced': { sv: 'AVANCERAT', en: 'ADVANCED' },
