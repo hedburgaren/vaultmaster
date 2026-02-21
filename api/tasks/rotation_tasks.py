@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from api.tasks.celery_app import celery_app
+from api.tasks.backup_tasks import get_task_session
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +24,11 @@ def run_rotation(policy_id: str, job_id: str | None = None):
 async def _do_rotation(policy_id: str, job_id: str | None):
     import uuid
     from sqlalchemy import select
-    from api.database import async_session
     from api.models.retention_policy import RetentionPolicy
     from api.services.rotation import apply_rotation
     from api.services.notifier import notify_event
 
-    async with async_session() as db:
+    async with get_task_session() as db:
         result = await db.execute(select(RetentionPolicy).where(RetentionPolicy.id == uuid.UUID(policy_id)))
         policy = result.scalar_one_or_none()
         if not policy:
