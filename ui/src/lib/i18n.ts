@@ -233,6 +233,9 @@ const translations: Dict = {
   'runs.cancel': { sv: 'Avbryt', en: 'Cancel' },
   'runs.confirm_cancel': { sv: 'Avbryt denna körning?', en: 'Cancel this run?' },
   'runs.none': { sv: 'Inga körningar ännu', en: 'No runs yet' },
+  'runs.job': { sv: 'Jobb', en: 'Job' },
+  'runs.log': { sv: 'Logg', en: 'Log' },
+  'runs.no_logs': { sv: 'Inga loggposter', en: 'No log entries' },
 
   // ── Artifacts / Restore ──
   'artifacts.title': { sv: 'Återställning', en: 'Restore' },
