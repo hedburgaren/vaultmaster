@@ -103,7 +103,12 @@ async def list_remote_directory(server, path: str = "/") -> list[dict]:
 
 
 async def run_remote_command(server, command: str, timeout: int = 300) -> tuple[int, str, str]:
-    """Execute a command on a remote server via SSH. Prepends sudo if use_sudo is set."""
+    """Execute a command on a remote server via SSH.
+
+    Prepends sudo if use_sudo is set.
+    Retries on transient connection errors (e.g. Errno 111 when the SSH
+    daemon is busy with concurrent connections).
+    """
     kwargs = _build_connect_kwargs(server)
 
     meta = getattr(server, 'meta', None) or {}
@@ -111,9 +116,20 @@ async def run_remote_command(server, command: str, timeout: int = 300) -> tuple[
     if use_sudo and (getattr(server, 'ssh_user', None) or "root") != "root":
         command = f"sudo -n {command}"
 
-    async with asyncssh.connect(**kwargs) as conn:
-        result = await conn.run(command, check=False, timeout=timeout)
-        return result.exit_status, result.stdout, result.stderr
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        try:
+            async with asyncssh.connect(**kwargs) as conn:
+                result = await conn.run(command, check=False, timeout=timeout)
+                return result.exit_status, result.stdout, result.stderr
+        except OSError as e:
+            # Retry on connection refused / reset (Errno 111, 104)
+            if attempt < max_retries and ("Connect call failed" in str(e) or "Connection refused" in str(e) or "Connection reset" in str(e)):
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning(f"SSH connection attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            else:
+                raise
 
 
 async def list_remote_databases(server, db_type: str = "postgresql") -> list[dict]:

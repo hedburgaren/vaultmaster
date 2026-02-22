@@ -11,6 +11,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_WORK_DIR = "/tmp/vaultmaster"
 
 
+def _check_sudo_failure(stderr: str) -> str | None:
+    """Return an error message if stderr indicates a sudo failure, else None."""
+    if stderr and ("sudo:" in stderr.lower() and ("password is required" in stderr.lower() or "no tty present" in stderr.lower())):
+        return f"sudo failed: {stderr.strip()} — configure passwordless sudo (NOPASSWD) for the SSH user or disable use_sudo on this server"
+    return None
+
+
 async def get_work_dir(db=None) -> str:
     """Get the configured work directory from system settings, or default."""
     try:
@@ -67,6 +74,11 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
         log("info", f"Running pg_dump for {db_name}")
         exit_code, stdout, stderr = await run_remote_command(server, dump_cmd, timeout=3600)
 
+        sudo_err = _check_sudo_failure(stderr)
+        if sudo_err:
+            log("error", sudo_err)
+            raise Exception(sudo_err)
+
         if exit_code != 0:
             log("error", f"pg_dump failed: {stderr}")
             raise Exception(f"pg_dump failed with exit code {exit_code}: {stderr}")
@@ -79,6 +91,10 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
 
         exit_code, stdout, _ = await run_remote_command(server, f"sha256sum {remote_path}")
         checksum = stdout.split()[0] if exit_code == 0 else ""
+
+        if size_bytes == 0:
+            log("error", "Backup file is 0 bytes — pg_dump likely failed silently")
+            raise Exception("Backup file is 0 bytes")
 
         log("info", f"Backup size: {size_bytes} bytes, checksum: {checksum[:16]}...")
 
@@ -133,6 +149,11 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
         cmd = f"tar -czf {remote_path} {volume_paths}"
         exit_code, stdout, stderr = await run_remote_command(server, cmd, timeout=3600)
 
+        sudo_err = _check_sudo_failure(stderr)
+        if sudo_err:
+            log("error", sudo_err)
+            raise Exception(sudo_err)
+
         if exit_code != 0:
             log("error", f"tar failed: {stderr}")
             raise Exception(f"tar failed: {stderr}")
@@ -142,6 +163,10 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
 
         exit_code, stdout, _ = await run_remote_command(server, f"sha256sum {remote_path}")
         checksum = stdout.split()[0] if exit_code == 0 else ""
+
+        if size_bytes == 0:
+            log("error", "Backup file is 0 bytes — tar likely failed silently")
+            raise Exception("Backup file is 0 bytes")
 
         log("info", f"Docker volumes backup complete: {size_bytes} bytes")
 
@@ -186,6 +211,11 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
         log("info", f"Work dir: {work_dir} → {remote_path}")
         exit_code, stdout, stderr = await run_remote_command(server, cmd, timeout=7200)
 
+        sudo_err = _check_sudo_failure(stderr)
+        if sudo_err:
+            log("error", sudo_err)
+            raise Exception(sudo_err)
+
         if exit_code != 0 and exit_code != 1:  # tar returns 1 for "file changed during read"
             log("error", f"tar failed (exit {exit_code}): {stderr}")
             raise Exception(f"tar failed: {stderr}")
@@ -202,6 +232,11 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
         if exit_code != 0:
             log("warn", f"sha256sum failed (exit {exit_code}): {stderr}")
         checksum = stdout.split()[0] if exit_code == 0 and stdout.strip() else ""
+
+        # Fail if backup produced an empty file
+        if size_bytes == 0:
+            log("error", "Backup file is 0 bytes — backup likely failed silently")
+            raise Exception("Backup file is 0 bytes")
 
         log("info", f"File backup complete: {size_bytes} bytes, checksum: {checksum[:16]}..." if checksum else f"File backup complete: {size_bytes} bytes (no checksum)")
 
