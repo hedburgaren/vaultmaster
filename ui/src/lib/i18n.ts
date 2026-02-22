@@ -604,9 +604,10 @@ const translations: Dict = {
   // ── Settings: System ──
   'settings.tab_system': { sv: 'System', en: 'System' },
   'settings.work_dir': { sv: 'Arbetskatalog', en: 'Work Directory' },
-  'settings.work_dir_desc': { sv: 'Katalog på fjärrservern där backupfiler skapas temporärt innan de skickas till lagringsdestinationen. Se till att SSH-användaren har skrivrättigheter och att det finns tillräckligt med diskutrymme.', en: 'Directory on the remote server where backup files are temporarily created before being sent to the storage destination. Make sure the SSH user has write permissions and there is enough disk space.' },
+  'settings.work_dir_desc': { sv: 'Katalog där backupfiler skapas temporärt innan de kopieras till lagringsdestinationen. Sökvägen används via SSH på källservern. För localhost-servrar måste sökvägen även vara bind-mountad i Docker-containern (t.ex. /srv/archive eller /mnt/backup). Se till att SSH-användaren har skrivrättigheter och att det finns tillräckligt med diskutrymme.', en: 'Directory where backup files are temporarily created before being copied to storage destinations. The path is used via SSH on the source server. For localhost servers, the path must also be bind-mounted into the Docker container (e.g. /srv/archive or /mnt/backup). Make sure the SSH user has write permissions and there is enough disk space.' },
   'settings.work_dir_path': { sv: 'Sökväg', en: 'Path' },
-  'settings.work_dir_tip': { sv: 'Absolut sökväg på fjärrservern. Lämna tomt eller ange /tmp/vaultmaster för standard.', en: 'Absolute path on the remote server. Leave empty or set /tmp/vaultmaster for default.' },
+  'settings.work_dir_tip': { sv: 'Absolut sökväg. Lämna tomt för standard (/tmp/vaultmaster). Tips: använd en sökväg under en bind-mountad volym, t.ex. /srv/archive/tmp/vaultmaster.', en: 'Absolute path. Leave empty for default (/tmp/vaultmaster). Tip: use a path under a bind-mounted volume, e.g. /srv/archive/tmp/vaultmaster.' },
+  'settings.work_dir_bind_hint': { sv: 'Sökvägen måste finnas på hosten och vara tillgänglig i containern via bind-mount för att filöverföring till lagringsdestinationer ska fungera.', en: 'The path must exist on the host and be accessible inside the container via bind-mount for file transfer to storage destinations to work.' },
   'settings.system_saved': { sv: 'Systeminställningar sparade', en: 'System settings saved' },
 
   // ── Coming Soon ──

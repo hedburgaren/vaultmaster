@@ -285,6 +285,41 @@ async def list_remote_docker(server) -> dict:
         return {"containers": [], "volumes": [], "error": str(e)}
 
 
+def is_local_server(server) -> bool:
+    """Check if a server points to localhost (the Docker host)."""
+    host = getattr(server, 'host', '') or ''
+    return host.lower() in LOCAL_HOSTS
+
+
+async def download_remote_file(server, remote_path: str, local_path: str) -> tuple[bool, str]:
+    """Download a file from a remote server via SFTP.
+
+    For localhost servers the file is typically accessible via bind-mount,
+    so callers should check is_local_server() first and skip this.
+    """
+    try:
+        kwargs = _build_connect_kwargs(server)
+        async with asyncssh.connect(**kwargs) as conn:
+            async with conn.start_sftp_client() as sftp:
+                await sftp.get(remote_path, local_path)
+        return True, f"Downloaded {remote_path} to {local_path}"
+    except Exception as e:
+        logger.error(f"SFTP download failed for {remote_path}: {e}")
+        return False, str(e)
+
+
+async def delete_remote_file(server, remote_path: str) -> tuple[bool, str]:
+    """Delete a file on a remote server via SSH."""
+    try:
+        exit_code, stdout, stderr = await run_remote_command(server, f"rm -f {remote_path}")
+        if exit_code == 0:
+            return True, f"Deleted {remote_path}"
+        return False, f"rm failed: {stderr}"
+    except Exception as e:
+        logger.error(f"Failed to delete remote file {remote_path}: {e}")
+        return False, str(e)
+
+
 async def prune_docker_volumes(server) -> dict:
     """Remove unused Docker volumes on a remote server via SSH."""
     try:
