@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -110,14 +111,105 @@ async def _run_backup(task, job_id: str):
                 run.log_lines = result_data.get("logs", [])
                 run.finished_at = datetime.now(timezone.utc)
 
-                # Create artifact record for each destination
-                if result_data.get("filename"):
+                # --- Transfer file to storage destinations ---
+                from api.models.storage_destination import StorageDestination
+                from api.services.ssh_client import is_local_server, download_remote_file, delete_remote_file
+                from api.services.rclone_client import copy_file_to_storage
+
+                remote_path = result_data.get("remote_path", "")
+                filename = result_data.get("filename", "")
+                local_file = None  # path accessible inside container
+                sftp_tmp = None    # temp file downloaded via SFTP (cleanup later)
+
+                if filename and remote_path and (job.destination_ids or []):
+                    # Resolve a container-accessible path to the backup file
+                    if is_local_server(server):
+                        # Localhost: file is on the Docker host.
+                        # If work_dir is under a bind-mounted path it's directly accessible.
+                        if os.path.isfile(remote_path):
+                            local_file = remote_path
+                            logger.info(f"[{run.id}] Local file accessible via bind-mount: {local_file}")
+                        else:
+                            # Bind-mount doesn't cover this path — download via SFTP
+                            logger.info(f"[{run.id}] File not accessible locally, downloading via SFTP from host")
+                            sftp_tmp = f"/tmp/{filename}"
+                            ok, msg = await download_remote_file(server, remote_path, sftp_tmp)
+                            if ok:
+                                local_file = sftp_tmp
+                            else:
+                                logger.warning(f"[{run.id}] SFTP download failed: {msg}")
+                    else:
+                        # Remote server: always download via SFTP
+                        logger.info(f"[{run.id}] Downloading backup from remote server via SFTP")
+                        sftp_tmp = f"/tmp/{filename}"
+                        ok, msg = await download_remote_file(server, remote_path, sftp_tmp)
+                        if ok:
+                            local_file = sftp_tmp
+                        else:
+                            logger.warning(f"[{run.id}] SFTP download failed: {msg}")
+
+                    # Copy to each storage destination
+                    for dest_id in (job.destination_ids or []):
+                        dest_result = await db.execute(
+                            select(StorageDestination).where(StorageDestination.id == dest_id)
+                        )
+                        dest = dest_result.scalar_one_or_none()
+                        if not dest:
+                            logger.warning(f"[{run.id}] Storage destination {dest_id} not found")
+                            continue
+
+                        # Build sub-path: server_name/job_name/filename
+                        sub_path = f"{server.name}/{job.name}/{filename}"
+                        stored_path = ""
+
+                        if local_file:
+                            ok, msg = await copy_file_to_storage(dest, local_file, sub_path)
+                            if ok:
+                                stored_path = msg
+                                logger.info(f"[{run.id}] Transferred to {dest.name}: {msg}")
+                            else:
+                                logger.error(f"[{run.id}] Transfer to {dest.name} failed: {msg}")
+                        else:
+                            logger.warning(f"[{run.id}] No local file available — recording artifact with remote_path only")
+                            stored_path = remote_path
+
+                        artifact = BackupArtifact(
+                            run_id=run.id,
+                            storage_id=dest_id,
+                            filename=filename,
+                            remote_path=stored_path or remote_path,
+                            size_bytes=result_data.get("size_bytes", 0),
+                            checksum_sha256=result_data.get("checksum_sha256") or "pending",
+                            is_encrypted=job.encrypt,
+                            backup_type=job.backup_type,
+                            tags=job.tags,
+                            domain=job.domain,
+                            db_name=job.source_config.get("db_name"),
+                            server_name=server.name,
+                        )
+                        db.add(artifact)
+
+                    # Cleanup: remove SFTP temp file
+                    if sftp_tmp and os.path.isfile(sftp_tmp):
+                        try:
+                            os.remove(sftp_tmp)
+                            logger.info(f"[{run.id}] Cleaned up temp file: {sftp_tmp}")
+                        except OSError:
+                            pass
+
+                    # Cleanup: remove temp file from source server work_dir
+                    if remote_path:
+                        await delete_remote_file(server, remote_path)
+                        logger.info(f"[{run.id}] Cleaned up remote temp file: {remote_path}")
+
+                elif filename:
+                    # No destinations configured — just record artifacts without transfer
                     for dest_id in (job.destination_ids or []):
                         artifact = BackupArtifact(
                             run_id=run.id,
                             storage_id=dest_id,
-                            filename=result_data["filename"],
-                            remote_path=result_data.get("remote_path", ""),
+                            filename=filename,
+                            remote_path=remote_path,
                             size_bytes=result_data.get("size_bytes", 0),
                             checksum_sha256=result_data.get("checksum_sha256") or "pending",
                             is_encrypted=job.encrypt,

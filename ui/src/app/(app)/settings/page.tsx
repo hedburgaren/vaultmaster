@@ -382,6 +382,9 @@ export default function SettingsPage() {
               <span className="text-vm-accent font-bold">DEFAULT:</span> /tmp/vaultmaster<br />
               <span className="text-vm-accent font-bold">CURRENT:</span> {sysSettings.work_dir || '/tmp/vaultmaster'}
             </div>
+            <div className="mt-3 p-3 bg-yellow-500/5 border border-yellow-500/20 rounded font-mono text-[10px] text-yellow-400/80 leading-relaxed">
+              ⚠ {t('settings.work_dir_bind_hint')}
+            </div>
           </div>
         </div>
       )}
