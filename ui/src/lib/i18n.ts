@@ -598,6 +598,14 @@ const translations: Dict = {
   'notif.webhook_secret': { sv: 'Signeringsnyckel', en: 'Signing Secret' },
   'notif.webhook_secret_tip': { sv: 'Valfri HMAC-nyckel för att verifiera webhook-äkthet. Skickas som X-VaultMaster-Signature header.', en: 'Optional HMAC secret for verifying webhook authenticity. Sent as X-VaultMaster-Signature header.' },
 
+  // ── Settings: System ──
+  'settings.tab_system': { sv: 'System', en: 'System' },
+  'settings.work_dir': { sv: 'Arbetskatalog', en: 'Work Directory' },
+  'settings.work_dir_desc': { sv: 'Katalog på fjärrservern där backupfiler skapas temporärt innan de skickas till lagringsdestinationen. Se till att SSH-användaren har skrivrättigheter och att det finns tillräckligt med diskutrymme.', en: 'Directory on the remote server where backup files are temporarily created before being sent to the storage destination. Make sure the SSH user has write permissions and there is enough disk space.' },
+  'settings.work_dir_path': { sv: 'Sökväg', en: 'Path' },
+  'settings.work_dir_tip': { sv: 'Absolut sökväg på fjärrservern. Lämna tomt eller ange /tmp/vaultmaster för standard.', en: 'Absolute path on the remote server. Leave empty or set /tmp/vaultmaster for default.' },
+  'settings.system_saved': { sv: 'Systeminställningar sparade', en: 'System settings saved' },
+
   // ── Coming Soon ──
   'coming.title': { sv: 'Kommer snart', en: 'Coming Soon' },
   'coming.desc': { sv: 'Dessa funktioner är planerade för framtida versioner av VaultMaster.', en: 'These features are planned for future versions of VaultMaster.' },

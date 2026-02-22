@@ -8,6 +8,7 @@ from api.models.notification_channel import NotificationChannel
 from api.models.user import User
 from api.models.audit_log import AuditLog
 from api.models.webhook import Webhook
+from api.models.system_settings import SystemSetting
 
 __all__ = [
     "Server",
@@ -20,4 +21,5 @@ __all__ = [
     "User",
     "AuditLog",
     "Webhook",
+    "SystemSetting",
 ]
