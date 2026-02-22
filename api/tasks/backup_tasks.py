@@ -111,7 +111,7 @@ async def _run_backup(task, job_id: str):
                 run.finished_at = datetime.now(timezone.utc)
 
                 # Create artifact record for each destination
-                if result_data.get("filename") and result_data.get("checksum_sha256"):
+                if result_data.get("filename"):
                     for dest_id in (job.destination_ids or []):
                         artifact = BackupArtifact(
                             run_id=run.id,
@@ -119,7 +119,7 @@ async def _run_backup(task, job_id: str):
                             filename=result_data["filename"],
                             remote_path=result_data.get("remote_path", ""),
                             size_bytes=result_data.get("size_bytes", 0),
-                            checksum_sha256=result_data["checksum_sha256"],
+                            checksum_sha256=result_data.get("checksum_sha256") or "pending",
                             is_encrypted=job.encrypt,
                             backup_type=job.backup_type,
                             tags=job.tags,
@@ -128,6 +128,8 @@ async def _run_backup(task, job_id: str):
                             server_name=server.name,
                         )
                         db.add(artifact)
+                else:
+                    logger.warning(f"[{run.id}] No filename in result — skipping artifact creation")
 
                 # Apply rotation after successful backup — per destination
                 from api.models.retention_policy import RetentionPolicy

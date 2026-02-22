@@ -183,19 +183,27 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
         cmd = f"tar -czf {remote_path} {exclude_flags} {path_str}"
 
         log("info", f"Archiving files: {path_str}")
+        log("info", f"Work dir: {work_dir} → {remote_path}")
         exit_code, stdout, stderr = await run_remote_command(server, cmd, timeout=7200)
 
         if exit_code != 0 and exit_code != 1:  # tar returns 1 for "file changed during read"
-            log("error", f"tar failed: {stderr}")
+            log("error", f"tar failed (exit {exit_code}): {stderr}")
             raise Exception(f"tar failed: {stderr}")
 
-        exit_code, stdout, _ = await run_remote_command(server, f"stat -c %s {remote_path}")
-        size_bytes = int(stdout.strip()) if exit_code == 0 else 0
+        if exit_code == 1:
+            log("warn", f"tar warning (exit 1): {stderr.strip()[:200] if stderr else 'file changed during read'}")
 
-        exit_code, stdout, _ = await run_remote_command(server, f"sha256sum {remote_path}")
-        checksum = stdout.split()[0] if exit_code == 0 else ""
+        exit_code, stdout, stderr = await run_remote_command(server, f"stat -c %s {remote_path}")
+        if exit_code != 0:
+            log("warn", f"stat failed (exit {exit_code}): {stderr}")
+        size_bytes = int(stdout.strip()) if exit_code == 0 and stdout.strip().isdigit() else 0
 
-        log("info", f"File backup complete: {size_bytes} bytes")
+        exit_code, stdout, stderr = await run_remote_command(server, f"sha256sum {remote_path}")
+        if exit_code != 0:
+            log("warn", f"sha256sum failed (exit {exit_code}): {stderr}")
+        checksum = stdout.split()[0] if exit_code == 0 and stdout.strip() else ""
+
+        log("info", f"File backup complete: {size_bytes} bytes, checksum: {checksum[:16]}..." if checksum else f"File backup complete: {size_bytes} bytes (no checksum)")
 
         return {
             "success": True,

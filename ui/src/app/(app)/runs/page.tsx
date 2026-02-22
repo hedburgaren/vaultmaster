@@ -1,17 +1,33 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { getRuns, cancelRun } from '@/lib/api';
+import { Fragment, useEffect, useState, useMemo } from 'react';
+import { getRuns, cancelRun, getJobs } from '@/lib/api';
 import { formatBytes, formatDate, formatRelative } from '@/lib/utils';
 import Badge from '@/components/Badge';
-import { XCircle, Archive } from 'lucide-react';
+import { XCircle, Archive, ChevronDown, ChevronUp, AlertTriangle, Terminal } from 'lucide-react';
 import { useT } from '@/lib/i18n';
 
 export default function RunsPage() {
   const t = useT();
   const [runs, setRuns] = useState<any[]>([]);
-  const load = () => getRuns().then(setRuns).catch(() => {});
-  useEffect(() => { load(); const i = setInterval(load, 10000); return () => clearInterval(i); }, []);
+  const [jobs, setJobs] = useState<any[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const load = () => { getRuns().then(setRuns).catch(() => {}); };
+  useEffect(() => { load(); getJobs().then(setJobs).catch(() => {}); const i = setInterval(load, 10000); return () => clearInterval(i); }, []);
+
+  const jobMap = useMemo(() => {
+    const m: Record<string, string> = {};
+    jobs.forEach((j: any) => { m[j.id] = j.name; });
+    return m;
+  }, [jobs]);
+
+  const toggleExpand = (id: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
 
   const handleCancel = async (id: string) => {
     if (confirm(t('runs.confirm_cancel'))) { await cancelRun(id); load(); }
@@ -29,6 +45,7 @@ export default function RunsPage() {
           <thead>
             <tr className="bg-vm-surface2 border-b border-vm-border">
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.status')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.job')}</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.started')}</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.finished')}</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('runs.size')}</th>
@@ -37,22 +54,73 @@ export default function RunsPage() {
             </tr>
           </thead>
           <tbody>
-            {runs.map((r: any) => (
-              <tr key={r.id} className="border-b border-vm-border/50 hover:bg-vm-surface2 transition-colors">
-                <td className="px-4 py-3"><Badge status={r.status} /></td>
-                <td className="px-4 py-3 font-mono text-xs text-vm-text-dim">{formatDate(r.started_at)}</td>
-                <td className="px-4 py-3 font-mono text-xs text-vm-text-dim">{formatDate(r.finished_at)}</td>
-                <td className="px-4 py-3 font-code text-sm">{formatBytes(r.size_bytes)}</td>
-                <td className="px-4 py-3 font-mono text-xs text-vm-text-dim">{r.triggered_by}</td>
-                <td className="px-4 py-3">
-                  {r.status === 'running' && (
-                    <button onClick={() => handleCancel(r.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
-                      <XCircle className="w-3 h-3" /> {t('runs.cancel')}
-                    </button>
+            {runs.map((r: any) => {
+              const isExpanded = expanded.has(r.id);
+              const hasError = r.status === 'failed' && (r.error_message || (r.log_lines && r.log_lines.length > 0));
+              const lastError = r.log_lines?.filter((l: any) => l.level === 'error').pop();
+              return (
+                <Fragment key={r.id}>
+                  <tr onClick={() => toggleExpand(r.id)} className={`border-b border-vm-border/50 hover:bg-vm-surface2 transition-colors cursor-pointer ${isExpanded ? 'bg-vm-surface2' : ''}`}>
+                    <td className="px-4 py-3"><Badge status={r.status} /></td>
+                    <td className="px-4 py-3 font-mono text-xs text-vm-text-bright">{jobMap[r.job_id] || <span className="text-vm-text-dim">{r.job_id?.slice(0, 8)}</span>}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-vm-text-dim">{formatDate(r.started_at)}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-vm-text-dim">{formatDate(r.finished_at)}</td>
+                    <td className="px-4 py-3 font-code text-sm">{formatBytes(r.size_bytes)}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-vm-text-dim">{r.triggered_by}</td>
+                    <td className="px-4 py-3 flex items-center gap-2">
+                      {r.status === 'running' && (
+                        <button onClick={(e) => { e.stopPropagation(); handleCancel(r.id); }} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10">
+                          <XCircle className="w-3 h-3" /> {t('runs.cancel')}
+                        </button>
+                      )}
+                      {hasError && !isExpanded && <AlertTriangle className="w-3.5 h-3.5 text-vm-danger" />}
+                      {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-vm-text-dim" /> : <ChevronDown className="w-3.5 h-3.5 text-vm-text-dim" />}
+                    </td>
+                  </tr>
+                  {isExpanded && (
+                    <tr className="border-b border-vm-border/50">
+                      <td colSpan={7} className="px-4 py-3 bg-vm-bg/50">
+                        {/* Error message */}
+                        {r.error_message && (
+                          <div className="flex items-start gap-2 mb-3 p-2.5 bg-vm-danger/10 border border-vm-danger/30 rounded">
+                            <AlertTriangle className="w-4 h-4 text-vm-danger shrink-0 mt-0.5" />
+                            <div className="font-mono text-xs text-vm-danger break-all">{r.error_message}</div>
+                          </div>
+                        )}
+                        {/* Log lines */}
+                        {r.log_lines && r.log_lines.length > 0 ? (
+                          <div className="space-y-0.5">
+                            <div className="flex items-center gap-1.5 mb-1.5">
+                              <Terminal className="w-3.5 h-3.5 text-vm-accent" />
+                              <span className="font-mono text-[10px] text-vm-accent tracking-[2px] uppercase">{t('runs.log')} ({r.log_lines.length})</span>
+                            </div>
+                            <div className="bg-vm-surface border border-vm-border rounded p-2 max-h-48 overflow-y-auto">
+                              {r.log_lines.map((line: any, i: number) => (
+                                <div key={i} className={`font-mono text-[11px] py-0.5 ${line.level === 'error' ? 'text-vm-danger' : line.level === 'warn' ? 'text-yellow-400' : 'text-vm-text-dim'}`}>
+                                  <span className="text-vm-text-dim/50 mr-2">{line.ts?.split('T')[1]?.split('.')[0] || ''}</span>
+                                  <span className={`mr-2 px-1 rounded text-[9px] uppercase ${line.level === 'error' ? 'bg-vm-danger/20 text-vm-danger' : line.level === 'warn' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-vm-accent/10 text-vm-accent'}`}>{line.level}</span>
+                                  <span className="break-all">{line.msg}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="font-mono text-[11px] text-vm-text-dim">{t('runs.no_logs')}</div>
+                        )}
+                      </td>
+                    </tr>
                   )}
-                </td>
-              </tr>
-            ))}
+                  {/* Inline error preview (when not expanded) */}
+                  {!isExpanded && lastError && (
+                    <tr className="border-b border-vm-border/50">
+                      <td colSpan={7} className="px-4 py-1.5 bg-vm-danger/[0.03]">
+                        <div className="font-mono text-[10px] text-vm-danger/80 truncate"><AlertTriangle className="w-3 h-3 inline mr-1.5" />{lastError.msg}</div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
         {runs.length === 0 && (
