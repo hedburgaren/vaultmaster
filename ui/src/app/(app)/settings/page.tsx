@@ -5,15 +5,16 @@ import {
   getRetentionPolicies, createRetentionPolicy, deleteRetentionPolicy, previewRotation,
   getProfile, updateProfile, changePassword, generateApiKey, revokeApiKey,
   getSSHKeys, generateSSHKey,
+  getSystemSettings, updateSystemSettings,
 } from '@/lib/api';
-import { Plus, Trash2, Eye, Settings, User, Key, Mail, Lock, Copy, RefreshCw, KeyRound, Sparkles, Rocket, BarChart3, Globe2, Puzzle, Zap, Shield } from 'lucide-react';
+import { Plus, Trash2, Eye, Settings, User, Key, Mail, Lock, Copy, RefreshCw, KeyRound, Sparkles, Rocket, BarChart3, Globe2, Puzzle, Zap, Shield, Wrench, FolderOpen, Save } from 'lucide-react';
 import FormLabel from '@/components/FormLabel';
 import { useT, useLocale, type Locale } from '@/lib/i18n';
 
 export default function SettingsPage() {
   const t = useT();
   const [locale] = useLocale();
-  const [tab, setTab] = useState<'profile' | 'retention' | 'ssh' | 'coming'>('profile');
+  const [tab, setTab] = useState<'profile' | 'retention' | 'ssh' | 'system' | 'coming'>('profile');
 
   // Profile state
   const [profile, setProfile] = useState<any>(null);
@@ -36,11 +37,26 @@ export default function SettingsPage() {
   const [sshGenerating, setSshGenerating] = useState(false);
   const [sshCopied, setSshCopied] = useState<string | null>(null);
 
+  // System settings state
+  const [sysSettings, setSysSettings] = useState<Record<string, string>>({});
+  const [sysForm, setSysForm] = useState<Record<string, string>>({});
+  const [sysMsg, setSysMsg] = useState('');
+
   const loadProfile = () => getProfile().then((p: any) => { setProfile(p); setEmails(p.email_addresses || []); }).catch(() => {});
   const loadPolicies = () => getRetentionPolicies().then(setPolicies).catch(() => {});
   const loadSSHKeys = () => getSSHKeys().then(setSshKeys).catch(() => {});
+  const loadSystemSettings = () => getSystemSettings().then((s: any) => { setSysSettings(s); setSysForm(s); }).catch(() => {});
 
-  useEffect(() => { loadProfile(); loadPolicies(); loadSSHKeys(); }, []);
+  useEffect(() => { loadProfile(); loadPolicies(); loadSSHKeys(); loadSystemSettings(); }, []);
+
+  const handleSaveSystemSettings = async () => {
+    try {
+      const res = await updateSystemSettings(sysForm);
+      setSysSettings(res); setSysForm(res);
+      setSysMsg(t('settings.system_saved'));
+      setTimeout(() => setSysMsg(''), 3000);
+    } catch (e: any) { setSysMsg(e.message); }
+  };
 
   const handleAddEmail = () => {
     if (newEmail && !emails.includes(newEmail)) {
@@ -126,6 +142,7 @@ export default function SettingsPage() {
         <button onClick={() => setTab('profile')} className={tabClass('profile')}><User className="w-4 h-4 inline mr-1.5" />{t('settings.tab_profile')}</button>
         <button onClick={() => setTab('retention')} className={tabClass('retention')}><Settings className="w-4 h-4 inline mr-1.5" />{t('settings.tab_retention')}</button>
         <button onClick={() => setTab('ssh')} className={tabClass('ssh')}><KeyRound className="w-4 h-4 inline mr-1.5" />{t('settings.tab_ssh')}</button>
+        <button onClick={() => setTab('system')} className={tabClass('system')}><Wrench className="w-4 h-4 inline mr-1.5" />{t('settings.tab_system')}</button>
         <button onClick={() => setTab('coming')} className={tabClass('coming')}><Sparkles className="w-4 h-4 inline mr-1.5" />{t('settings.tab_coming')}</button>
       </div>
 
@@ -339,6 +356,32 @@ export default function SettingsPage() {
             <button onClick={handleGenerateSSHKey} disabled={sshGenerating} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase disabled:opacity-50">
               <KeyRound className="w-4 h-4" /> {sshGenerating ? t('ssh.generating') : t('ssh.generate')}
             </button>
+          </div>
+        </div>
+      )}
+
+      {tab === 'system' && (
+        <div className="space-y-6">
+          <div className="bg-vm-surface border border-vm-border rounded p-6">
+            <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider flex items-center gap-2"><FolderOpen className="w-5 h-5 text-vm-accent" /> {t('settings.work_dir')}</h3>
+            <div className="font-mono text-[11px] text-vm-text-dim mb-4 leading-relaxed">{t('settings.work_dir_desc')}</div>
+            <div className="mb-4">
+              <FormLabel label={t('settings.work_dir_path')} tooltip={t('settings.work_dir_tip')} />
+              <input value={sysForm.work_dir || ''} onChange={e => setSysForm({...sysForm, work_dir: e.target.value})} className="w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" placeholder="/tmp/vaultmaster" />
+            </div>
+            <div className="flex items-center gap-3">
+              <button onClick={handleSaveSystemSettings} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase hover:bg-[#33ddff] transition-all">
+                <Save className="w-4 h-4" /> {t('action.save')}
+              </button>
+              {sysForm.work_dir !== '/tmp/vaultmaster' && sysForm.work_dir && (
+                <span className="font-mono text-[10px] text-vm-accent px-2 py-1 rounded bg-vm-accent/10 border border-vm-accent/30">OVERRIDE</span>
+              )}
+              {sysMsg && <span className="font-mono text-xs text-vm-success">{sysMsg}</span>}
+            </div>
+            <div className="mt-4 p-3 bg-vm-bg/50 border border-vm-border rounded font-mono text-[9px] text-vm-text-dim leading-relaxed">
+              <span className="text-vm-accent font-bold">DEFAULT:</span> /tmp/vaultmaster<br />
+              <span className="text-vm-accent font-bold">CURRENT:</span> {sysSettings.work_dir || '/tmp/vaultmaster'}
+            </div>
           </div>
         </div>
       )}

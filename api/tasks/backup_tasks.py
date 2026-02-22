@@ -102,7 +102,7 @@ async def _run_backup(task, job_id: str):
             if not executor:
                 raise Exception(f"Unknown backup type: {job.backup_type}")
 
-            result_data = await executor(server, job, str(run.id))
+            result_data = await executor(server, job, str(run.id), db=db)
 
             if result_data["success"]:
                 run.status = "success"

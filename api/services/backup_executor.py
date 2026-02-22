@@ -8,9 +8,27 @@ from api.services.ssh_client import run_remote_command
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_WORK_DIR = "/tmp/vaultmaster"
 
-async def execute_postgresql_backup(server, job, run_id: str) -> dict:
+
+async def get_work_dir(db=None) -> str:
+    """Get the configured work directory from system settings, or default."""
+    try:
+        if db:
+            from sqlalchemy import select
+            from api.models.system_settings import SystemSetting
+            result = await db.execute(select(SystemSetting).where(SystemSetting.key == "work_dir"))
+            setting = result.scalar_one_or_none()
+            if setting and setting.value.strip():
+                return setting.value.strip()
+    except Exception:
+        pass
+    return DEFAULT_WORK_DIR
+
+
+async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
     """Execute a PostgreSQL backup via pg_dump over SSH."""
+    work_dir = await get_work_dir(db)
     config = job.source_config
     db_name = config.get("db_name", "postgres")
     pg_user = config.get("pg_user", "postgres")
@@ -21,7 +39,7 @@ async def execute_postgresql_backup(server, job, run_id: str) -> dict:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     ext = "dump" if dump_format == "custom" else "sql"
     filename = f"{db_name}_{timestamp}.{ext}.gz"
-    remote_path = f"/tmp/vaultmaster/{filename}"
+    remote_path = f"{work_dir}/{filename}"
 
     logs = []
 
@@ -32,7 +50,7 @@ async def execute_postgresql_backup(server, job, run_id: str) -> dict:
 
     try:
         # Ensure temp dir exists
-        await run_remote_command(server, "mkdir -p /tmp/vaultmaster")
+        await run_remote_command(server, f"mkdir -p {work_dir}")
 
         # Stop containers if configured
         if stop_containers:
@@ -88,13 +106,14 @@ async def execute_postgresql_backup(server, job, run_id: str) -> dict:
         return {"success": False, "error": str(e), "logs": logs}
 
 
-async def execute_docker_volumes_backup(server, job, run_id: str) -> dict:
+async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> dict:
     """Backup Docker volumes via tar over SSH."""
+    work_dir = await get_work_dir(db)
     config = job.source_config
     volumes = config.get("volumes", [])
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"docker_volumes_{timestamp}.tar.gz"
-    remote_path = f"/tmp/vaultmaster/{filename}"
+    remote_path = f"{work_dir}/{filename}"
 
     logs = []
 
@@ -103,7 +122,7 @@ async def execute_docker_volumes_backup(server, job, run_id: str) -> dict:
         logs.append(entry)
 
     try:
-        await run_remote_command(server, "mkdir -p /tmp/vaultmaster")
+        await run_remote_command(server, f"mkdir -p {work_dir}")
 
         if volumes:
             volume_paths = " ".join(f"/var/lib/docker/volumes/{v}" for v in volumes)
@@ -140,14 +159,15 @@ async def execute_docker_volumes_backup(server, job, run_id: str) -> dict:
         return {"success": False, "error": str(e), "logs": logs}
 
 
-async def execute_files_backup(server, job, run_id: str) -> dict:
+async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
     """Backup files/directories via tar over SSH."""
+    work_dir = await get_work_dir(db)
     config = job.source_config
     paths = config.get("paths", [])
     excludes = config.get("excludes", [])
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"files_{timestamp}.tar.gz"
-    remote_path = f"/tmp/vaultmaster/{filename}"
+    remote_path = f"{work_dir}/{filename}"
 
     logs = []
 
@@ -156,7 +176,7 @@ async def execute_files_backup(server, job, run_id: str) -> dict:
         logs.append(entry)
 
     try:
-        await run_remote_command(server, "mkdir -p /tmp/vaultmaster")
+        await run_remote_command(server, f"mkdir -p {work_dir}")
 
         exclude_flags = " ".join(f"--exclude='{e}'" for e in excludes)
         path_str = " ".join(paths)
@@ -191,7 +211,7 @@ async def execute_files_backup(server, job, run_id: str) -> dict:
         return {"success": False, "error": str(e), "logs": logs}
 
 
-async def execute_custom_backup(server, job, run_id: str) -> dict:
+async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
     """Execute a custom shell script for backup."""
     config = job.source_config
     script = config.get("script", "")

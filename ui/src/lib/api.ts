@@ -157,5 +157,9 @@ export const createUser = (data: any) => apiFetch('/v1/users', { method: 'POST',
 export const updateUser = (id: string, data: any) => apiFetch(`/v1/users/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 export const deleteUser = (id: string) => apiFetch(`/v1/users/${id}`, { method: 'DELETE' });
 
+// System Settings
+export const getSystemSettings = () => apiFetch('/v1/settings/system');
+export const updateSystemSettings = (data: any) => apiFetch('/v1/settings/system', { method: 'PUT', body: JSON.stringify(data) });
+
 // Health
 export const getHealth = () => fetch(`${API_BASE}/health`).then(r => r.json());
