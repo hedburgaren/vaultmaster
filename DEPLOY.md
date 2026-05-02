@@ -260,3 +260,81 @@ docker compose logs --tail 50 worker | grep -iE "error|registered|validation" ||
 ```sql
 DROP TABLE backup_validation_run;
 ```
+
+---
+
+## EPIC 1 — Säkerhetshärdning
+
+### Server-side hardening (commit 5624fef)
+
+**Innehåller:**
+- `api/main.py` — CORS strikt, ingen wildcard-fallback, `SlowAPIMiddleware`
+- `api/rate_limiter.py` — delad limiter-instans
+- `api/routers/auth.py` — använder shared limiter (decorators var no-ops innan)
+- `api/services/ssh_client.py` — `shlex.quote()` runt user-input + PGPASSWORD via env istället för command-line
+- `api/services/backup_executor.py` — `_safe_ident()`/`_safe_path()`-validatorer + `shlex.quote()` defense-in-depth
+- `tests/test_backup_executor_validation.py` — 9 tester för injektion-rejection
+
+**Pre-deploy: sätt ALLOWED_ORIGINS i `.env`**
+
+I `/srv/containers/vm.hedburgaren.se/.env`:
+```
+ALLOWED_ORIGINS=https://vm.hedburgaren.se
+ENV=production
+```
+
+Utan `ALLOWED_ORIGINS` startar API:et inte i prod. (Dev-fallback ger loopback-only.)
+
+**Deploy:**
+```bash
+cd /srv/containers/vm.hedburgaren.se
+git pull
+docker compose build api worker beat
+docker compose up -d
+docker compose logs --tail 30 api | grep -iE "rate|cors|allowed_origins" || true
+docker compose exec -T api python -m tests.test_backup_executor_validation
+docker compose exec -T api python -m tests.test_notifier_discord
+```
+
+**Verifiering:**
+
+1. **CORS strikt:** `curl -H "Origin: https://evil.example" https://vm.hedburgaren.se/api/health -i | grep -i "access-control"` ska INTE inkludera `Access-Control-Allow-Origin: *`.
+2. **Rate-limit på login:** 6 snabba `POST /api/v1/auth/login` ska få 429 på 6:e (limit 5/min är konfig i auth.py — om limit-decorator behövs lägga till på login-endpoint, se follow-up).
+3. **SSH injection avstängd:** browse-API med `path=/;cat /etc/passwd` ska bara försöka `ls` på den konstiga sökvägen, inte exekvera `cat`.
+4. **Backup config validation:** POST `/api/v1/jobs` med `source_config={"db_name":"foo;rm -rf /"}` triggar 400/500 vid run, inte exekvering.
+
+**Rollback:** `git revert 5624fef && docker compose build api worker beat && docker compose up -d`. Tar inte ned tabeller eller config.
+
+### Beroendeuppgraderingar (commit följer)
+
+**Innehåller:**
+- `requirements.txt` — `python-jose==3.3.0` → `PyJWT==2.10.1`
+- `api/auth.py` — `from jose import JWTError, jwt` → `import jwt; from jwt import PyJWTError`
+- `ui/package.json` — Next.js `14.2.21` → `14.2.35`
+
+**Deploy backend:**
+```bash
+docker compose build api worker beat
+docker compose up -d api worker beat
+docker compose exec -T api python -c "import jwt; print(jwt.__version__)"
+# Verifiera login fortfarande fungerar:
+curl -X POST https://vm.hedburgaren.se/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"chrille","password":"<pwd>"}' | head
+```
+
+**Deploy frontend (förslag):**
+```bash
+cd /srv/containers/vm.hedburgaren.se/ui
+rm -f package-lock.json
+docker compose build ui
+docker compose up -d ui
+```
+
+(`rm package-lock.json` regenererar lockfilen mot ny next-version. `npm ci` med stale lock skulle annars failas med "EUSAGE".)
+
+**Verifiering:**
+- API: login → JWT funkar, både skapa och validera token.
+- UI: laddar utan TS-typfel; ingen regression i Topbar/runs/jobs (testade sektioner från EPIC 0a/0b).
+
+**Rollback:** `git revert <commit>` + om npm: ` rm package-lock.json && npm install` igen.
