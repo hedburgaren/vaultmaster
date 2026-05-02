@@ -334,11 +334,21 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
 
 
 async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
-    """Execute a custom shell command/script for backup."""
+    """Execute a custom shell command/script for backup.
+
+    If `output_dir` is set in source_config, after the script we stat
+    the newest file there to detect 0-byte output (silent failures).
+    Without this, custom jobs can run "successfully" but produce empty
+    files — exactly what happened with Seafile MariaDB for 2 months
+    when the root password rotated under us.
+    """
     config = job.source_config
     script = config.get("command") or config.get("script", "")
     if not script:
         return {"success": False, "error": "No command or script configured", "logs": []}
+
+    output_dir = config.get("output_dir")
+    min_bytes = int(config.get("min_output_bytes", 1024))  # default: ≥1 KB
 
     logs = []
 
@@ -356,11 +366,37 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
 
         log("info", "Custom script completed")
 
+        size_bytes = 0
+        latest_filename = "custom_backup"
+        if output_dir:
+            try:
+                output_dir_q = shlex.quote(_safe_path(output_dir, "output_dir"))
+                # Find newest file in output_dir, print size + name
+                list_cmd = f"find {output_dir_q} -maxdepth 1 -type f -printf '%T@ %s %f\\n' | sort -nr | head -1"
+                ec2, out2, _ = await run_remote_command(server, list_cmd, timeout=30)
+                if ec2 == 0 and out2.strip():
+                    parts = out2.strip().split(" ", 2)
+                    if len(parts) == 3:
+                        size_bytes = int(parts[1])
+                        latest_filename = parts[2]
+                        log("info", f"Newest output: {latest_filename} ({size_bytes} bytes)")
+                if size_bytes < min_bytes:
+                    raise Exception(
+                        f"Custom backup output is {size_bytes} bytes (< min_output_bytes={min_bytes}). "
+                        f"Script reported success but produced an unrealistically small file — "
+                        f"check for silent auth/permission errors."
+                    )
+            except Exception as size_err:
+                # If size check itself fails (e.g. invalid output_dir), surface it as a failure.
+                if "min_output_bytes" in str(size_err):
+                    raise
+                log("warn", f"size-check skipped: {size_err}")
+
         return {
             "success": True,
-            "filename": "custom_backup",
-            "remote_path": "",
-            "size_bytes": 0,
+            "filename": latest_filename,
+            "remote_path": "",  # custom scripts manage their own paths
+            "size_bytes": size_bytes,
             "checksum_sha256": "",
             "logs": logs,
             "stdout": stdout,
