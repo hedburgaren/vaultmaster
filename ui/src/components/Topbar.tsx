@@ -1,11 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Lock, Bell, Globe } from 'lucide-react';
 import { logout, getDashboard } from '@/lib/api';
 import { useLocale, useT } from '@/lib/i18n';
 
 export default function Topbar() {
+  const router = useRouter();
   const [locale, setLocale] = useLocale();
   const t = useT();
   const [failedCount, setFailedCount] = useState(0);
@@ -71,13 +73,37 @@ export default function Topbar() {
                   </div>
                 ) : (
                   errors.map((e: any, i: number) => (
-                    <div key={i} className="px-4 py-3 border-b border-vm-border/50 hover:bg-vm-surface3 transition-colors">
+                    <button
+                      key={i}
+                      onClick={() => {
+                        setShowPanel(false);
+                        if (e.id) router.push(`/runs?expand=${e.id}`);
+                      }}
+                      className="w-full text-left px-4 py-3 border-b border-vm-border/50 hover:bg-vm-surface3 transition-colors cursor-pointer"
+                      title={e.error || t('topbar.unknown_error')}
+                    >
                       <div className="flex items-center gap-2 mb-1">
                         <div className="w-1.5 h-1.5 rounded-full bg-vm-danger shrink-0" />
-                        <span className="font-mono text-[10px] text-vm-text-dim">{e.created_at ? new Date(e.created_at).toLocaleString('en-GB') : '—'}</span>
+                        <span className="font-mono text-[10px] text-vm-text-dim">
+                          {e.created_at ? new Date(e.created_at).toLocaleString('en-GB') : '—'}
+                          {e.retry_count > 0 && <span className="ml-2 text-vm-warning">(retry {e.retry_count})</span>}
+                        </span>
                       </div>
-                      <div className="font-mono text-xs text-vm-danger pl-3.5 truncate">{e.error || t('topbar.unknown_error')}</div>
-                    </div>
+                      {(e.job_name || e.server_name) && (
+                        <div className="font-mono text-[11px] text-vm-text-bright pl-3.5 truncate">
+                          {e.job_name || '—'}
+                          {e.server_name && <span className="text-vm-text-dim"> @ {e.server_name}</span>}
+                        </div>
+                      )}
+                      <div className="font-mono text-[11px] text-vm-danger pl-3.5 line-clamp-2 break-words">
+                        {e.error || t('topbar.unknown_error')}
+                      </div>
+                      {e.last_log && e.last_log !== e.error && (
+                        <div className="font-mono text-[10px] text-vm-text-dim pl-3.5 mt-0.5 line-clamp-2 break-words">
+                          {e.last_log}
+                        </div>
+                      )}
+                    </button>
                   ))
                 )}
               </div>
