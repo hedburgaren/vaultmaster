@@ -20,9 +20,20 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: create tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Startup: create tables. Wrap in try/except so a worker that loses
+    # the race vs. another uvicorn worker (both trying create_all against
+    # fresh tables at the same time) doesn't fail the entire startup —
+    # has_table-checkfirst is racy because the implicit composite TYPE
+    # gets created before the TABLE commit is visible to peers.
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as exc:
+        msg = str(exc)
+        if "already exists" in msg or "UniqueViolationError" in msg:
+            logger.warning("create_all race vs. peer worker — tables already exist, continuing")
+        else:
+            raise
     logger.info("VaultMaster API started")
     yield
     # Shutdown
