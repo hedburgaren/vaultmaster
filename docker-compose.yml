@@ -16,6 +16,7 @@ services:
       - ./migrations:/app/migrations
       - /mnt/backup:/mnt/backup
       - /srv/archive:/srv/archive
+      - /srv/archive/tmp/vaultmaster:/tmp/vaultmaster
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /root/.ssh:/root/.ssh
       - /root/.config/rclone:/root/.config/rclone
@@ -72,13 +73,14 @@ services:
       dockerfile: Dockerfile
     container_name: vaultmaster-worker
     restart: unless-stopped
-    command: celery -A api.tasks.celery_app worker -l info -c 4 -Q backup,rotation,notification
+    command: celery -A api.tasks.celery_app worker -l info -c 1 -Q backup,rotation,notification
     env_file:
       - .env
     volumes:
       - ./api:/app/api
       - /mnt/backup:/mnt/backup
       - /srv/archive:/srv/archive
+      - /srv/archive/tmp/vaultmaster:/tmp/vaultmaster
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /root/.ssh:/root/.ssh:ro
       - /root/.config/rclone:/root/.config/rclone:ro

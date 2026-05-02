@@ -37,16 +37,18 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
     """Execute a PostgreSQL backup via pg_dump over SSH."""
     work_dir = await get_work_dir(db)
     config = job.source_config
-    db_name = config.get("db_name", "postgres")
-    pg_user = config.get("pg_user", "postgres")
-    dump_format = config.get("dump_format", "custom")
+    container = config.get("container")
+    db_name = config.get("database") or config.get("db_name", "postgres")
+    pg_user = config.get("username") or config.get("pg_user", "postgres")
+    dump_format = config.get("format") or config.get("dump_format", "custom")
     compress_level = config.get("compress_level", 9)
+    output_dir = config.get("output_dir", work_dir)
     stop_containers = config.get("stop_containers", [])
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     ext = "dump" if dump_format == "custom" else "sql"
     filename = f"{db_name}_{timestamp}.{ext}.gz"
-    remote_path = f"{work_dir}/{filename}"
+    remote_path = f"{output_dir}/{filename}"
 
     logs = []
 
@@ -56,8 +58,8 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
         logger.info(f"[{run_id}] {msg}")
 
     try:
-        # Ensure temp dir exists
-        await run_remote_command(server, f"mkdir -p {work_dir}")
+        # Ensure output dir exists
+        await run_remote_command(server, f"mkdir -p {output_dir}")
 
         # Stop containers if configured
         if stop_containers:
@@ -65,13 +67,20 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
             log("info", f"Stopping containers: {containers}")
             await run_remote_command(server, f"docker stop {containers}")
 
-        # Run pg_dump
+        # Run pg_dump — via docker exec if container is specified
         if dump_format == "custom":
-            dump_cmd = f"pg_dump -U {pg_user} -Fc -Z {compress_level} {db_name} > {remote_path}"
+            pg_dump_cmd = f"pg_dump -U {pg_user} -Fc -Z {compress_level} {db_name}"
         else:
-            dump_cmd = f"pg_dump -U {pg_user} {db_name} | gzip -{compress_level} > {remote_path}"
+            pg_dump_cmd = f"pg_dump -U {pg_user} {db_name}"
 
-        log("info", f"Running pg_dump for {db_name}")
+        if container:
+            dump_cmd = f"docker exec {container} {pg_dump_cmd} | gzip > {remote_path}"
+        elif dump_format == "custom":
+            dump_cmd = f"{pg_dump_cmd} > {remote_path}"
+        else:
+            dump_cmd = f"{pg_dump_cmd} | gzip -{compress_level} > {remote_path}"
+
+        log("info", f"Running pg_dump for {db_name}" + (f" via container {container}" if container else ""))
         exit_code, stdout, stderr = await run_remote_command(server, dump_cmd, timeout=3600)
 
         sudo_err = _check_sudo_failure(stderr)
@@ -255,11 +264,11 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
 
 
 async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
-    """Execute a custom shell script for backup."""
+    """Execute a custom shell command/script for backup."""
     config = job.source_config
-    script = config.get("script", "")
+    script = config.get("command") or config.get("script", "")
     if not script:
-        return {"success": False, "error": "No script configured", "logs": []}
+        return {"success": False, "error": "No command or script configured", "logs": []}
 
     logs = []
 
