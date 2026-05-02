@@ -231,7 +231,7 @@ class ArtifactSearch(BaseModel):
 # ── Notification Channel ──
 class NotificationChannelCreate(BaseModel):
     name: str
-    channel_type: str  # email, slack, ntfy, telegram, webhook
+    channel_type: str  # email, slack, ntfy, telegram, discord, webhook
     config: dict = {}
     triggers: list[str] = []
 
