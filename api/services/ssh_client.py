@@ -103,18 +103,38 @@ async def list_remote_directory(server, path: str = "/") -> list[dict]:
 
 
 async def run_remote_command(server, command: str, timeout: int = 300) -> tuple[int, str, str]:
-    """Execute a command on a remote server via SSH.
+    """Execute a command on a remote server via SSH, or locally for local servers.
 
     Prepends sudo if use_sudo is set.
+    For auth_type=='local', runs the command directly via subprocess instead of SSH.
     Retries on transient connection errors (e.g. Errno 111 when the SSH
     daemon is busy with concurrent connections).
     """
-    kwargs = _build_connect_kwargs(server)
-
     meta = getattr(server, 'meta', None) or {}
     use_sudo = getattr(server, 'use_sudo', False) or meta.get('use_sudo', False)
     if use_sudo and (getattr(server, 'ssh_user', None) or "root") != "root":
-        command = f"sudo -n {command}"
+        # Wrap in sh -c so sudo covers the entire pipeline (pipes, redirects)
+        escaped = command.replace("'", "'\\''")
+        command = f"sudo -n sh -c '{escaped}'"
+
+    # Local execution — no SSH needed
+    if getattr(server, 'auth_type', '') == "local":
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return proc.returncode, stdout_bytes.decode(errors="replace"), stderr_bytes.decode(errors="replace")
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise OSError(f"Local command timed out after {timeout}s: {command[:80]}")
+        except Exception as e:
+            logger.error(f"Local command failed: {e}")
+            raise
+
+    kwargs = _build_connect_kwargs(server)
 
     max_retries = 3
     for attempt in range(max_retries + 1):

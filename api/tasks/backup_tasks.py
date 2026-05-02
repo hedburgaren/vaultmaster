@@ -312,6 +312,16 @@ async def _check_scheduled():
 
                 # Check if we should have run in the last 60 seconds
                 if (now - prev_time).total_seconds() < 60:
+                    # Skip if this job already has a run still in progress
+                    running_result = await db.execute(
+                        select(BackupRun)
+                        .where(BackupRun.job_id == job.id, BackupRun.status == "running")
+                    )
+                    already_running = running_result.scalar_one_or_none()
+                    if already_running:
+                        logger.info(f"Skipping {job.name} — previous run still in progress (started {already_running.started_at})")
+                        continue
+
                     # Check if we already have a run for this window
                     run_result = await db.execute(
                         select(BackupRun)

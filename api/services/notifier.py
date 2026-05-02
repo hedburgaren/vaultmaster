@@ -33,14 +33,30 @@ async def send_notification(channel, subject: str, message: str) -> tuple[bool, 
 
 
 async def _send_slack(config: dict, subject: str, message: str) -> tuple[bool, str]:
+    # Support both webhook_url (classic incoming webhooks) and bot_token + channel (Bot API)
+    bot_token = config.get("bot_token")
+    channel = config.get("channel")
     webhook_url = config.get("webhook_url")
-    if not webhook_url:
-        return False, "No webhook_url configured"
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(webhook_url, json={"text": f"*{subject}*\n{message}"})
-        if resp.status_code == 200:
-            return True, "Slack notification sent"
-        return False, f"Slack returned {resp.status_code}"
+
+    if bot_token and channel:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://slack.com/api/chat.postMessage",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                json={"channel": channel, "text": f"*{subject}*\n{message}", "unfurl_links": False},
+            )
+            data = resp.json()
+            if resp.status_code == 200 and data.get("ok"):
+                return True, "Slack notification sent (Bot API)"
+            return False, f"Slack Bot API error: {data.get('error', resp.status_code)}"
+    elif webhook_url:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(webhook_url, json={"text": f"*{subject}*\n{message}"})
+            if resp.status_code == 200:
+                return True, "Slack notification sent"
+            return False, f"Slack returned {resp.status_code}"
+    else:
+        return False, "No webhook_url or bot_token+channel configured"
 
 
 async def _send_ntfy(config: dict, subject: str, message: str) -> tuple[bool, str]:
