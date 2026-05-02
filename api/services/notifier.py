@@ -112,7 +112,11 @@ async def _send_discord(config: dict, subject: str, message: str) -> tuple[bool,
     bridge_url = config.get("bridge_url")
     bridge_token = config.get("bridge_token")
     channel = config.get("channel")
-    webhook_url = config.get("webhook_url")
+    # Accept both `webhook_url` (canonical) and `url` (the generic-webhook
+    # form key, which the UI happens to render). Without this fallback,
+    # configs created via the UI dropdown for "Discord" would silently
+    # fail with "needs bridge_url+bridge_token+channel OR webhook_url".
+    webhook_url = config.get("webhook_url") or config.get("url")
     embeds_enabled = config.get("embeds_enabled", True)
     color = _discord_color_for_subject(subject)
 

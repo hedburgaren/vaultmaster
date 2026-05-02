@@ -91,6 +91,12 @@ async def _run_backup(task, job_id: str):
         await db.commit()
         await db.refresh(run)
 
+        # Track temp files we create so we can guarantee cleanup even on
+        # exception, retry, or worker kill. The orphaned-1.6 TB incident
+        # 2026-05-02 happened because the cleanup at the end of the success
+        # path never ran when the task was redelivered or killed mid-flight.
+        temp_files_to_clean: list[tuple[object, str]] = []  # (server, remote_path)
+
         try:
             # Execute based on backup type
             executors = {
@@ -106,6 +112,11 @@ async def _run_backup(task, job_id: str):
                 raise Exception(f"Unknown backup type: {job.backup_type}")
 
             result_data = await executor(server, job, str(run.id), db=db)
+            # Register the temp file produced by the executor (if any) so
+            # the finally-block can guarantee removal.
+            rp = result_data.get("remote_path") if isinstance(result_data, dict) else None
+            if rp and not result_data.get("skip_transfer"):
+                temp_files_to_clean.append((server, rp))
 
             if result_data["success"]:
                 run.status = "success"
@@ -313,6 +324,20 @@ async def _run_backup(task, job_id: str):
             await db.commit()
             logger.error(f"Backup task failed for job {job_id}: {type(e).__name__}: {e}")
             raise
+
+        finally:
+            # Guaranteed temp-file cleanup. Runs whether the task succeeded,
+            # failed, was killed, or got redelivered. If transfer succeeded
+            # the file was already removed at the end of the success path —
+            # delete_remote_file is tolerant of missing files.
+            if temp_files_to_clean:
+                from api.services.ssh_client import delete_remote_file
+                for srv, path in temp_files_to_clean:
+                    try:
+                        await delete_remote_file(srv, path)
+                        logger.info(f"[{run.id}] finally: cleaned temp file {path}")
+                    except Exception as cleanup_err:
+                        logger.warning(f"[{run.id}] finally: cleanup of {path} failed: {cleanup_err}")
 
 
 @celery_app.task(name="api.tasks.backup_tasks.run_restore_task")

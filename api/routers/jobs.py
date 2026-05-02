@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from croniter import croniter
 from datetime import datetime, timezone
@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from api.auth import get_current_user
 from api.database import get_db
 from api.models.backup_job import BackupJob
+from api.models.backup_validation_run import BackupValidationRun
 from api.schemas import BackupJobCreate, BackupJobUpdate, BackupJobOut
 
 router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(get_current_user)])
@@ -74,6 +75,10 @@ async def delete_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    # backup_validation_run has a FK to backup_job but no cascade declared
+    # at either ORM or DB level — clear them explicitly so the delete
+    # doesn't trip the FK constraint.
+    await db.execute(sql_delete(BackupValidationRun).where(BackupValidationRun.job_id == job_id))
     await db.delete(job)
 
 
