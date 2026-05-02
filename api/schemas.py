@@ -338,6 +338,7 @@ class CredentialOut(BaseModel):
 class CredentialRevealRequest(BaseModel):
     password: str
     purpose: str = Field(min_length=1, max_length=255)
+    totp_code: str | None = None  # required if user has totp_enabled
 
 
 class CredentialRevealOut(BaseModel):
@@ -401,6 +402,22 @@ class Token(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+    totp_code: str | None = None  # required if user has totp_enabled
+
+
+class TotpSetupOut(BaseModel):
+    secret: str
+    otpauth_uri: str
+    qr_png_base64: str  # data: prefix included
+
+
+class TotpVerifyRequest(BaseModel):
+    totp_code: str
+
+
+class TotpDisableRequest(BaseModel):
+    password: str
+    totp_code: str
 
 
 class SetupRequest(BaseModel):

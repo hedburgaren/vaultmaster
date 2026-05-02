@@ -218,6 +218,8 @@ async def notify_event(db, event: str, data: dict):
         "validation.passed": "Backup Validation Passed",
         "validation.failed": "Backup Validation Failed",
         "validation.skipped": "Backup Validation Skipped",
+        "credential.expiring": "Credential Expiring",
+        "credential.expired": "Credential Expired",
     }
 
     subject = subject_map.get(event, event)
@@ -253,5 +255,16 @@ def _format_event_message(event: str, data: dict) -> str:
     elif event == "validation.skipped":
         return (f"ℹ️ Restore-validation skipped\nJob: {data.get('job_name', 'N/A')}\n"
                 f"Reason: {data.get('error', 'no artifact')}")
+    elif event == "credential.expiring":
+        return (f"⏳ Credential expiring soon\n"
+                f"Name: {data.get('name', 'N/A')}\n"
+                f"Type: {data.get('credential_type', 'N/A')}\n"
+                f"Expires: {data.get('expires_at', 'N/A')}\n"
+                f"Days left: {data.get('days_left', '?')}")
+    elif event == "credential.expired":
+        return (f"⛔ Credential EXPIRED\n"
+                f"Name: {data.get('name', 'N/A')}\n"
+                f"Type: {data.get('credential_type', 'N/A')}\n"
+                f"Expired: {data.get('expires_at', 'N/A')}")
     else:
         return str(data)

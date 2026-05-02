@@ -555,3 +555,121 @@ curl -X POST https://vm.hedburgaren.se/api/mcp/v1/tools/get_credential \
 - Per-klient rate-limiting läggs på som SlowAPI-decorator i en follow-up (modellen har `rate_limit_per_minute`-fält redo).
 
 **Rollback:** `git revert <commit>` + `docker compose build api worker beat && docker compose up -d`. `mcp_client`-tabellen kan ligga kvar eller droppas vid behov.
+
+---
+
+## EPIC 5 — Operational maturity
+
+Innehåller:
+- `api/middleware/audit.py` — `AuditLogMiddleware` skriver en blanket-audit-rad per muterande request
+- `api/routers/auth.py` — TOTP setup/verify/disable + login kräver code om `totp_enabled`
+- `api/routers/credentials.py` — reveal kräver TOTP om `totp_enabled`
+- `api/tasks/credential_tasks.py` — `scan_credential_expiry`-task (daily)
+- `api/services/notifier.py` — events `credential.expiring` / `credential.expired`
+- `requirements.txt` — `pyotp==2.9.0`, `qrcode[pil]==8.0`
+- `scripts/check_server_heartbeat.py` — diagnostic CLI för stale heartbeats
+
+**Deploy:**
+```bash
+cd /srv/containers/vm.hedburgaren.se
+git pull
+docker compose build api worker beat
+docker compose up -d api worker beat
+docker compose exec -T api python -c "import pyotp; print('pyotp', pyotp.__version__)"
+```
+
+### Audit-log instrumentation
+
+`AuditLogMiddleware` registrerar automatiskt en `http.<method>` audit-rad
+för varje 2xx-svar på POST/PUT/PATCH/DELETE under `/api/v1/`, med användare
+upplöst från Authorization eller X-API-Key. Routers som redan loggar
+domänspecifika rader (credentials, mcp_clients) fortsätter göra det —
+middleware är blanket-coverage utöver dem.
+
+**Verifiering:**
+```bash
+TOKEN=$(curl -sX POST https://vm.hedburgaren.se/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"chrille","password":"<pwd>"}' | jq -r .access_token)
+
+curl -X POST https://vm.hedburgaren.se/api/v1/servers \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"audit-test","host":"127.0.0.1"}'
+
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://vm.hedburgaren.se/api/v1/audit?action=http&limit=5" | jq
+```
+
+Du ska se `http.post` med detail `POST /api/v1/servers → 201`.
+
+### TOTP
+
+**Aktivera (per användare):**
+```bash
+TOKEN=...
+SETUP=$(curl -sX POST https://vm.hedburgaren.se/api/v1/auth/totp/setup \
+  -H "Authorization: Bearer $TOKEN")
+echo "$SETUP" | jq -r .qr_png_base64 | sed 's|data:image/png;base64,||' | base64 -d > /tmp/totp.png
+# Skanna /tmp/totp.png med Authenticator. Mata in koden:
+curl -X POST https://vm.hedburgaren.se/api/v1/auth/totp/verify \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"totp_code":"123456"}'
+# Svar: {"enabled": true}
+```
+
+**Login efter aktivering:** body måste inkludera `totp_code` — annars 401 "TOTP code required".
+**Reveal efter aktivering:** request måste inkludera `totp_code` utöver `password` — annars 403.
+**Disable:** `POST /auth/totp/disable` med både `password` OCH giltig `totp_code`.
+
+**UI-uppdatering kommer separat** — login-sidan och reveal-modalen behöver code-inputfält när `totp_enabled=true` returneras av `/auth/me`. Backend är redo idag, frontend-fält kan landa i en följdkommit.
+
+### Credential expiry-warnings
+
+Beat-task körs dagligen kl 00:00 UTC (86400s-schedule). Den skannar alla
+credentials med `expires_at != NULL` och fyrar:
+- `credential.expiring` om < 7 dagar kvar
+- `credential.expired` om passerat
+
+Notifications routas via befintlig Discord-bridge (EPIC 0a) till alla
+NotificationChannel-rader som har dessa events i triggers-array. Lägg
+till dem i seed-skriptet eller via UI:
+```bash
+docker compose exec -T api python -m scripts.seed_discord_channels \
+  --triggers run.failed,run.partial,storage.warning,storage.critical,server.offline,credential.expiring,credential.expired \
+  ...
+```
+
+**Test:** skapa en credential med `expires_at` imorgon, kör tasken manuellt:
+```bash
+docker compose exec -T worker celery -A api.tasks.celery_app call api.tasks.credential_tasks.scan_credential_expiry
+```
+Inom 1-2 minuter ska Discord få ett `Credential Expiring`-meddelande.
+
+### VaultMaster-agent recovery (incidenten 2026-05-01)
+
+`scripts/check_server_heartbeat.py` listar servrar med stale heartbeats
+och föreslår diagnostiska steg. Acceptance från task: UI visar
+"Servrar online: 1/1".
+
+```bash
+docker compose exec -T api python -m scripts.check_server_heartbeat \
+  --base-url http://localhost:8000 \
+  --username chrille --password '<pwd>' \
+  --threshold-minutes 15
+```
+
+**Rotsorsak 2026-05-01 (att undersöka manuellt på hedburgaren):**
+- VaultMaster-agenten på source-host slutade heartbeata
+- Möjliga orsaker:
+  1. Agent-processen har dött (`ps aux | grep vaultmaster-agent` eller `systemctl status vaultmaster-agent`)
+  2. Disk fullt → loggning failas → agent kraschar (`df -h /`)
+  3. SSH-nyckel utbytt utan att VaultMaster-config uppdaterades
+  4. Klock-skew > 5 min → JWT auth failas (`timedatectl status`)
+- Recovery: starta om agent-tjänsten, kolla logfilen, verifiera nästa
+  heartbeat i UI
+
+**Rollback:**
+- TOTP: kan inaktiveras per user via `/totp/disable`. Kan också rullas
+  tillbaka via direkt SQL: `UPDATE "user" SET totp_enabled=false, totp_secret=NULL WHERE username='chrille'` om låst ute.
+- Audit-middleware: `git revert <commit>` + rebuild — inga DB-ändringar.
+- Expiry-task: `git revert` + rebuild + `docker compose restart beat` så beat-schedule omladas.

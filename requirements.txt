@@ -18,3 +18,5 @@ bcrypt==4.2.1
 python-multipart==0.0.20
 sse-starlette==2.2.1
 slowapi==0.1.9
+pyotp==2.9.0
+qrcode[pil]==8.0
