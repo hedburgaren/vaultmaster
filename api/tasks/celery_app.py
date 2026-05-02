@@ -8,7 +8,7 @@ celery_app = Celery(
     "vaultmaster",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["api.tasks.backup_tasks", "api.tasks.rotation_tasks", "api.tasks.validation_tasks", "api.tasks.credential_tasks", "api.tasks.anomaly_tasks", "api.tasks.security_tasks"],
+    include=["api.tasks.backup_tasks", "api.tasks.rotation_tasks", "api.tasks.validation_tasks", "api.tasks.credential_tasks", "api.tasks.anomaly_tasks", "api.tasks.security_tasks", "api.tasks.cleanup_tasks"],
 )
 
 celery_app.conf.update(
@@ -27,6 +27,7 @@ celery_app.conf.update(
         "api.tasks.security_tasks.*": {"queue": "notification"},
         "api.tasks.anomaly_tasks.*": {"queue": "notification"},
         "api.tasks.credential_tasks.*": {"queue": "notification"},
+        "api.tasks.cleanup_tasks.*": {"queue": "rotation"},
     },
     beat_schedule={
         "check-scheduled-jobs": {
@@ -52,6 +53,10 @@ celery_app.conf.update(
         "weekly-security-scan": {
             "task": "api.tasks.security_tasks.run_security_scan",
             "schedule": 604800.0,  # weekly — pip-audit + cred-expiry + MCP-orphans
+        },
+        "scan-orphan-temp-files": {
+            "task": "api.tasks.cleanup_tasks.scan_orphan_temp_files",
+            "schedule": 21600.0,  # every 6h — sweeps abandoned tar.gz/dump.gz from work_dir
         },
     },
 )
