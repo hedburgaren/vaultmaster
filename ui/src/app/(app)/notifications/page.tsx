@@ -36,6 +36,12 @@ export default function NotificationsPage() {
   const [telegramChatId, setTelegramChatId] = useState('');
   const [emailRecipients, setEmailRecipients] = useState('');
   const [emailSubjectPrefix, setEmailSubjectPrefix] = useState('[VaultMaster]');
+  const [emailSmtpHost, setEmailSmtpHost] = useState('');
+  const [emailSmtpPort, setEmailSmtpPort] = useState(587);
+  const [emailSmtpUser, setEmailSmtpUser] = useState('');
+  const [emailSmtpPassword, setEmailSmtpPassword] = useState('');
+  const [emailFromName, setEmailFromName] = useState('VaultMaster');
+  const [emailUseSsl, setEmailUseSsl] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState('');
   const [webhookSecret, setWebhookSecret] = useState('');
 
@@ -47,7 +53,23 @@ export default function NotificationsPage() {
       case 'slack': return { webhook_url: slackWebhookUrl, channel: slackChannel || undefined };
       case 'ntfy': return { topic: ntfyTopic, server: ntfyServer };
       case 'telegram': return { bot_token: telegramBotToken, chat_id: telegramChatId };
-      case 'email': return { recipients: emailRecipients.split(',').map(e => e.trim()).filter(Boolean), subject_prefix: emailSubjectPrefix };
+      case 'email': {
+        const recipients = emailRecipients.split(',').map(e => e.trim()).filter(Boolean);
+        const cfg: Record<string, any> = {
+          subject_prefix: emailSubjectPrefix,
+          recipients,
+          to_email: recipients[0] || undefined,
+          smtp_host: emailSmtpHost || undefined,
+          smtp_port: Number(emailSmtpPort) || 587,
+          smtp_user: emailSmtpUser || undefined,
+          from_email: emailSmtpUser || undefined,
+          from_name: emailFromName || 'VaultMaster',
+          use_ssl: !!emailUseSsl,
+          use_starttls: !emailUseSsl,
+        };
+        if (emailSmtpPassword) cfg.smtp_password = emailSmtpPassword;
+        return cfg;
+      }
       case 'webhook': return { url: webhookUrl, secret: webhookSecret || undefined };
       default: return {};
     }
@@ -57,6 +79,7 @@ export default function NotificationsPage() {
     setName(''); setChannelType('slack'); setTriggers(['run.success', 'run.failed']); setEditId(null);
     setSlackWebhookUrl(''); setSlackChannel(''); setNtfyTopic(''); setNtfyServer('https://ntfy.sh');
     setTelegramBotToken(''); setTelegramChatId(''); setEmailRecipients(''); setEmailSubjectPrefix('[VaultMaster]');
+    setEmailSmtpHost(''); setEmailSmtpPort(587); setEmailSmtpUser(''); setEmailSmtpPassword(''); setEmailFromName('VaultMaster'); setEmailUseSsl(false);
     setWebhookUrl(''); setWebhookSecret('');
   };
 
@@ -67,7 +90,16 @@ export default function NotificationsPage() {
     if (c.channel_type === 'slack') { setSlackWebhookUrl(cfg.webhook_url || ''); setSlackChannel(cfg.channel || ''); }
     if (c.channel_type === 'ntfy') { setNtfyTopic(cfg.topic || ''); setNtfyServer(cfg.server || 'https://ntfy.sh'); }
     if (c.channel_type === 'telegram') { setTelegramBotToken(''); setTelegramChatId(cfg.chat_id || ''); }
-    if (c.channel_type === 'email') { setEmailRecipients((cfg.recipients || []).join(', ')); setEmailSubjectPrefix(cfg.subject_prefix || '[VaultMaster]'); }
+    if (c.channel_type === 'email') {
+      setEmailRecipients((cfg.recipients || (cfg.to_email ? [cfg.to_email] : [])).join(', '));
+      setEmailSubjectPrefix(cfg.subject_prefix || '[VaultMaster]');
+      setEmailSmtpHost(cfg.smtp_host || '');
+      setEmailSmtpPort(cfg.smtp_port || 587);
+      setEmailSmtpUser(cfg.smtp_user || '');
+      setEmailSmtpPassword(''); // never re-display; backend keeps prior
+      setEmailFromName(cfg.from_name || 'VaultMaster');
+      setEmailUseSsl(!!cfg.use_ssl || cfg.smtp_port === 465);
+    }
     if (c.channel_type === 'webhook') { setWebhookUrl(cfg.url || ''); setWebhookSecret(''); }
     setShowForm(true);
   };
@@ -185,6 +217,32 @@ export default function NotificationsPage() {
                 <div className="col-span-2">
                   <FormLabel label={t('notif.email_recipients')} tooltip={t('notif.email_recipients_tip')} />
                   <input value={emailRecipients} onChange={e => setEmailRecipients(e.target.value)} className={INPUT} placeholder="admin@example.com, ops@example.com" />
+                </div>
+                <div>
+                  <FormLabel label="SMTP host" />
+                  <input value={emailSmtpHost} onChange={e => setEmailSmtpHost(e.target.value)} className={INPUT} placeholder="smtp-host.example.com" />
+                </div>
+                <div>
+                  <FormLabel label="SMTP port" />
+                  <input type="number" value={emailSmtpPort} onChange={e => setEmailSmtpPort(Number(e.target.value))} className={INPUT} placeholder="465 (SSL) eller 587 (STARTTLS)" />
+                </div>
+                <div>
+                  <FormLabel label="SMTP user" />
+                  <input value={emailSmtpUser} onChange={e => setEmailSmtpUser(e.target.value)} className={INPUT} placeholder="info@example.com" />
+                </div>
+                <div>
+                  <FormLabel label="SMTP password" />
+                  {secretInput(emailSmtpPassword, setEmailSmtpPassword, editId ? "(unchanged if blank)" : "••••")}
+                </div>
+                <div>
+                  <FormLabel label="From name" />
+                  <input value={emailFromName} onChange={e => setEmailFromName(e.target.value)} className={INPUT} placeholder="VaultMaster" />
+                </div>
+                <div className="flex items-end gap-2">
+                  <label className="flex items-center gap-2 cursor-pointer text-vm-text-bright font-mono text-xs">
+                    <input type="checkbox" checked={emailUseSsl} onChange={e => setEmailUseSsl(e.target.checked)} />
+                    Use implicit SSL (port 465)
+                  </label>
                 </div>
                 <div className="col-span-2">
                   <FormLabel label={t('notif.email_prefix')} tooltip={t('notif.email_prefix_tip')} />
