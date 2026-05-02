@@ -22,6 +22,7 @@ class BackupRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     triggered_by: Mapped[str] = mapped_column(String(50), default="scheduler")  # scheduler, manual, retry
     retry_count: Mapped[int] = mapped_column(default=0)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

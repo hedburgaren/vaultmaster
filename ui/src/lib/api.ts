@@ -84,6 +84,8 @@ export const getJobSchedule = (id: string, count?: number) => apiFetch(`/v1/jobs
 export const getRuns = (params?: string) => apiFetch(`/v1/runs${params ? '?' + params : ''}`);
 export const getRun = (id: string) => apiFetch(`/v1/runs/${id}`);
 export const cancelRun = (id: string) => apiFetch(`/v1/runs/${id}/cancel`, { method: 'POST' });
+export const acknowledgeRun = (id: string) => apiFetch(`/v1/runs/${id}/acknowledge`, { method: 'POST' });
+export const acknowledgeAllRuns = () => apiFetch('/v1/runs/acknowledge-all', { method: 'POST' });
 
 // Artifacts
 export const getArtifacts = (params?: string) => apiFetch(`/v1/artifacts${params ? '?' + params : ''}`);

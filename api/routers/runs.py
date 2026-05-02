@@ -85,3 +85,34 @@ async def cancel_run(run_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     run.status = "cancelled"
     await db.flush()
     return {"status": "cancelled", "run_id": str(run_id)}
+
+
+@router.post("/{run_id}/acknowledge")
+async def acknowledge_run(run_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Mark a failed run as 'seen' so it disappears from the topbar
+    notification panel. Doesn't change status — just hides it from the
+    fresh-error feed."""
+    from datetime import datetime, timezone
+    result = await db.execute(select(BackupRun).where(BackupRun.id == run_id))
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    run.acknowledged_at = datetime.now(timezone.utc)
+    await db.flush()
+    return {"acknowledged": True, "run_id": str(run_id)}
+
+
+@router.post("/acknowledge-all")
+async def acknowledge_all(db: AsyncSession = Depends(get_db)):
+    """Bulk-ack: clear all unacknowledged failed runs from the topbar
+    panel in one click."""
+    from datetime import datetime, timezone
+    from sqlalchemy import update
+    result = await db.execute(
+        update(BackupRun)
+        .where(BackupRun.status == "failed", BackupRun.acknowledged_at.is_(None))
+        .values(acknowledged_at=datetime.now(timezone.utc))
+        .returning(BackupRun.id)
+    )
+    ids = [str(r) for r in result.scalars().all()]
+    return {"acknowledged": len(ids), "run_ids": ids}

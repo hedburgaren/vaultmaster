@@ -20,8 +20,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Bump pip itself for the build (covers GHSA-4xh5-x5gv-qwph + GHSA-6vgw-5pg2-w6jp).
+# Then install pinned runtime deps. --no-cache-dir keeps image lean.
+RUN pip install --no-cache-dir --upgrade "pip>=26.0"
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip-audit --strict --progress-spinner=off || echo "pip-audit found vulns at build-time (non-blocking)"
 
 COPY api/ ./api/
 COPY migrations/ ./migrations/
