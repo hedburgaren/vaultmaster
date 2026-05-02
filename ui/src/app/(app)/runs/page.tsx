@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useEffect, useState, useMemo } from 'react';
+import { Fragment, Suspense, useEffect, useState, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { getRuns, cancelRun, getJobs } from '@/lib/api';
 import { formatBytes, formatDate, formatRelative } from '@/lib/utils';
@@ -8,7 +8,17 @@ import Badge from '@/components/Badge';
 import { XCircle, Archive, ChevronDown, ChevronUp, AlertTriangle, Terminal } from 'lucide-react';
 import { useT } from '@/lib/i18n';
 
+// useSearchParams() must be inside a Suspense boundary for Next.js 14
+// static prerender, otherwise the page bails out of CSR.
 export default function RunsPage() {
+  return (
+    <Suspense fallback={<div className="font-mono text-xs text-vm-text-dim">Loading…</div>}>
+      <RunsPageInner />
+    </Suspense>
+  );
+}
+
+function RunsPageInner() {
   const t = useT();
   const searchParams = useSearchParams();
   const expandFromUrl = searchParams.get('expand');
