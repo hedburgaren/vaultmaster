@@ -9,6 +9,7 @@ from api.models.user import User
 from api.models.audit_log import AuditLog
 from api.models.webhook import Webhook
 from api.models.system_settings import SystemSetting
+from api.models.backup_validation_run import BackupValidationRun
 
 __all__ = [
     "Server",
@@ -22,4 +23,5 @@ __all__ = [
     "AuditLog",
     "Webhook",
     "SystemSetting",
+    "BackupValidationRun",
 ]

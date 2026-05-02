@@ -215,6 +215,9 @@ async def notify_event(db, event: str, data: dict):
         "server.offline": "Server Offline",
         "artifact.expiring": "Artifact Expiring",
         "rotation.completed": "Rotation Completed",
+        "validation.passed": "Backup Validation Passed",
+        "validation.failed": "Backup Validation Failed",
+        "validation.skipped": "Backup Validation Skipped",
     }
 
     subject = subject_map.get(event, event)
@@ -237,5 +240,18 @@ def _format_event_message(event: str, data: dict) -> str:
         return f"⚠️ Storage warning\nDestination: {data.get('name', 'N/A')}\nUsage: {data.get('percent_used', 0)}%"
     elif event == "storage.critical":
         return f"🔴 Storage critical\nDestination: {data.get('name', 'N/A')}\nUsage: {data.get('percent_used', 0)}%"
+    elif event == "validation.passed":
+        dur = data.get("duration")
+        return (f"✅ Restore-validation passed\nJob: {data.get('job_name', 'N/A')}\n"
+                f"Server: {data.get('server_name', 'N/A')}"
+                + (f"\nDuration: {dur}s" if dur else ""))
+    elif event == "validation.failed":
+        return (f"❌ Restore-validation FAILED — backup is not restorable!\n"
+                f"Job: {data.get('job_name', 'N/A')}\n"
+                f"Server: {data.get('server_name', 'N/A')}\n"
+                f"Error: {data.get('error', 'Unknown')}")
+    elif event == "validation.skipped":
+        return (f"ℹ️ Restore-validation skipped\nJob: {data.get('job_name', 'N/A')}\n"
+                f"Reason: {data.get('error', 'no artifact')}")
     else:
         return str(data)

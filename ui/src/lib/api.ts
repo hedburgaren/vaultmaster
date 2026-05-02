@@ -163,3 +163,9 @@ export const updateSystemSettings = (data: any) => apiFetch('/v1/settings/system
 
 // Health
 export const getHealth = () => fetch(`${API_BASE}/health`).then(r => r.json());
+
+// Validations
+export const getValidations = (params?: string) => apiFetch(`/v1/validations${params ? '?' + params : ''}`);
+export const getLatestValidationsByJob = () => apiFetch('/v1/validations/latest-by-job');
+export const triggerValidation = (jobId: string, data?: any) =>
+  apiFetch(`/v1/validations/jobs/${jobId}/trigger`, { method: 'POST', body: JSON.stringify(data || { check_type: 'restore' }) });
