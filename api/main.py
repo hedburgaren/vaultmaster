@@ -94,7 +94,8 @@ app.add_middleware(
 )
 
 # Register routers
-from api.routers import auth, servers, jobs, runs, artifacts, storage, retention, notifications, dashboard, audit, webhooks, users, metrics, system_settings, validations, credentials
+from api.routers import auth, servers, jobs, runs, artifacts, storage, retention, notifications, dashboard, audit, webhooks, users, metrics, system_settings, validations, credentials, mcp_clients
+from api.mcp import server as mcp_server
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(servers.router, prefix="/api/v1")
@@ -111,6 +112,8 @@ app.include_router(users.router, prefix="/api/v1")
 app.include_router(system_settings.router, prefix="/api/v1")
 app.include_router(validations.router, prefix="/api/v1")
 app.include_router(credentials.router, prefix="/api/v1")
+app.include_router(mcp_clients.router, prefix="/api/v1")
+app.include_router(mcp_server.router, prefix="/api")
 app.include_router(metrics.router, prefix="/api")
 
 
