@@ -73,7 +73,7 @@ services:
       dockerfile: Dockerfile
     container_name: vaultmaster-worker
     restart: unless-stopped
-    command: celery -A api.tasks.celery_app worker -l info -c 1 -Q backup,rotation,notification
+    command: celery -A api.tasks.celery_app worker -l info -c 1 -Q backup,rotation,notification,validation
     env_file:
       - .env
     volumes:

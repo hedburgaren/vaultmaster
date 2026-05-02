@@ -21,6 +21,8 @@ async def send_notification(channel, subject: str, message: str) -> tuple[bool, 
             return await _send_ntfy(channel.config, subject, message)
         elif channel.channel_type == "telegram":
             return await _send_telegram(channel.config, subject, message)
+        elif channel.channel_type == "discord":
+            return await _send_discord(channel.config, subject, message)
         elif channel.channel_type == "webhook":
             return await _send_webhook(channel.config, subject, message)
         elif channel.channel_type == "email":
@@ -90,6 +92,83 @@ async def _send_telegram(config: dict, subject: str, message: str) -> tuple[bool
         return False, f"Telegram returned {resp.status_code}"
 
 
+async def _send_discord(config: dict, subject: str, message: str) -> tuple[bool, str]:
+    """Send a Discord notification.
+
+    Two transport modes:
+      1. Bridge mode (preferred for hedburgaren) — POST to arc-discord-bridge.
+         config = {
+             "bridge_url": "http://arc-discord-bridge:8600",
+             "bridge_token": "...",
+             "channel": "plastshop"
+         }
+      2. Webhook mode — POST directly to a Discord channel webhook URL.
+         config = {"webhook_url": "https://discord.com/api/webhooks/..."}
+
+    Optional:
+      "embeds_enabled": bool (default True) — render as Discord embed instead of plain content.
+      "username": str — webhook-mode only; overrides bot username for the message.
+    """
+    bridge_url = config.get("bridge_url")
+    bridge_token = config.get("bridge_token")
+    channel = config.get("channel")
+    webhook_url = config.get("webhook_url")
+    embeds_enabled = config.get("embeds_enabled", True)
+    color = _discord_color_for_subject(subject)
+
+    if bridge_url and bridge_token and channel:
+        url = bridge_url.rstrip("/") + "/send"
+        body: dict = {"channel": channel}
+        if embeds_enabled:
+            body["embeds"] = [{
+                "title": subject[:256],
+                "description": message[:4000],
+                "color": color,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }]
+            body["content"] = ""
+        else:
+            body["content"] = f"**{subject}**\n{message}"[:1900]
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json=body, headers={"x-bridge-token": bridge_token})
+            if 200 <= resp.status_code < 300:
+                return True, f"Discord (bridge) sent (status {resp.status_code})"
+            return False, f"Discord bridge returned {resp.status_code}: {resp.text[:200]}"
+
+    if webhook_url:
+        body: dict = {}
+        username = config.get("username")
+        if username:
+            body["username"] = username
+        if embeds_enabled:
+            body["embeds"] = [{
+                "title": subject[:256],
+                "description": message[:4000],
+                "color": color,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }]
+        else:
+            body["content"] = f"**{subject}**\n{message}"[:1900]
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(webhook_url, json=body)
+            if 200 <= resp.status_code < 300:
+                return True, f"Discord (webhook) sent (status {resp.status_code})"
+            return False, f"Discord webhook returned {resp.status_code}: {resp.text[:200]}"
+
+    return False, "Discord channel needs bridge_url+bridge_token+channel OR webhook_url"
+
+
+def _discord_color_for_subject(subject: str) -> int:
+    s = subject.lower()
+    if "fail" in s or "critical" in s or "offline" in s:
+        return 0xE74C3C
+    if "partial" in s or "warning" in s or "expiring" in s:
+        return 0xF39C12
+    if "success" in s or "completed" in s or "rotation" in s:
+        return 0x2ECC71
+    return 0x3498DB
+
+
 async def _send_webhook(config: dict, subject: str, message: str) -> tuple[bool, str]:
     url = config.get("url")
     if not url:
@@ -152,6 +231,11 @@ async def notify_event(db, event: str, data: dict):
         "server.offline": "Server Offline",
         "artifact.expiring": "Artifact Expiring",
         "rotation.completed": "Rotation Completed",
+        "validation.passed": "Backup Validation Passed",
+        "validation.failed": "Backup Validation Failed",
+        "validation.skipped": "Backup Validation Skipped",
+        "credential.expiring": "Credential Expiring",
+        "credential.expired": "Credential Expired",
     }
 
     subject = subject_map.get(event, event)
@@ -174,5 +258,29 @@ def _format_event_message(event: str, data: dict) -> str:
         return f"⚠️ Storage warning\nDestination: {data.get('name', 'N/A')}\nUsage: {data.get('percent_used', 0)}%"
     elif event == "storage.critical":
         return f"🔴 Storage critical\nDestination: {data.get('name', 'N/A')}\nUsage: {data.get('percent_used', 0)}%"
+    elif event == "validation.passed":
+        dur = data.get("duration")
+        return (f"✅ Restore-validation passed\nJob: {data.get('job_name', 'N/A')}\n"
+                f"Server: {data.get('server_name', 'N/A')}"
+                + (f"\nDuration: {dur}s" if dur else ""))
+    elif event == "validation.failed":
+        return (f"❌ Restore-validation FAILED — backup is not restorable!\n"
+                f"Job: {data.get('job_name', 'N/A')}\n"
+                f"Server: {data.get('server_name', 'N/A')}\n"
+                f"Error: {data.get('error', 'Unknown')}")
+    elif event == "validation.skipped":
+        return (f"ℹ️ Restore-validation skipped\nJob: {data.get('job_name', 'N/A')}\n"
+                f"Reason: {data.get('error', 'no artifact')}")
+    elif event == "credential.expiring":
+        return (f"⏳ Credential expiring soon\n"
+                f"Name: {data.get('name', 'N/A')}\n"
+                f"Type: {data.get('credential_type', 'N/A')}\n"
+                f"Expires: {data.get('expires_at', 'N/A')}\n"
+                f"Days left: {data.get('days_left', '?')}")
+    elif event == "credential.expired":
+        return (f"⛔ Credential EXPIRED\n"
+                f"Name: {data.get('name', 'N/A')}\n"
+                f"Type: {data.get('credential_type', 'N/A')}\n"
+                f"Expired: {data.get('expires_at', 'N/A')}")
     else:
         return str(data)

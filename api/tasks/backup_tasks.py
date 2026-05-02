@@ -63,6 +63,7 @@ async def _run_backup(task, job_id: str):
         execute_files_backup,
         execute_custom_backup,
     )
+    from api.services.restic_executor import execute_restic_backup
 
     async with get_task_session() as db:
         # Load job and server
@@ -97,6 +98,7 @@ async def _run_backup(task, job_id: str):
                 "docker_volumes": execute_docker_volumes_backup,
                 "files": execute_files_backup,
                 "custom": execute_custom_backup,
+                "restic": execute_restic_backup,
             }
 
             executor = executors.get(job.backup_type)
@@ -110,6 +112,25 @@ async def _run_backup(task, job_id: str):
                 run.size_bytes = result_data.get("size_bytes", 0)
                 run.log_lines = result_data.get("logs", [])
                 run.finished_at = datetime.now(timezone.utc)
+
+                # Restic and similar push-based executors handle their own
+                # storage transfer + retention; skip the rclone path entirely.
+                if result_data.get("skip_transfer"):
+                    meta = result_data.get("metadata") or {}
+                    if meta:
+                        logger.info(f"[{run.id}] push-based backup metadata: {meta}")
+                    await db.commit()
+
+                    from api.services.notifier import notify_event
+                    await notify_event(db, "run.success", {
+                        "job_name": job.name,
+                        "server_name": server.name,
+                        "size_bytes": run.size_bytes,
+                        "duration": str(run.finished_at - run.started_at) if run.finished_at and run.started_at else None,
+                        "snapshot_id": meta.get("snapshot_id"),
+                        "repo_url": meta.get("repo_url"),
+                    })
+                    return
 
                 # --- Transfer file to storage destinations ---
                 from api.models.storage_destination import StorageDestination
@@ -241,15 +262,32 @@ async def _run_backup(task, job_id: str):
                         await apply_rotation(db, policy, str(job.id), storage_id=dest_str)
 
             else:
+                error_msg = (result_data.get("error") or "Unknown error").strip()
+                logs_list = result_data.get("logs", []) or []
+                last_error_log = next(
+                    (l for l in reversed(logs_list) if isinstance(l, dict) and l.get("level") == "error"),
+                    None,
+                )
+                if last_error_log and last_error_log.get("msg"):
+                    last_msg = str(last_error_log["msg"]).strip()
+                    if last_msg and last_msg not in error_msg:
+                        error_msg = f"{error_msg} | last log: {last_msg[:300]}"
+
                 run.status = "failed"
-                run.error_message = result_data.get("error", "Unknown error")
-                run.log_lines = result_data.get("logs", [])
+                run.error_message = error_msg
+                run.log_lines = logs_list
                 run.finished_at = datetime.now(timezone.utc)
 
-                # Retry if configured
+                # Retry if configured. Pass the concrete error as exc so
+                # Celery's task message reflects what actually broke
+                # instead of just "Retry in 60s".
                 if run.retry_count < job.max_retries:
                     run.retry_count += 1
-                    task.retry(countdown=60 * run.retry_count)
+                    await db.commit()
+                    countdown = 60 * run.retry_count
+                    retry_label = f"[retry {run.retry_count}/{job.max_retries} in {countdown}s] {error_msg[:200]}"
+                    logger.warning(f"[{run.id}] {retry_label}")
+                    raise task.retry(exc=Exception(retry_label), countdown=countdown)
 
             await db.commit()
 
@@ -265,11 +303,15 @@ async def _run_backup(task, job_id: str):
             })
 
         except Exception as e:
+            # Don't squash a Retry — let Celery handle it.
+            from celery.exceptions import Retry
+            if isinstance(e, Retry):
+                raise
             run.status = "failed"
-            run.error_message = str(e)
+            run.error_message = f"{type(e).__name__}: {str(e)}"[:1000]
             run.finished_at = datetime.now(timezone.utc)
             await db.commit()
-            logger.error(f"Backup task failed for job {job_id}: {e}")
+            logger.error(f"Backup task failed for job {job_id}: {type(e).__name__}: {e}")
             raise
 
 
