@@ -2,8 +2,6 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from api.auth import (
     verify_password, create_access_token, hash_password,
@@ -11,13 +9,13 @@ from api.auth import (
 )
 from api.database import get_db
 from api.models.user import User
+from api.rate_limiter import limiter
 from api.schemas import (
     LoginRequest, Token, UserOut, SetupRequest, SetupStatus,
     ProfileUpdate, ChangePasswordRequest, ApiKeyOut,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-limiter = Limiter(key_func=get_remote_address)
 
 
 @router.get("/setup-status", response_model=SetupStatus)
