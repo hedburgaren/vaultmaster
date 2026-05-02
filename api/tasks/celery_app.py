@@ -8,7 +8,7 @@ celery_app = Celery(
     "vaultmaster",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["api.tasks.backup_tasks", "api.tasks.rotation_tasks", "api.tasks.validation_tasks", "api.tasks.credential_tasks", "api.tasks.anomaly_tasks"],
+    include=["api.tasks.backup_tasks", "api.tasks.rotation_tasks", "api.tasks.validation_tasks", "api.tasks.credential_tasks", "api.tasks.anomaly_tasks", "api.tasks.security_tasks"],
 )
 
 celery_app.conf.update(
@@ -24,6 +24,9 @@ celery_app.conf.update(
         "api.tasks.backup_tasks.*": {"queue": "backup"},
         "api.tasks.rotation_tasks.*": {"queue": "rotation"},
         "api.tasks.validation_tasks.*": {"queue": "validation"},
+        "api.tasks.security_tasks.*": {"queue": "notification"},
+        "api.tasks.anomaly_tasks.*": {"queue": "notification"},
+        "api.tasks.credential_tasks.*": {"queue": "notification"},
     },
     beat_schedule={
         "check-scheduled-jobs": {
@@ -45,6 +48,10 @@ celery_app.conf.update(
         "scan-backup-anomalies": {
             "task": "api.tasks.anomaly_tasks.scan_backup_anomalies",
             "schedule": 3600.0,  # hourly — flags size/duration outliers
+        },
+        "weekly-security-scan": {
+            "task": "api.tasks.security_tasks.run_security_scan",
+            "schedule": 604800.0,  # weekly — pip-audit + cred-expiry + MCP-orphans
         },
     },
 )

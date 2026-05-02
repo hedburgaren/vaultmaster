@@ -186,3 +186,85 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         hours_since_last_backup=hours_since,
         storage_warnings=storage_warnings,
     )
+
+
+@router.get("/stats")
+async def get_stats(days: int = 30, db: AsyncSession = Depends(get_db)):
+    """Aggregate stats for analytics view (trends, fail-rate, top jobs)."""
+    days = max(1, min(days, 365))
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Daily success/fail counts + total bytes
+    daily_q = await db.execute(
+        select(
+            func.date_trunc('day', BackupRun.created_at).label('day'),
+            func.count().filter(BackupRun.status == 'success').label('ok'),
+            func.count().filter(BackupRun.status == 'failed').label('fail'),
+            func.coalesce(func.sum(BackupRun.size_bytes).filter(BackupRun.status == 'success'), 0).label('bytes'),
+        )
+        .where(BackupRun.created_at >= since)
+        .group_by('day')
+        .order_by('day')
+    )
+    daily = [
+        {
+            "day": d.isoformat() if d else None,
+            "ok": int(ok),
+            "fail": int(fail),
+            "bytes": int(bytes),
+        }
+        for d, ok, fail, bytes in daily_q.all()
+    ]
+
+    # Per-job fail-rate (top 10 worst)
+    perjob_q = await db.execute(
+        select(
+            BackupJob.id,
+            BackupJob.name,
+            func.count().filter(BackupRun.status == 'success').label('ok'),
+            func.count().filter(BackupRun.status == 'failed').label('fail'),
+            func.coalesce(func.avg(BackupRun.size_bytes).filter(BackupRun.status == 'success'), 0).label('avg_bytes'),
+        )
+        .join(BackupRun, BackupRun.job_id == BackupJob.id)
+        .where(BackupRun.created_at >= since)
+        .group_by(BackupJob.id, BackupJob.name)
+    )
+    perjob = []
+    for jid, name, ok, fail, avg in perjob_q.all():
+        total = int(ok) + int(fail)
+        if total == 0:
+            continue
+        perjob.append({
+            "job_id": str(jid),
+            "name": name,
+            "ok": int(ok),
+            "fail": int(fail),
+            "fail_rate": round(int(fail) / total, 3),
+            "avg_size_bytes": int(avg or 0),
+        })
+    perjob.sort(key=lambda x: -x["fail_rate"])
+    top_failing = [j for j in perjob if j["fail_rate"] > 0][:10]
+
+    # Per backup_type totals
+    bytype_q = await db.execute(
+        select(
+            BackupArtifact.backup_type,
+            func.count().label('count'),
+            func.coalesce(func.sum(BackupArtifact.size_bytes), 0).label('bytes'),
+        )
+        .where(BackupArtifact.created_at >= since, BackupArtifact.is_deleted == False)
+        .group_by(BackupArtifact.backup_type)
+    )
+    by_type = [
+        {"backup_type": t or "unknown", "count": int(c), "bytes": int(b)}
+        for t, c, b in bytype_q.all()
+    ]
+
+    return {
+        "since": since.isoformat(),
+        "days": days,
+        "daily": daily,
+        "per_job": perjob,
+        "top_failing_jobs": top_failing,
+        "by_backup_type": by_type,
+    }

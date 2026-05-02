@@ -260,6 +260,7 @@ async def notify_event(db, event: str, data: dict):
         "credential.expiring": "Credential Expiring",
         "credential.expired": "Credential Expired",
         "backup.anomaly": "Backup Anomaly Detected",
+        "security.report": "Weekly Security Scan",
     }
 
     subject = subject_map.get(event, event)
@@ -314,5 +315,25 @@ def _format_event_message(event: str, data: dict) -> str:
                 f"Mean over last {data.get('window', 7)} runs: {data.get('mean_size', 0):,.0f} bytes\n"
                 f"Δ: {data.get('delta_pct', 0):+.1f}%  ({data.get('z_score', 0):+.2f}σ)\n"
                 f"Possible cause: {data.get('hypothesis', 'investigate manually')}")
+    elif event == "security.report":
+        vulns = data.get("python_vulns", []) or []
+        ce = data.get("credential_expiry", {}) or {}
+        orphans = data.get("mcp_orphans", []) or []
+        mcp_exp = data.get("mcp_expired", []) or []
+        lines = ["🛡️ Weekly security scan"]
+        if vulns:
+            lines.append(f"⚠️  Python CVEs: {len(vulns)}")
+            for v in vulns[:5]:
+                fix = ",".join(v.get("fix_versions") or []) or "no fix"
+                lines.append(f"   · {v.get('package')} {v.get('version')} → {v.get('id')}  fix:{fix}")
+            if len(vulns) > 5:
+                lines.append(f"   …and {len(vulns) - 5} more")
+        else:
+            lines.append("✅ Python CVEs: none detected")
+        lines.append(f"Credentials: {ce.get('expired', 0)} expired, "
+                     f"{ce.get('expiring_30d', 0)} expiring <30d, "
+                     f"{ce.get('unbounded', 0)}/{ce.get('total', 0)} unbounded")
+        lines.append(f"MCP clients: {len(orphans)} orphaned (>90d unused), {len(mcp_exp)} expired")
+        return "\n".join(lines)
     else:
         return str(data)
