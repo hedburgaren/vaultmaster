@@ -282,6 +282,67 @@ class BackupValidationTrigger(BaseModel):
     artifact_id: uuid.UUID | None = None  # default: latest artifact for the job
 
 
+# ── Credentials ──
+class CredentialCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    credential_type: str = Field(default="api_key", max_length=50)
+    plaintext_value: str  # encrypted server-side; never returned
+    description: str | None = None
+    tags: list[str] = []
+    expires_at: datetime | None = None
+    rotation_policy: str | None = None
+    provenance: str | None = None
+    mcp_enabled: bool = False
+    mcp_scopes: list[str] = []
+
+
+class CredentialUpdate(BaseModel):
+    name: str | None = None
+    credential_type: str | None = None
+    plaintext_value: str | None = None  # re-encrypts if provided
+    description: str | None = None
+    tags: list[str] | None = None
+    expires_at: datetime | None = None
+    rotation_policy: str | None = None
+    provenance: str | None = None
+    mcp_enabled: bool | None = None
+    mcp_scopes: list[str] | None = None
+
+
+class CredentialOut(BaseModel):
+    id: uuid.UUID
+    owner_id: uuid.UUID
+    name: str
+    credential_type: str
+    description: str | None
+    tags: list[str] | None
+    key_version: int
+    expires_at: datetime | None
+    rotation_policy: str | None
+    provenance: str | None
+    mcp_enabled: bool
+    mcp_scopes: list[str] | None
+    last_revealed_at: datetime | None
+    reveal_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CredentialRevealRequest(BaseModel):
+    password: str
+    purpose: str = Field(min_length=1, max_length=255)
+
+
+class CredentialRevealOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    credential_type: str
+    plaintext_value: str
+    expires_in_seconds: int = 60
+
+
 # ── Auth ──
 class Token(BaseModel):
     access_token: str
