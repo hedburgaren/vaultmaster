@@ -81,7 +81,8 @@ async def list_remote_directory(server, path: str = "/") -> list[dict]:
 
         kwargs = _build_connect_kwargs(server)
         async with asyncssh.connect(**kwargs) as conn:
-            result = await conn.run(f"ls -la --time-style=long-iso {path}", check=True)
+            import shlex as _shlex
+            result = await conn.run(f"ls -la --time-style=long-iso {_shlex.quote(path)}", check=True)
             entries = []
             for line in result.stdout.strip().split("\n")[1:]:
                 parts = line.split(None, 7)
@@ -139,6 +140,7 @@ async def list_remote_databases(server, db_type: str = "postgresql") -> list[dic
     For PostgreSQL on localhost, uses 'sudo -u $db_user psql' for peer auth
     which is the standard approach for native PostgreSQL installs.
     """
+    import shlex as _shlex
     meta = getattr(server, 'meta', None) or {}
     db_host = meta.get('db_host', '127.0.0.1')
     db_port = meta.get('db_port', 5432 if db_type == 'postgresql' else 3306)
@@ -146,32 +148,61 @@ async def list_remote_databases(server, db_type: str = "postgresql") -> list[dic
     db_password = meta.get('db_password', '')
 
     try:
+        # Validate db_user / db_host shape — these become arguments to a
+        # remote shell, so anything that's not a normal identifier or
+        # hostname character is rejected up front.
+        import re as _re
+        if not _re.fullmatch(r"[A-Za-z0-9_.-]+", str(db_user)):
+            return [{"error": f"Invalid db_user: {db_user!r}"}]
+        if not _re.fullmatch(r"[A-Za-z0-9_.\-:]+", str(db_host)):
+            return [{"error": f"Invalid db_host: {db_host!r}"}]
+        try:
+            db_port_int = int(db_port)
+        except (TypeError, ValueError):
+            return [{"error": f"Invalid db_port: {db_port!r}"}]
+
+        db_user_q = _shlex.quote(str(db_user))
+        db_host_q = _shlex.quote(str(db_host))
+        db_port_s = str(db_port_int)
+
         kwargs = _build_connect_kwargs(server)
         async with asyncssh.connect(**kwargs) as conn:
             sql_query = "SELECT datname, pg_database_size(datname) FROM pg_database WHERE datistemplate = false ORDER BY datname;"
+            sql_query_q = _shlex.quote(sql_query)
+
+            # Pass DB password via stdin/env (asyncssh supports env={})
+            # rather than interpolating it into the command string.
+            cmd_env = {}
+            if db_password:
+                cmd_env["PGPASSWORD"] = str(db_password)
+                cmd_env["MYSQL_PWD"] = str(db_password)
 
             if db_type == 'postgresql':
                 is_local = db_host in ('127.0.0.1', 'localhost', '::1', '')
                 if is_local and not db_password:
-                    # Peer auth: switch to the OS user that owns the DB (e.g. postgres, odoo18)
-                    cmd = f"sudo -n -u {db_user} psql -d postgres -p {db_port} -t -A -c \"{sql_query}\""
+                    cmd = f"sudo -n -u {db_user_q} psql -d postgres -p {db_port_s} -t -A -c {sql_query_q}"
                 elif db_password:
-                    # Password auth via PGPASSWORD
-                    cmd = f"PGPASSWORD='{db_password}' psql -h {db_host} -p {db_port} -U {db_user} -d postgres -w -t -A -c \"{sql_query}\""
+                    cmd = f"psql -h {db_host_q} -p {db_port_s} -U {db_user_q} -d postgres -w -t -A -c {sql_query_q}"
                 else:
-                    # No password, remote host — try direct connection
-                    cmd = f"psql -h {db_host} -p {db_port} -U {db_user} -d postgres -t -A -c \"{sql_query}\""
+                    cmd = f"psql -h {db_host_q} -p {db_port_s} -U {db_user_q} -d postgres -t -A -c {sql_query_q}"
             elif db_type in ('mysql', 'mariadb'):
-                pw_flag = f"-p'{db_password}'" if db_password else ""
-                cmd = f"mysql -h {db_host} -P {db_port} -u {db_user} {pw_flag} -N -e \"SELECT schema_name, IFNULL(SUM(data_length + index_length), 0) FROM information_schema.schemata LEFT JOIN information_schema.tables ON schema_name = table_schema WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') GROUP BY schema_name ORDER BY schema_name;\""
+                mysql_query = ("SELECT schema_name, IFNULL(SUM(data_length + index_length), 0) "
+                               "FROM information_schema.schemata "
+                               "LEFT JOIN information_schema.tables ON schema_name = table_schema "
+                               "WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') "
+                               "GROUP BY schema_name ORDER BY schema_name;")
+                cmd = f"mysql -h {db_host_q} -P {db_port_s} -u {db_user_q} -N -e {_shlex.quote(mysql_query)}"
                 use_sudo = meta.get('use_sudo', False)
                 ssh_user = getattr(server, 'ssh_user', None) or "root"
                 if use_sudo and ssh_user != "root":
-                    cmd = f"sudo -n sh -c '{cmd}'"
+                    cmd = f"sudo -n -E sh -c {_shlex.quote(cmd)}"
             else:
                 return [{"error": f"Unsupported database type: {db_type}"}]
 
-            result = await conn.run(cmd, check=False, timeout=30)
+            run_kwargs = {"check": False, "timeout": 30}
+            if cmd_env:
+                run_kwargs["env"] = cmd_env
+            result = await conn.run(cmd, **run_kwargs)
             if result.exit_status != 0:
                 stderr = result.stderr.strip()
                 # Provide helpful error context
