@@ -189,6 +189,12 @@ async def _run_backup(task, job_id: str):
                         if not dest:
                             logger.warning(f"[{run.id}] Storage destination {dest_id} not found")
                             continue
+                        # Skip inactive destinations (e.g. expired OAuth)
+                        # otherwise rclone hangs on the auth refresh and
+                        # blocks the queue for the whole transfer timeout.
+                        if not dest.is_active:
+                            logger.info(f"[{run.id}] Skipping inactive destination {dest.name}")
+                            continue
 
                         # Build sub-path: server_name/job_name/filename
                         sub_path = f"{server.name}/{job.name}/{filename}"
