@@ -203,6 +203,26 @@ async def reveal_credential(
         )
         raise HTTPException(status_code=403, detail="Re-authentication failed")
 
+    if user.totp_enabled:
+        import pyotp
+        if not body.totp_code:
+            await log_action(
+                db, "credential.reveal.denied", user=user,
+                resource_type="credential", resource_id=str(credential_id),
+                detail=f"TOTP required: {body.purpose}",
+                ip_address=_client_ip(request),
+            )
+            raise HTTPException(status_code=403, detail="TOTP code required")
+        totp = pyotp.TOTP(user.totp_secret or "")
+        if not totp.verify(body.totp_code, valid_window=1):
+            await log_action(
+                db, "credential.reveal.denied", user=user,
+                resource_type="credential", resource_id=str(credential_id),
+                detail=f"Invalid TOTP: {body.purpose}",
+                ip_address=_client_ip(request),
+            )
+            raise HTTPException(status_code=403, detail="Invalid TOTP code")
+
     result = await db.execute(
         select(Credential).where(Credential.id == credential_id, Credential.owner_id == user.id)
     )

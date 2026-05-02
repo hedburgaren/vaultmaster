@@ -13,6 +13,7 @@ from api.rate_limiter import limiter
 from api.schemas import (
     LoginRequest, Token, UserOut, SetupRequest, SetupStatus,
     ProfileUpdate, ChangePasswordRequest, ApiKeyOut,
+    TotpSetupOut, TotpVerifyRequest, TotpDisableRequest,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -62,8 +63,96 @@ async def login(request: Request, body: LoginRequest, db: AsyncSession = Depends
     user = result.scalar_one_or_none()
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    if user.totp_enabled:
+        if not body.totp_code:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="TOTP code required",
+            )
+        import pyotp
+        totp = pyotp.TOTP(user.totp_secret or "")
+        if not totp.verify(body.totp_code, valid_window=1):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid TOTP code",
+            )
+
     token = create_access_token(data={"sub": user.username})
     return Token(access_token=token)
+
+
+@router.post("/totp/setup", response_model=TotpSetupOut)
+async def totp_setup(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a fresh TOTP secret + QR. Activation requires /totp/verify."""
+    if user.totp_enabled:
+        raise HTTPException(status_code=400, detail="TOTP already enabled — disable first")
+    import pyotp
+    secret = pyotp.random_base32()
+    user.totp_secret = secret
+    user.totp_enabled = False
+    await db.commit()
+
+    otpauth = pyotp.totp.TOTP(secret).provisioning_uri(
+        name=user.username,
+        issuer_name="VaultMaster",
+    )
+    qr_b64 = _qr_png_base64(otpauth)
+    return TotpSetupOut(secret=secret, otpauth_uri=otpauth, qr_png_base64=qr_b64)
+
+
+@router.post("/totp/verify")
+async def totp_verify(
+    body: TotpVerifyRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Confirm enrolment by submitting a code from the authenticator app."""
+    if not user.totp_secret:
+        raise HTTPException(status_code=400, detail="No TOTP secret on file — call /totp/setup first")
+    import pyotp
+    totp = pyotp.TOTP(user.totp_secret)
+    if not totp.verify(body.totp_code, valid_window=1):
+        raise HTTPException(status_code=400, detail="Invalid TOTP code")
+    user.totp_enabled = True
+    await db.commit()
+    return {"enabled": True}
+
+
+@router.post("/totp/disable")
+async def totp_disable(
+    body: TotpDisableRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Disable TOTP. Requires both current password and a valid current TOTP."""
+    if not verify_password(body.password, user.hashed_password):
+        raise HTTPException(status_code=403, detail="Password verification failed")
+    if not user.totp_enabled or not user.totp_secret:
+        raise HTTPException(status_code=400, detail="TOTP is not enabled")
+    import pyotp
+    totp = pyotp.TOTP(user.totp_secret)
+    if not totp.verify(body.totp_code, valid_window=1):
+        raise HTTPException(status_code=400, detail="Invalid TOTP code")
+    user.totp_enabled = False
+    user.totp_secret = None
+    await db.commit()
+    return {"enabled": False}
+
+
+def _qr_png_base64(uri: str) -> str:
+    """Render a TOTP otpauth URI as a base64-encoded PNG suitable for
+    embedding directly in an <img src=...>."""
+    import base64
+    import io
+    import qrcode
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 @router.get("/me", response_model=UserOut)

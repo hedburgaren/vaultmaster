@@ -43,6 +43,9 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 
+from api.middleware.audit import AuditLogMiddleware
+app.add_middleware(AuditLogMiddleware)
+
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
