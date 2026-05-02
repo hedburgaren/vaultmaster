@@ -67,17 +67,29 @@ async def _run(cmd: list[str], timeout: int = 600) -> tuple[int, str, str]:
 
 
 async def _download_artifact_to_temp(artifact, dest_path: str) -> tuple[bool, str]:
-    """Download an artifact from its storage_destination to a local file."""
+    """Download an artifact from its storage_destination to a local file.
+
+    Uses a per-call engine so this works correctly from Celery tasks
+    that own their own event loop. Sharing api.database.async_session
+    across loops triggers asyncpg "another operation is in progress".
+    """
     from sqlalchemy import select
-    from api.database import async_session
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+    from api.config import get_settings
     from api.models.storage_destination import StorageDestination
     from api.services.rclone_client import download_file_from_storage
 
-    async with async_session() as db:
-        result = await db.execute(select(StorageDestination).where(StorageDestination.id == artifact.storage_id))
-        dest = result.scalar_one_or_none()
-        if not dest:
-            return False, f"storage destination {artifact.storage_id} not found"
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url, echo=False, pool_size=2, max_overflow=2)
+    Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with Session() as db:
+            result = await db.execute(select(StorageDestination).where(StorageDestination.id == artifact.storage_id))
+            dest = result.scalar_one_or_none()
+            if not dest:
+                return False, f"storage destination {artifact.storage_id} not found"
+    finally:
+        await engine.dispose()
 
     return await download_file_from_storage(dest, artifact.remote_path, dest_path)
 
