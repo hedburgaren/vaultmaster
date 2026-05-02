@@ -168,6 +168,13 @@ def login(client: httpx.Client, base_url: str, username: str, password: str) -> 
     return resp.json()["access_token"]
 
 
+def auth_with_api_key(client: httpx.Client, api_key: str) -> None:
+    client.headers["X-API-Key"] = api_key
+    resp = client.get("/api/v1/auth/me")
+    if resp.status_code != 200:
+        raise SystemExit(f"api-key check failed: {resp.status_code} {resp.text}")
+
+
 def list_existing(client: httpx.Client) -> dict[str, dict]:
     resp = client.get("/api/v1/credentials")
     resp.raise_for_status()
@@ -202,13 +209,16 @@ def upsert_credential(client: httpx.Client, existing: dict[str, dict], name: str
 def main() -> int:
     p = argparse.ArgumentParser(description="Import credentials from a Notion page into VaultMaster")
     p.add_argument("--base-url", default="https://vm.example.com")
-    p.add_argument("--vm-username", required=True)
-    p.add_argument("--vm-password", required=True)
+    p.add_argument("--vm-username")
+    p.add_argument("--vm-password")
+    p.add_argument("--vm-api-key", help="Alternative to --vm-username/--vm-password: an X-API-Key value")
     p.add_argument("--notion-token", required=True)
     p.add_argument("--page-id", required=True, help="Notion page id (32 hex chars, with or without dashes)")
     p.add_argument("--apply", action="store_true", help="Actually write to VaultMaster (default: dry-run)")
     p.add_argument("--limit", type=int, default=0, help="Limit imports for testing")
     args = p.parse_args()
+    if not args.vm_api_key and not (args.vm_username and args.vm_password):
+        p.error("provide either --vm-api-key OR --vm-username + --vm-password")
 
     page_id = re.sub(r"-", "", args.page_id)
     print(f"[notion] fetching blocks for page {page_id}")
@@ -232,8 +242,11 @@ def main() -> int:
         return 0
 
     with httpx.Client(base_url=args.base_url, timeout=20.0) as client:
-        token = login(client, args.base_url, args.vm_username, args.vm_password)
-        client.headers["Authorization"] = f"Bearer {token}"
+        if args.vm_api_key:
+            auth_with_api_key(client, args.vm_api_key)
+        else:
+            token = login(client, args.base_url, args.vm_username, args.vm_password)
+            client.headers["Authorization"] = f"Bearer {token}"
 
         existing = list_existing(client)
         print(f"[vm]     {len(existing)} existing credentials in VM")

@@ -183,12 +183,29 @@ async def _send_webhook(config: dict, subject: str, message: str) -> tuple[bool,
 async def _send_email(config: dict, subject: str, message: str) -> tuple[bool, str]:
     import smtplib
     from email.mime.text import MIMEText
+    from email.utils import formataddr
+
+    # Decrypt secrets in-flight; .config is stored with `enc:vN:...`-prefixed values.
+    try:
+        from api.services.credentials_crypto import decrypt_dict_secrets
+        config = decrypt_dict_secrets(dict(config or {})) or {}
+    except Exception:
+        config = dict(config or {})
 
     smtp_host = config.get("smtp_host")
-    smtp_port = config.get("smtp_port", 587)
+    smtp_port = int(config.get("smtp_port", 587) or 587)
     smtp_user = config.get("smtp_user")
     smtp_password = config.get("smtp_password")
     to_email = config.get("to_email")
+    from_email = config.get("from_email") or smtp_user
+    from_name = config.get("from_name") or "VaultMaster"
+    # Transport: 'ssl' (implicit TLS, port 465), 'starttls' (port 587, default), or 'plain'
+    use_ssl = config.get("use_ssl")
+    if use_ssl is None:
+        use_ssl = smtp_port == 465
+    use_starttls = config.get("use_starttls")
+    if use_starttls is None:
+        use_starttls = not use_ssl
 
     if not all([smtp_host, smtp_user, smtp_password, to_email]):
         return False, "Missing email configuration"
@@ -196,11 +213,17 @@ async def _send_email(config: dict, subject: str, message: str) -> tuple[bool, s
     try:
         msg = MIMEText(message)
         msg["Subject"] = f"[VaultMaster] {subject}"
-        msg["From"] = smtp_user
+        msg["From"] = formataddr((from_name, from_email))
         msg["To"] = to_email
 
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.starttls()
+        if use_ssl:
+            server_cm = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20)
+        else:
+            server_cm = smtplib.SMTP(smtp_host, smtp_port, timeout=20)
+
+        with server_cm as server:
+            if use_starttls and not use_ssl:
+                server.starttls()
             server.login(smtp_user, smtp_password)
             server.send_message(msg)
         return True, "Email sent"

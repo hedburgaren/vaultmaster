@@ -15,3 +15,7 @@ ui/.env.local
 # Backup files of .env produced during deploy/migration
 .env.bak*
 .env.backup*
+
+# Import scripts that hold plaintext credentials inline — never commit
+scripts/import_credentials_from_notion_data.py
+scripts/setup_smtp_hedburgaren.py
