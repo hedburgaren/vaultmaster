@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Lock, Bell, Globe } from 'lucide-react';
-import { logout, getDashboard } from '@/lib/api';
+import { Lock, Bell, Globe, X, CheckCheck } from 'lucide-react';
+import { logout, getDashboard, acknowledgeRun, acknowledgeAllRuns } from '@/lib/api';
 import { useLocale, useT } from '@/lib/i18n';
 
 export default function Topbar() {
@@ -15,18 +15,34 @@ export default function Topbar() {
   const [showPanel, setShowPanel] = useState(false);
   const [errors, setErrors] = useState<any[]>([]);
 
+  const load = () => {
+    getDashboard().then((d: any) => {
+      setFailedCount(d.runs_failed_24h || 0);
+      setErrorCount(d.recent_errors?.length || 0);
+      setErrors(d.recent_errors || []);
+    }).catch(() => {});
+  };
+
   useEffect(() => {
-    const load = () => {
-      getDashboard().then((d: any) => {
-        setFailedCount(d.runs_failed_24h || 0);
-        setErrorCount(d.recent_errors?.length || 0);
-        setErrors(d.recent_errors || []);
-      }).catch(() => {});
-    };
     load();
     const i = setInterval(load, 30000);
     return () => clearInterval(i);
   }, []);
+
+  const dismissOne = async (e: React.MouseEvent, runId: string) => {
+    e.stopPropagation();
+    try {
+      await acknowledgeRun(runId);
+      setErrors((cur) => cur.filter((er) => er.id !== runId));
+    } catch {}
+  };
+  const dismissAll = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await acknowledgeAllRuns();
+      setErrors([]);
+    } catch {}
+  };
 
   const bellColor = failedCount > 0 ? 'text-vm-danger' : errorCount > 0 ? 'text-vm-warning' : 'text-vm-text-dim';
   const badgeColor = failedCount > 0 ? 'bg-vm-danger' : errorCount > 0 ? 'bg-vm-warning' : '';
@@ -61,9 +77,20 @@ export default function Topbar() {
           </button>
           {showPanel && (
             <div className="absolute right-0 top-full mt-2 w-80 bg-vm-surface2 border border-vm-border-bright rounded shadow-2xl z-50">
-              <div className="px-4 py-3 border-b border-vm-border flex items-center justify-between">
+              <div className="px-4 py-3 border-b border-vm-border flex items-center justify-between gap-2">
                 <span className="font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase">{t('topbar.notifications')}</span>
-                {failedCount > 0 && <span className="font-mono text-[10px] text-vm-danger">{failedCount} {t('topbar.failed_24h')}</span>}
+                <div className="flex items-center gap-2">
+                  {failedCount > 0 && <span className="font-mono text-[10px] text-vm-danger">{failedCount} {t('topbar.failed_24h')}</span>}
+                  {errors.length > 0 && (
+                    <button
+                      onClick={dismissAll}
+                      title="Acknowledge all"
+                      className="flex items-center gap-1 px-2 py-0.5 border border-vm-border text-vm-text-dim rounded text-[9px] font-bold tracking-wider uppercase hover:text-vm-text-bright hover:border-vm-text-dim"
+                    >
+                      <CheckCheck className="w-3 h-3" /> Clear
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="max-h-64 overflow-y-auto">
                 {errors.length === 0 ? (
@@ -73,37 +100,50 @@ export default function Topbar() {
                   </div>
                 ) : (
                   errors.map((e: any, i: number) => (
-                    <button
-                      key={i}
-                      onClick={() => {
-                        setShowPanel(false);
-                        if (e.id) router.push(`/runs?expand=${e.id}`);
-                      }}
-                      className="w-full text-left px-4 py-3 border-b border-vm-border/50 hover:bg-vm-surface3 transition-colors cursor-pointer"
-                      title={e.error || t('topbar.unknown_error')}
+                    <div
+                      key={e.id || i}
+                      className="relative w-full px-4 py-3 border-b border-vm-border/50 hover:bg-vm-surface3 transition-colors group"
                     >
-                      <div className="flex items-center gap-2 mb-1">
-                        <div className="w-1.5 h-1.5 rounded-full bg-vm-danger shrink-0" />
-                        <span className="font-mono text-[10px] text-vm-text-dim">
-                          {e.created_at ? new Date(e.created_at).toLocaleString('en-GB') : '—'}
-                          {e.retry_count > 0 && <span className="ml-2 text-vm-warning">(retry {e.retry_count})</span>}
-                        </span>
-                      </div>
-                      {(e.job_name || e.server_name) && (
-                        <div className="font-mono text-[11px] text-vm-text-bright pl-3.5 truncate">
-                          {e.job_name || '—'}
-                          {e.server_name && <span className="text-vm-text-dim"> @ {e.server_name}</span>}
+                      <button
+                        onClick={() => {
+                          setShowPanel(false);
+                          if (e.id) router.push(`/runs?expand=${e.id}`);
+                        }}
+                        className="w-full text-left cursor-pointer pr-6"
+                        title={e.error || t('topbar.unknown_error')}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="w-1.5 h-1.5 rounded-full bg-vm-danger shrink-0" />
+                          <span className="font-mono text-[10px] text-vm-text-dim">
+                            {e.created_at ? new Date(e.created_at).toLocaleString('en-GB') : '—'}
+                            {e.retry_count > 0 && <span className="ml-2 text-vm-warning">(retry {e.retry_count})</span>}
+                          </span>
                         </div>
-                      )}
-                      <div className="font-mono text-[11px] text-vm-danger pl-3.5 line-clamp-2 break-words">
-                        {e.error || t('topbar.unknown_error')}
-                      </div>
-                      {e.last_log && e.last_log !== e.error && (
-                        <div className="font-mono text-[10px] text-vm-text-dim pl-3.5 mt-0.5 line-clamp-2 break-words">
-                          {e.last_log}
+                        {(e.job_name || e.server_name) && (
+                          <div className="font-mono text-[11px] text-vm-text-bright pl-3.5 truncate">
+                            {e.job_name || '—'}
+                            {e.server_name && <span className="text-vm-text-dim"> @ {e.server_name}</span>}
+                          </div>
+                        )}
+                        <div className="font-mono text-[11px] text-vm-danger pl-3.5 line-clamp-2 break-words">
+                          {e.error || t('topbar.unknown_error')}
                         </div>
+                        {e.last_log && e.last_log !== e.error && (
+                          <div className="font-mono text-[10px] text-vm-text-dim pl-3.5 mt-0.5 line-clamp-2 break-words">
+                            {e.last_log}
+                          </div>
+                        )}
+                      </button>
+                      {e.id && (
+                        <button
+                          onClick={(ev) => dismissOne(ev, e.id)}
+                          title="Acknowledge / dismiss"
+                          className="absolute top-2 right-2 p-1 text-vm-text-dim hover:text-vm-text-bright opacity-50 hover:opacity-100 transition-opacity"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
                       )}
-                    </button>
+                    </div>
                   ))
                 )}
               </div>

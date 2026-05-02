@@ -93,7 +93,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         select(BackupRun, BackupJob, Server)
         .join(BackupJob, BackupRun.job_id == BackupJob.id)
         .join(Server, BackupRun.server_id == Server.id)
-        .where(BackupRun.status == "failed")
+        .where(BackupRun.status == "failed", BackupRun.acknowledged_at.is_(None))
         .order_by(BackupRun.created_at.desc())
         .limit(5)
     )
