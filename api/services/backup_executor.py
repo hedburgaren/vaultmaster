@@ -146,7 +146,7 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
         exit_code, stdout, _ = await run_remote_command(server, f"stat -c %s {remote_path_q}")
         size_bytes = int(stdout.strip()) if exit_code == 0 else 0
 
-        exit_code, stdout, _ = await run_remote_command(server, f"sha256sum {remote_path_q}")
+        exit_code, stdout, _ = await run_remote_command(server, f"sha256sum {remote_path_q}", timeout=3600)
         checksum = stdout.split()[0] if exit_code == 0 else ""
 
         if size_bytes == 0:
@@ -225,7 +225,7 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
         exit_code, stdout, _ = await run_remote_command(server, f"stat -c %s {remote_path_q}")
         size_bytes = int(stdout.strip()) if exit_code == 0 else 0
 
-        exit_code, stdout, _ = await run_remote_command(server, f"sha256sum {remote_path_q}")
+        exit_code, stdout, _ = await run_remote_command(server, f"sha256sum {remote_path_q}", timeout=3600)
         checksum = stdout.split()[0] if exit_code == 0 else ""
 
         if size_bytes == 0:
@@ -307,7 +307,7 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
             log("warn", f"stat failed (exit {exit_code}): {stderr}")
         size_bytes = int(stdout.strip()) if exit_code == 0 and stdout.strip().isdigit() else 0
 
-        exit_code, stdout, stderr = await run_remote_command(server, f"sha256sum {remote_path_q}")
+        exit_code, stdout, stderr = await run_remote_command(server, f"sha256sum {remote_path_q}", timeout=3600)
         if exit_code != 0:
             log("warn", f"sha256sum failed (exit {exit_code}): {stderr}")
         checksum = stdout.split()[0] if exit_code == 0 and stdout.strip() else ""
