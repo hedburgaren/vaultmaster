@@ -19,3 +19,4 @@ ui/.env.local
 # Import scripts that hold plaintext credentials inline — never commit
 scripts/import_credentials_from_notion_data.py
 scripts/setup_smtp_hedburgaren.py
+scripts/import_credentials_v2_complete.py
