@@ -11,3 +11,7 @@ node_modules/
 pgdata/
 redisdata/
 ui/.env.local
+
+# Backup files of .env produced during deploy/migration
+.env.bak*
+.env.backup*
