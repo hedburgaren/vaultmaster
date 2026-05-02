@@ -8,7 +8,7 @@ celery_app = Celery(
     "vaultmaster",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["api.tasks.backup_tasks", "api.tasks.rotation_tasks", "api.tasks.validation_tasks", "api.tasks.credential_tasks"],
+    include=["api.tasks.backup_tasks", "api.tasks.rotation_tasks", "api.tasks.validation_tasks", "api.tasks.credential_tasks", "api.tasks.anomaly_tasks"],
 )
 
 celery_app.conf.update(
@@ -41,6 +41,10 @@ celery_app.conf.update(
         "scan-credential-expiry": {
             "task": "api.tasks.credential_tasks.scan_credential_expiry",
             "schedule": 86400.0,  # daily — fires expiring/expired notifications
+        },
+        "scan-backup-anomalies": {
+            "task": "api.tasks.anomaly_tasks.scan_backup_anomalies",
+            "schedule": 3600.0,  # hourly — flags size/duration outliers
         },
     },
 )
