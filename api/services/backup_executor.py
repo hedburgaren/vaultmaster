@@ -174,7 +174,7 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
             containers_q = " ".join(shlex.quote(c) for c in stop_containers)
             await run_remote_command(server, f"docker start {containers_q}")
         log("error", str(e))
-        return {"success": False, "error": str(e), "logs": logs}
+        return {"success": False, "error": str(e), "logs": logs, "remote_path": remote_path}
 
 
 async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> dict:
@@ -245,7 +245,7 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
 
     except Exception as e:
         log("error", str(e))
-        return {"success": False, "error": str(e), "logs": logs}
+        return {"success": False, "error": str(e), "logs": logs, "remote_path": remote_path}
 
 
 async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
@@ -302,6 +302,10 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
         if exit_code == 1:
             log("warn", f"tar warning (exit 1): {stderr.strip()[:200] if stderr else 'file changed during read'}")
 
+        # From this point a tar file exists on disk. Record it so the
+        # caller's finally-block can guarantee cleanup even if the
+        # post-tar steps (stat / sha256sum / transfer) blow up.
+
         exit_code, stdout, stderr = await run_remote_command(server, f"stat -c %s {remote_path_q}")
         if exit_code != 0:
             log("warn", f"stat failed (exit {exit_code}): {stderr}")
@@ -330,7 +334,9 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
 
     except Exception as e:
         log("error", str(e))
-        return {"success": False, "error": str(e), "logs": logs}
+        # Always include remote_path so the caller can clean up a partial
+        # tar that the failure path left behind.
+        return {"success": False, "error": str(e), "logs": logs, "remote_path": remote_path}
 
 
 async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
