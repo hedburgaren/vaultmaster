@@ -48,6 +48,7 @@ const translations: Dict = {
   'nav.notifications': { sv: 'Notifieringar', en: 'Notifications' },
   'nav.settings': { sv: 'Inställningar', en: 'Settings' },
   'nav.audit': { sv: 'Revisionslogg', en: 'Audit Log' },
+  'nav.credentials': { sv: 'Lösenord & Nycklar', en: 'Credentials' },
   'nav.users': { sv: 'Användare', en: 'Users' },
 
   // ── Common actions ──

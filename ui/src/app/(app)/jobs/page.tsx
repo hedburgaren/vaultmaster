@@ -1,14 +1,14 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
-import { getJobs, createJob, updateJob, deleteJob, triggerJob, getServers, getStorageDestinations, getRetentionPolicies, getServerDatabases, getServerDocker, browseServer, pruneDockerVolumes } from '@/lib/api';
+import { getJobs, createJob, updateJob, deleteJob, triggerJob, getServers, getStorageDestinations, getRetentionPolicies, getServerDatabases, getServerDocker, browseServer, pruneDockerVolumes, getLatestValidationsByJob, triggerValidation } from '@/lib/api';
 import { backupTypeIcon, formatBytes } from '@/lib/utils';
 import { useT } from '@/lib/i18n';
 import Badge from '@/components/Badge';
 import FormLabel from '@/components/FormLabel';
 import TagInput from '@/components/TagInput';
 import CronBuilder from '@/components/CronBuilder';
-import { Plus, Play, Trash2, Clock, Lock, Pencil, X, FolderOpen, ArrowUp, Loader2, Database, Container, Terminal, HardDrive, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
+import { Plus, Play, Trash2, Clock, Lock, Pencil, X, FolderOpen, ArrowUp, Loader2, Database, Container, Terminal, HardDrive, RefreshCw, ChevronDown, ChevronUp, ShieldCheck, ShieldAlert, Shield } from 'lucide-react';
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
@@ -47,13 +47,41 @@ export default function JobsPage() {
   const [browserEntries, setBrowserEntries] = useState<any[]>([]);
   const [browserLoading, setBrowserLoading] = useState(false);
 
+  const [validationsByJob, setValidationsByJob] = useState<Record<string, any>>({});
   const load = () => {
     getJobs().then(setJobs).catch(() => {});
     getServers().then(setServers).catch(() => {});
     getStorageDestinations().then(setStorageDests).catch(() => {});
     getRetentionPolicies().then(setRetentionPolicies).catch(() => {});
+    getLatestValidationsByJob().then((rows: any[]) => {
+      const m: Record<string, any> = {};
+      (rows || []).forEach(r => { m[r.job_id] = r; });
+      setValidationsByJob(m);
+    }).catch(() => {});
   };
   useEffect(() => { load(); }, []);
+
+  const handleValidate = async (id: string) => {
+    try {
+      await triggerValidation(id);
+      setTimeout(load, 2000);
+    } catch (e) {
+      // Silently ignore — failure surfaces in the validation row when it lands.
+    }
+  };
+
+  const validationBadge = (jobId: string) => {
+    const v = validationsByJob[jobId];
+    if (!v) return null;
+    const ts = v.finished_at ? new Date(v.finished_at).toLocaleDateString('sv-SE') : '—';
+    if (v.status === 'passed') {
+      return <span className="inline-flex items-center gap-1 font-mono text-[10px] text-vm-success" title={`Senast validerad ${ts}`}><ShieldCheck className="w-3 h-3" />{ts}</span>;
+    }
+    if (v.status === 'failed') {
+      return <span className="inline-flex items-center gap-1 font-mono text-[10px] text-vm-danger" title={v.error_message || 'failed'}><ShieldAlert className="w-3 h-3" />{ts}</span>;
+    }
+    return <span className="inline-flex items-center gap-1 font-mono text-[10px] text-vm-text-dim" title={v.status}><Shield className="w-3 h-3" />{v.status}</span>;
+  };
 
   const allTags = useMemo(() => {
     const set = new Set<string>();
@@ -613,6 +641,7 @@ export default function JobsPage() {
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('jobs.schedule')}</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('jobs.project_col')}</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t('jobs.status')}</th>
+              <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal">Validation</th>
               <th className="px-4 py-3 text-left font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase font-normal"></th>
             </tr>
           </thead>
@@ -644,9 +673,13 @@ export default function JobsPage() {
                   </div>
                 </td>
                 <td className="px-4 py-3">
+                  {validationBadge(j.id) || <span className="font-mono text-[10px] text-vm-text-dim">never</span>}
+                </td>
+                <td className="px-4 py-3">
                   <div className="flex gap-2">
                     <button onClick={() => openEdit(j)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08]"><Pencil className="w-3 h-3" /> {t('action.edit')}</button>
                     <button onClick={() => handleTrigger(j.id)} className="flex items-center gap-1 px-3 py-1.5 bg-vm-accent text-vm-bg rounded text-xs font-bold tracking-wider uppercase"><Play className="w-3 h-3" /> {t('action.run')}</button>
+                    <button onClick={() => handleValidate(j.id)} title="Validate latest backup" className="flex items-center gap-1 px-3 py-1.5 border border-vm-text-dim text-vm-text-dim rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-surface2"><ShieldCheck className="w-3 h-3" /></button>
                     <button onClick={() => handleDelete(j.id)} className="flex items-center gap-1 px-3 py-1.5 border border-vm-danger text-vm-danger rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-danger/10"><Trash2 className="w-3 h-3" /></button>
                   </div>
                 </td>

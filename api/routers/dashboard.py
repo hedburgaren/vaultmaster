@@ -87,22 +87,34 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         for r in active_result.scalars().all()
     ]
 
-    # Recent errors
+    # Recent errors — join job + server names for the topbar panel,
+    # and surface the last log line so users can read what actually broke.
     error_result = await db.execute(
-        select(BackupRun)
+        select(BackupRun, BackupJob, Server)
+        .join(BackupJob, BackupRun.job_id == BackupJob.id)
+        .join(Server, BackupRun.server_id == Server.id)
         .where(BackupRun.status == "failed")
         .order_by(BackupRun.created_at.desc())
         .limit(5)
     )
-    recent_errors = [
-        {
+    recent_errors = []
+    for r, j, s in error_result.all():
+        last_log_msg = None
+        if r.log_lines:
+            for entry in reversed(r.log_lines):
+                if isinstance(entry, dict) and entry.get("level") in ("error", "warn") and entry.get("msg"):
+                    last_log_msg = str(entry["msg"])[:300]
+                    break
+        recent_errors.append({
             "id": str(r.id),
             "job_id": str(r.job_id),
+            "job_name": j.name,
+            "server_name": s.name,
             "error": r.error_message,
+            "last_log": last_log_msg,
+            "retry_count": r.retry_count,
             "created_at": r.created_at.isoformat(),
-        }
-        for r in error_result.scalars().all()
-    ]
+        })
 
     # Server health (per-server status)
     server_health = []

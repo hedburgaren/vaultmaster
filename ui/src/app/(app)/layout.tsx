@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { isAuthenticated } from '@/lib/api';
 import Topbar from '@/components/Topbar';
 import Sidebar from '@/components/Sidebar';
+import { ToastProvider } from '@/components/Toast';
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -16,12 +17,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }, [router]);
 
   return (
-    <div className="flex flex-col min-h-screen relative z-[1]">
-      <Topbar />
-      <div className="flex flex-1 min-h-[calc(100vh-60px)]">
-        <Sidebar />
-        <main className="flex-1 p-6 overflow-y-auto">{children}</main>
+    <ToastProvider>
+      <div className="flex flex-col min-h-screen relative z-[1]">
+        <Topbar />
+        <div className="flex flex-1 min-h-[calc(100vh-60px)]">
+          <Sidebar />
+          <main className="flex-1 p-6 overflow-y-auto">{children}</main>
+        </div>
       </div>
-    </div>
+    </ToastProvider>
   );
 }

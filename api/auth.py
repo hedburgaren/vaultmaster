@@ -3,10 +3,11 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
+import jwt
+from jwt import PyJWTError
 
 from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
-from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,7 +44,9 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+    token = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+    # PyJWT < 2 returned bytes; >=2 returns str. Normalize for safety.
+    return token.decode("utf-8") if isinstance(token, bytes) else token
 
 
 async def get_current_user(
@@ -66,7 +69,7 @@ async def get_current_user(
             username: str = payload.get("sub")
             if username is None:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-        except JWTError:
+        except PyJWTError:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
         result = await db.execute(select(User).where(User.username == username, User.is_active == True))

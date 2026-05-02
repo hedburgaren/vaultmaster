@@ -1,22 +1,21 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.config import get_settings
 from api.database import engine, Base
 from api.models import *  # noqa: F401 — register all models
+from api.rate_limiter import limiter
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
-limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
 
 
 @asynccontextmanager
@@ -42,6 +41,10 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+from api.middleware.audit import AuditLogMiddleware
+app.add_middleware(AuditLogMiddleware)
 
 
 @app.exception_handler(RateLimitExceeded)
@@ -65,16 +68,37 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 allowed_origins = [o.strip() for o in (settings.allowed_origins or "").split(",") if o.strip()]
+_env = (os.environ.get("ENV") or os.environ.get("ENVIRONMENT") or "").lower()
+if not allowed_origins:
+    if _env in ("prod", "production"):
+        raise RuntimeError(
+            "ALLOWED_ORIGINS must be set when ENV=production. "
+            "Refusing to start with wildcard CORS + allow_credentials=True."
+        )
+    # Dev/test fallback — explicit, no wildcard. Loopback only.
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8100",
+        "http://127.0.0.1:8100",
+    ]
+    logger.warning(
+        "ALLOWED_ORIGINS not set; falling back to loopback origins (%s). "
+        "Set ALLOWED_ORIGINS in the env for production.",
+        allowed_origins,
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins or ["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
 # Register routers
-from api.routers import auth, servers, jobs, runs, artifacts, storage, retention, notifications, dashboard, audit, webhooks, users, metrics, system_settings
+from api.routers import auth, servers, jobs, runs, artifacts, storage, retention, notifications, dashboard, audit, webhooks, users, metrics, system_settings, validations, credentials, mcp_clients
+from api.mcp import server as mcp_server
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(servers.router, prefix="/api/v1")
@@ -89,6 +113,10 @@ app.include_router(audit.router, prefix="/api/v1")
 app.include_router(webhooks.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(system_settings.router, prefix="/api/v1")
+app.include_router(validations.router, prefix="/api/v1")
+app.include_router(credentials.router, prefix="/api/v1")
+app.include_router(mcp_clients.router, prefix="/api/v1")
+app.include_router(mcp_server.router, prefix="/api")
 app.include_router(metrics.router, prefix="/api")
 
 

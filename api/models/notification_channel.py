@@ -13,7 +13,7 @@ class NotificationChannel(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    channel_type: Mapped[str] = mapped_column(String(50), nullable=False)  # email, slack, ntfy, telegram, webhook
+    channel_type: Mapped[str] = mapped_column(String(50), nullable=False)  # email, slack, ntfy, telegram, discord, webhook
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     triggers: Mapped[list | None] = mapped_column(ARRAY(String), default=list)  # run.success, run.failed, etc.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

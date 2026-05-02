@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 # ── Server ──
@@ -117,6 +117,11 @@ class StorageDestinationOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_serializer("config")
+    def _mask_secrets(self, v: dict, _info) -> dict:
+        from api.services.credentials_crypto import mask_dict_secrets
+        return mask_dict_secrets(dict(v or {})) or {}
+
 
 # ── Backup Job ──
 class BackupJobCreate(BaseModel):
@@ -231,7 +236,7 @@ class ArtifactSearch(BaseModel):
 # ── Notification Channel ──
 class NotificationChannelCreate(BaseModel):
     name: str
-    channel_type: str  # email, slack, ntfy, telegram, webhook
+    channel_type: str  # email, slack, ntfy, telegram, discord, webhook
     config: dict = {}
     triggers: list[str] = []
 
@@ -258,6 +263,136 @@ class NotificationChannelOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── Backup Validation ──
+class BackupValidationRunOut(BaseModel):
+    id: uuid.UUID
+    job_id: uuid.UUID
+    artifact_id: uuid.UUID | None
+    restic_snapshot_id: str | None
+    status: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_seconds: int | None
+    check_type: str
+    error_message: str | None
+    log_lines: list | None
+    triggered_by: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class BackupValidationTrigger(BaseModel):
+    check_type: str = "restore"  # restore, integrity, sample
+    artifact_id: uuid.UUID | None = None  # default: latest artifact for the job
+
+
+# ── Credentials ──
+class CredentialCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    credential_type: str = Field(default="api_key", max_length=50)
+    plaintext_value: str  # encrypted server-side; never returned
+    description: str | None = None
+    tags: list[str] = []
+    expires_at: datetime | None = None
+    rotation_policy: str | None = None
+    provenance: str | None = None
+    mcp_enabled: bool = False
+    mcp_scopes: list[str] = []
+
+
+class CredentialUpdate(BaseModel):
+    name: str | None = None
+    credential_type: str | None = None
+    plaintext_value: str | None = None  # re-encrypts if provided
+    description: str | None = None
+    tags: list[str] | None = None
+    expires_at: datetime | None = None
+    rotation_policy: str | None = None
+    provenance: str | None = None
+    mcp_enabled: bool | None = None
+    mcp_scopes: list[str] | None = None
+
+
+class CredentialOut(BaseModel):
+    id: uuid.UUID
+    owner_id: uuid.UUID
+    name: str
+    credential_type: str
+    description: str | None
+    tags: list[str] | None
+    key_version: int
+    expires_at: datetime | None
+    rotation_policy: str | None
+    provenance: str | None
+    mcp_enabled: bool
+    mcp_scopes: list[str] | None
+    last_revealed_at: datetime | None
+    reveal_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CredentialRevealRequest(BaseModel):
+    password: str
+    purpose: str = Field(min_length=1, max_length=255)
+    totp_code: str | None = None  # required if user has totp_enabled
+
+
+class CredentialRevealOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    credential_type: str
+    plaintext_value: str
+    expires_in_seconds: int = 60
+
+
+# ── MCP Client ──
+class MCPClientCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    scopes: list[str] = []
+    rate_limit_per_minute: int = Field(default=60, ge=1, le=600)
+    expires_at: datetime | None = None
+
+
+class MCPClientUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    scopes: list[str] | None = None
+    is_active: bool | None = None
+    rate_limit_per_minute: int | None = None
+    expires_at: datetime | None = None
+
+
+class MCPClientOut(BaseModel):
+    id: uuid.UUID
+    owner_id: uuid.UUID
+    name: str
+    description: str | None
+    key_prefix: str
+    scopes: list[str] | None
+    is_active: bool
+    rate_limit_per_minute: int
+    last_used_at: datetime | None
+    use_count: int
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MCPClientCreated(MCPClientOut):
+    raw_key: str  # only returned at create-time, never persisted in plaintext
+
+
+class MCPToolCallRequest(BaseModel):
+    arguments: dict = {}
+
+
 # ── Auth ──
 class Token(BaseModel):
     access_token: str
@@ -267,6 +402,22 @@ class Token(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+    totp_code: str | None = None  # required if user has totp_enabled
+
+
+class TotpSetupOut(BaseModel):
+    secret: str
+    otpauth_uri: str
+    qr_png_base64: str  # data: prefix included
+
+
+class TotpVerifyRequest(BaseModel):
+    totp_code: str
+
+
+class TotpDisableRequest(BaseModel):
+    password: str
+    totp_code: str
 
 
 class SetupRequest(BaseModel):

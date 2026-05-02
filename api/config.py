@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     # Encryption
     age_public_key: str = ""
 
+    # Credential vault — separate from JWT secret_key by design.
+    # Format: "v1:<base64-Fernet-key>,v2:<base64-Fernet-key>"
+    # The HIGHEST version number is used for new encryptions; all listed
+    # versions are tried on decrypt (MultiFernet rotation). Generate keys
+    # with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    credentials_master_keys: str = ""
+
     # Notifications
     smtp_host: str = ""
     smtp_port: int = 587
@@ -36,6 +43,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"  # tolerate extra env vars (POSTGRES_PASSWORD, etc.)
 
 
 @lru_cache()
