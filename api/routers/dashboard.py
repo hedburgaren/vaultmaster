@@ -53,8 +53,12 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
     )
     runs = runs_result.scalars().all()
     runs_success = sum(1 for r in runs if r.status == "success")
-    runs_failed = sum(1 for r in runs if r.status == "failed")
-    success_rate = round(runs_success / len(runs) * 100, 1) if runs else 0.0
+    # Failed-count for the topbar bell counts only un-acknowledged ones,
+    # so it stays in lockstep with the recent_errors panel below.
+    # Status text on dashboard still reflects total failure rate.
+    runs_failed = sum(1 for r in runs if r.status == "failed" and r.acknowledged_at is None)
+    runs_failed_total = sum(1 for r in runs if r.status == "failed")
+    success_rate = round(runs_success / max(runs_success + runs_failed_total, 1) * 100, 1)
 
     # Next scheduled runs
     next_runs = []
