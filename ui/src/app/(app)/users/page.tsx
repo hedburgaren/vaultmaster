@@ -1,10 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getUsers, createUser, updateUser, deleteUser } from '@/lib/api';
+import { getUsers, createUser, updateUser, deleteUser, getProfile } from '@/lib/api';
 import Badge from '@/components/Badge';
 import FormLabel from '@/components/FormLabel';
-import { Plus, Trash2, Users, Shield, Eye, EyeOff } from 'lucide-react';
+import { Plus, Trash2, Users, Shield, Eye, EyeOff, Lock } from 'lucide-react';
 import { useT } from '@/lib/i18n';
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
@@ -18,6 +18,7 @@ const ROLE_COLORS: Record<string, string> = {
 export default function UsersPage() {
   const t = useT();
   const [users, setUsers] = useState<any[]>([]);
+  const [me, setMe] = useState<any>(null);
   const [showForm, setShowForm] = useState(false);
   const [showPw, setShowPw] = useState(false);
   const [form, setForm] = useState({ username: '', password: '', role: 'viewer', email_addresses: '' });
@@ -26,7 +27,10 @@ export default function UsersPage() {
   const load = () => getUsers().then(setUsers).catch((e: any) => {
     if (e.message?.includes('403')) setError('Admin access required');
   });
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    getProfile().then(setMe).catch(() => {});
+  }, []);
 
   const handleCreate = async () => {
     setError('');
@@ -44,16 +48,24 @@ export default function UsersPage() {
   };
 
   const handleToggleActive = async (id: string, currentActive: boolean) => {
-    await updateUser(id, { is_active: !currentActive });
-    load();
+    if (me && id === me.id) return;  // self-protect; UI also disables the button
+    if (!confirm(currentActive ? t('users.confirm_deactivate') || 'Deactivate this user?' : t('users.confirm_activate') || 'Reactivate this user?')) return;
+    try {
+      await updateUser(id, { is_active: !currentActive });
+      load();
+    } catch (e: any) { setError(e.message); }
   };
 
   const handleChangeRole = async (id: string, role: string) => {
-    await updateUser(id, { role });
-    load();
+    if (me && id === me.id && role !== 'admin') return;  // self-protect
+    try {
+      await updateUser(id, { role });
+      load();
+    } catch (e: any) { setError(e.message); }
   };
 
   const handleDelete = async (id: string, username: string) => {
+    if (me && id === me.id) return;  // self-protect; UI also disables the button
     if (confirm(t('users.confirm_delete').replace('{name}', username))) {
       try {
         await deleteUser(id);
@@ -152,20 +164,40 @@ export default function UsersPage() {
                   </div>
                 </td>
                 <td className="px-4 py-3">
-                  <select
-                    value={u.role || (u.is_admin ? 'admin' : 'viewer')}
-                    onChange={e => handleChangeRole(u.id, e.target.value)}
-                    className={`px-2.5 py-1 rounded-sm font-mono text-[11px] tracking-wider font-bold border cursor-pointer ${ROLE_COLORS[u.role] || ROLE_COLORS.viewer}`}
-                  >
-                    <option value="viewer">VIEWER</option>
-                    <option value="operator">OPERATOR</option>
-                    <option value="admin">ADMIN</option>
-                  </select>
+                  {me && u.id === me.id ? (
+                    <span
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-sm font-mono text-[11px] tracking-wider font-bold border ${ROLE_COLORS[u.role] || ROLE_COLORS.viewer} opacity-70 cursor-not-allowed`}
+                      title="You can't change your own role."
+                    >
+                      <Lock className="w-3 h-3" />
+                      {(u.role || (u.is_admin ? 'admin' : 'viewer')).toUpperCase()}
+                    </span>
+                  ) : (
+                    <select
+                      value={u.role || (u.is_admin ? 'admin' : 'viewer')}
+                      onChange={e => handleChangeRole(u.id, e.target.value)}
+                      className={`px-2.5 py-1 rounded-sm font-mono text-[11px] tracking-wider font-bold border cursor-pointer ${ROLE_COLORS[u.role] || ROLE_COLORS.viewer}`}
+                    >
+                      <option value="viewer">VIEWER</option>
+                      <option value="operator">OPERATOR</option>
+                      <option value="admin">ADMIN</option>
+                    </select>
+                  )}
                 </td>
                 <td className="px-4 py-3">
-                  <button onClick={() => handleToggleActive(u.id, u.is_active)}>
-                    <Badge status={u.is_active ? 'success' : 'cancelled'} label={u.is_active ? t('users.active') : t('users.disabled')} />
-                  </button>
+                  {me && u.id === me.id ? (
+                    <span
+                      className="inline-flex items-center gap-1 opacity-70 cursor-not-allowed"
+                      title="You can't deactivate yourself."
+                    >
+                      <Lock className="w-3 h-3 text-vm-text-dim" />
+                      <Badge status={u.is_active ? 'success' : 'cancelled'} label={u.is_active ? t('users.active') : t('users.disabled')} />
+                    </span>
+                  ) : (
+                    <button onClick={() => handleToggleActive(u.id, u.is_active)}>
+                      <Badge status={u.is_active ? 'success' : 'cancelled'} label={u.is_active ? t('users.active') : t('users.disabled')} />
+                    </button>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   <span className={`font-mono text-[10px] ${u.totp_enabled ? 'text-vm-success' : 'text-vm-text-dim'}`}>
@@ -179,9 +211,15 @@ export default function UsersPage() {
                   {u.created_at ? new Date(u.created_at).toLocaleDateString('en-GB') : '—'}
                 </td>
                 <td className="px-4 py-3">
-                  <button onClick={() => handleDelete(u.id, u.username)} className="p-1.5 border border-vm-danger text-vm-danger rounded hover:bg-vm-danger/10 transition-colors">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  {me && u.id === me.id ? (
+                    <span className="p-1.5 border border-vm-border text-vm-text-dim/40 rounded inline-block cursor-not-allowed" title="You can't delete yourself.">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </span>
+                  ) : (
+                    <button onClick={() => handleDelete(u.id, u.username)} className="p-1.5 border border-vm-danger text-vm-danger rounded hover:bg-vm-danger/10 transition-colors">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
