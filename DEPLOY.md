@@ -102,3 +102,71 @@ Verifiering:
 **Beslutsdokumentet** (`docs/seafile-backup-strategy.md`) sammanfattar
 rsync vs restic vs seafile-native dump och rekommenderar restic. Läs och
 besluta innan Story 2 task 3 implementeras.
+
+### Story 2 Task 3: Restic-executor
+
+Innehåller:
+- `api/services/restic_executor.py` — ny executor (push-based, ingen rclone-transfer)
+- `api/tasks/backup_tasks.py` — dispatch + `skip_transfer`-shortcut
+
+**Source-host prereq** (måste finnas på varje server som ska köra
+restic-jobb):
+
+```bash
+# Installera restic >= 0.16
+sudo apt-get install -y restic
+
+# Sätt RESTIC_PASSWORD i SSH-användarens profile
+echo 'export RESTIC_PASSWORD="<long-random-password>"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Lösenordet ska sparas separat (inte i någon backup) — annars är restic-arkivet
+oåterhämtbart om hosten återställs från backup. Tills EPIC 2 är på plats:
+spara i Notion credentials-page med tag `restic-password-<host>`.
+
+**Skapa ett restic-backupjobb** (efter Chrilles beslut):
+
+Via UI eller `POST /api/v1/jobs`:
+
+```json
+{
+  "name": "Seafile Storage (restic)",
+  "server_id": "<seafile-server-uuid>",
+  "backup_type": "restic",
+  "source_config": {
+    "paths": ["/srv/containers/seafile/seafile-data"],
+    "excludes": ["**/cache/**", "**/tmp/**", "**/.thumb/**"],
+    "repo_url": "rclone:b2:hedburgaren-seafile",
+    "password_env_var": "RESTIC_PASSWORD",
+    "tags": ["seafile"],
+    "retention": {"daily": 7, "weekly": 4, "monthly": 6}
+  },
+  "schedule_cron": "0 3 * * *",
+  "destination_ids": [],
+  "max_retries": 1
+}
+```
+
+`destination_ids` är tom — restic pushar direkt till `repo_url`. Inga
+artifact-rader skapas i nuvarande iteration; snapshot-ID och metadata
+loggas i `BackupRun.log_lines`. (En framtida iteration integrerar
+restic-repos som `StorageDestination`-typ.)
+
+**Verifiering efter första körning:**
+
+```bash
+# På seafile-source-host:
+restic -r rclone:b2:hedburgaren-seafile snapshots
+restic -r rclone:b2:hedburgaren-seafile stats
+restic -r rclone:b2:hedburgaren-seafile check --read-data-subset=1%
+```
+
+Och i VaultMaster: `BackupRun` visar `success` med `size_bytes` =
+`data_added` (mycket mindre än 945 GB efter andra körningen pga dedup).
+
+**Rollback:**
+
+`git revert` på commit 1f2a3b4 (eller motsvarande) plus `docker compose
+build api worker beat`. Restic-repon på dest påverkas inte av rollback —
+de är källkod-oberoende och kan användas via `restic` CLI direkt.
