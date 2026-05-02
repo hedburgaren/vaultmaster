@@ -229,3 +229,28 @@ async def copy_file_to_storage(dest, local_path: str, remote_subpath: str) -> tu
     if exit_code == 0:
         return True, f"Copied to {target}"
     return False, f"Failed: {stderr}"
+
+
+async def download_file_from_storage(dest, remote_path: str, local_path: str) -> tuple[bool, str]:
+    """Download an artifact from a storage destination to a local file.
+
+    `remote_path` is what was stored on `BackupArtifact.remote_path` —
+    typically the full backend-prefixed path returned by copy_file_to_storage.
+    For local backends it's a filesystem path; for cloud backends it's a
+    backend:bucket/path string that rclone understands.
+    """
+    if dest.backend == "local":
+        if not os.path.isfile(remote_path):
+            return False, f"local file not found: {remote_path}"
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        shutil.copy2(remote_path, local_path)
+        return True, f"Copied {remote_path} -> {local_path}"
+
+    remote, flags = _build_backend(dest)
+    # remote_path typically already contains the backend prefix; rclone
+    # handles `backend:bucket/path` directly.
+    source = remote_path if ":" in remote_path else f"{remote}/{remote_path}"
+    exit_code, _stdout, stderr = await _run_rclone(["copyto", source, local_path] + flags, timeout=3600)
+    if exit_code == 0:
+        return True, f"Downloaded {source} -> {local_path}"
+    return False, f"Download failed: {stderr.strip()[:200]}"

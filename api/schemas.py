@@ -258,6 +258,30 @@ class NotificationChannelOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── Backup Validation ──
+class BackupValidationRunOut(BaseModel):
+    id: uuid.UUID
+    job_id: uuid.UUID
+    artifact_id: uuid.UUID | None
+    restic_snapshot_id: str | None
+    status: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_seconds: int | None
+    check_type: str
+    error_message: str | None
+    log_lines: list | None
+    triggered_by: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class BackupValidationTrigger(BaseModel):
+    check_type: str = "restore"  # restore, integrity, sample
+    artifact_id: uuid.UUID | None = None  # default: latest artifact for the job
+
+
 # ── Auth ──
 class Token(BaseModel):
     access_token: str

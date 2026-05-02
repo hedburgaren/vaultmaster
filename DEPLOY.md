@@ -200,3 +200,63 @@ docker compose up -d
 
 Före: `Retrying in 60s.`
 Efter: `Retrying [retry 1/3 in 60s] tar failed: file changed during read | last log: ...`
+
+---
+
+## EPIC 0b — Backup-validation
+
+Innehåller:
+- `api/models/backup_validation_run.py` — ny tabell
+- `api/services/restore_validator.py` — postgres/files/restic-validators
+- `api/services/rclone_client.py` — `download_file_from_storage()`-helper
+- `api/tasks/validation_tasks.py` — Celery task `validate_backup_job_task` + `scan_validation_candidates`
+- `api/routers/validations.py` — REST-endpoints inkl manuell trigger
+- `api/services/notifier.py` — nya events `validation.passed/failed/skipped`
+- `api/tasks/celery_app.py` — beat-schedule + ny `validation`-kö
+- `docker-compose.yml` — workers lyssnar på `validation`-kön
+- `ui/src/lib/api.ts` + `ui/src/app/(app)/jobs/page.tsx` — last-validation-badge + manual trigger
+
+**Deploy:**
+
+```bash
+cd /srv/containers/vm.hedburgaren.se
+git pull
+docker compose build api worker beat ui
+docker compose up -d
+docker compose logs --tail 50 worker | grep -iE "error|registered|validation" || true
+```
+
+`Base.metadata.create_all` skapar nya tabellen vid api-start (ingen manuell migration).
+
+**Förutsättningar på source-host:**
+- `docker` tillgängligt för pgvalidation (kör `postgres:16-alpine` temp-container)
+- Bind-mount `/var/run/docker.sock` finns redan i compose
+
+**Verifiering:**
+
+1. Manuell trigger via UI: "ShieldCheck"-knappen i jobs-listan kör validation av senaste artifact.
+2. Eller via API:
+   ```bash
+   curl -X POST -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"check_type":"restore"}' \
+        https://vm.hedburgaren.se/api/v1/validations/jobs/<job-id>/trigger
+   ```
+3. Vänta 1-30 min beroende på dump-storlek. `GET /api/v1/validations?job_id=<id>` visar status.
+4. Vid pass: jobs-listan visar grön sköld med datum.
+5. Vid fail: röd sköld + Discord-notifiering "Backup Validation FAILED".
+
+**Auto-schedule:**
+- Beat kör `scan_validation_candidates` varje timme.
+- Kandidater = aktiva jobb av typ postgresql/files/docker_volumes/restic som inte validerats senaste 24h.
+- Kö: `validation` (worker -c 4).
+
+**Begränsningar (MVP):**
+- Endast pgdumps får full restore-test. files/docker_volumes får bara `tar -tzf`-listning. restic får `restic check --read-data-subset=1%`.
+- Custom-jobb skippas (status='skipped').
+- Validation kräver att VaultMaster-API-containern har dockersock + nätverk för att starta `postgres:16-alpine`.
+
+**Rollback:** `git revert <commit>` + `docker compose build api worker beat ui` + `docker compose up -d`. Tabellen `backup_validation_run` ligger kvar i DB men används inte — kan droppas manuellt vid behov:
+```sql
+DROP TABLE backup_validation_run;
+```
