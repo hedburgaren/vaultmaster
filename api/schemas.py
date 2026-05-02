@@ -348,6 +348,50 @@ class CredentialRevealOut(BaseModel):
     expires_in_seconds: int = 60
 
 
+# ── MCP Client ──
+class MCPClientCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    scopes: list[str] = []
+    rate_limit_per_minute: int = Field(default=60, ge=1, le=600)
+    expires_at: datetime | None = None
+
+
+class MCPClientUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    scopes: list[str] | None = None
+    is_active: bool | None = None
+    rate_limit_per_minute: int | None = None
+    expires_at: datetime | None = None
+
+
+class MCPClientOut(BaseModel):
+    id: uuid.UUID
+    owner_id: uuid.UUID
+    name: str
+    description: str | None
+    key_prefix: str
+    scopes: list[str] | None
+    is_active: bool
+    rate_limit_per_minute: int
+    last_used_at: datetime | None
+    use_count: int
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MCPClientCreated(MCPClientOut):
+    raw_key: str  # only returned at create-time, never persisted in plaintext
+
+
+class MCPToolCallRequest(BaseModel):
+    arguments: dict = {}
+
+
 # ── Auth ──
 class Token(BaseModel):
     access_token: str

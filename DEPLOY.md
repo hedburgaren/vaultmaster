@@ -482,3 +482,76 @@ docker compose up -d ui
 - Story 4 ("ersätt alert/confirm globalt"): infrastrukturen finns (`Toast`, `ConfirmModal`) och används i credentials-sidan. Refactor av befintliga `alert()`/`confirm()`-anrop i jobs/artifacts/etc. är scope-utvidgning som förvarvas separat.
 
 **Rollback:** `git revert <commit>` + `docker compose build ui && docker compose up -d ui`. Inga DB-ändringar.
+
+---
+
+## EPIC 4 — Credential MCP
+
+Innehåller:
+- `api/models/mcp_client.py` — ny tabell `mcp_client` (key_hash + scopes per AI-agent)
+- `api/mcp/auth.py` — `get_mcp_client` dependency som validerar `X-MCP-Key`
+- `api/mcp/server.py` — `/api/mcp/v1/`-endpoints med `tools`, `tools/search_credentials`, `tools/get_credential`
+- `api/routers/mcp_clients.py` — admin-CRUD + key rotation
+- `api/schemas.py` — MCPClient-scheman
+- `tests/test_mcp_visibility.py` — 6 tester för scope-intersection-logiken
+
+**Designbeslut (Kimi:s rekommendation):** `get_credential` returnerar plaintext direkt. Skydd:
+- `mcp_enabled` måste vara `true` på credentialen
+- Klientens `scopes` måste skära credentialens `mcp_scopes ∪ tags`
+- Varje anrop loggas i `audit_log` med `client_id`, `purpose`, IP
+- "Not found" och "not visible" returnerar samma 404 för att inte läcka existens
+
+**Deploy:**
+```bash
+cd /srv/containers/vm.hedburgaren.se
+git pull
+docker compose build api worker beat
+docker compose up -d api worker beat
+docker compose exec -T api python -m tests.test_mcp_visibility
+docker compose exec -T api python -c "from api.models.mcp_client import MCPClient; print(MCPClient.__table__.columns.keys())"
+```
+
+`Base.metadata.create_all` skapar tabellen vid api-restart.
+
+**Skapa en MCP-klient (admin-flow via API):**
+```bash
+TOKEN=$(curl -s -X POST https://vm.hedburgaren.se/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"chrille","password":"<pwd>"}' | jq -r .access_token)
+
+curl -X POST https://vm.hedburgaren.se/api/v1/mcp-clients \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"klada-cli","scopes":["plastshop","ai"],"rate_limit_per_minute":60}'
+```
+
+Svaret innehåller `raw_key` (typ `mcp_xxxxxxxxxx...`) — **denna visas en gång** och måste sparas direkt. Lagra den t.ex. i `.env` på Klådan/n8n eller som credential med `mcp_enabled=false` (vi lagrar inte våra MCP-nycklar i samma vault som de är till för att läsa).
+
+**Test som MCP-klient:**
+```bash
+MCP_KEY="mcp_..."
+
+# List tool catalog
+curl https://vm.hedburgaren.se/api/mcp/v1/tools \
+  -H "X-MCP-Key: $MCP_KEY"
+
+# Search
+curl -X POST https://vm.hedburgaren.se/api/mcp/v1/tools/search_credentials \
+  -H "X-MCP-Key: $MCP_KEY" -H "Content-Type: application/json" \
+  -d '{"arguments":{"query":"groq","tags":["ai"]}}'
+
+# Get plaintext
+curl -X POST https://vm.hedburgaren.se/api/mcp/v1/tools/get_credential \
+  -H "X-MCP-Key: $MCP_KEY" -H "Content-Type: application/json" \
+  -d '{"arguments":{"id":"<credential-uuid>","purpose":"klada-runtime-call"}}'
+```
+
+**Verifiering av audit:**
+- I VaultMaster UI → Credentials → välj credentialen → Audit-flik
+- `mcp.credential.search` och `mcp.credential.get` ska visas med klientnamn + purpose
+- Försök med en credential som INTE är `mcp_enabled` eller där scope inte matchar → `mcp.credential.get.denied`
+
+**Begränsningar (MVP):**
+- Inte full FastMCP SSE-binding — det är custom REST som följer MCP-tools-mönstret. AI-klienter kan anropa det direkt via httpx; för fullständig MCP SSE-discovery krävs senare wrapping. Logiken (auth, scope, audit) är samma.
+- Per-klient rate-limiting läggs på som SlowAPI-decorator i en follow-up (modellen har `rate_limit_per_minute`-fält redo).
+
+**Rollback:** `git revert <commit>` + `docker compose build api worker beat && docker compose up -d`. `mcp_client`-tabellen kan ligga kvar eller droppas vid behov.

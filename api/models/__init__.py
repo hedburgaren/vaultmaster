@@ -11,6 +11,7 @@ from api.models.webhook import Webhook
 from api.models.system_settings import SystemSetting
 from api.models.backup_validation_run import BackupValidationRun
 from api.models.credential import Credential
+from api.models.mcp_client import MCPClient
 
 __all__ = [
     "Server",
@@ -26,4 +27,5 @@ __all__ = [
     "SystemSetting",
     "BackupValidationRun",
     "Credential",
+    "MCPClient",
 ]
