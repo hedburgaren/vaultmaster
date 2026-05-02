@@ -338,3 +338,108 @@ docker compose up -d ui
 - UI: laddar utan TS-typfel; ingen regression i Topbar/runs/jobs (testade sektioner från EPIC 0a/0b).
 
 **Rollback:** `git revert <commit>` + om npm: ` rm package-lock.json && npm install` igen.
+
+---
+
+## EPIC 2 — Credential-kärna
+
+### 2A: Crypto + model + CRUD/reveal (commit 132cc50)
+
+**Pre-deploy: generera och sätt CREDENTIALS_MASTER_KEYS**
+
+```bash
+# Generera en Fernet-nyckel:
+python -c "from cryptography.fernet import Fernet; print('v1:' + Fernet.generate_key().decode())"
+# Output, t.ex.: v1:JTKXkqK_nWfVw...
+```
+
+Lägg i `/srv/containers/vm.hedburgaren.se/.env`:
+```
+CREDENTIALS_MASTER_KEYS=v1:<base64-Fernet-key>
+```
+
+**KRITISKT:** denna nyckel är HEMLIG och ska aldrig backas upp tillsammans med data. Spara separat (Notion-page med extra åtkomstskydd, eller offline). Om nyckeln går förlorad är credential-tabellen oåterhämtbar.
+
+**Deploy:**
+```bash
+cd /srv/containers/vm.hedburgaren.se
+git pull
+docker compose build api worker beat
+docker compose up -d api worker beat
+docker compose exec -T api python -m tests.test_credentials_crypto
+docker compose exec -T api python -c "from api.services.credentials_crypto import get_crypto; print('crypto loaded, latest version:', get_crypto().latest_version)"
+```
+
+**Verifiering (CRUD-flöde):**
+```bash
+TOKEN=$(curl -s -X POST https://vm.hedburgaren.se/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"chrille","password":"<pwd>"}' | jq -r .access_token)
+
+# Skapa
+curl -X POST https://vm.hedburgaren.se/api/v1/credentials \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Test Key","credential_type":"api_key","plaintext_value":"sk-secret-xyz"}'
+
+# Lista (plaintext är INTE med)
+curl -H "Authorization: Bearer $TOKEN" https://vm.hedburgaren.se/api/v1/credentials | jq
+
+# Reveal med fel password (ska 403)
+curl -X POST https://vm.hedburgaren.se/api/v1/credentials/<id>/reveal \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"password":"wrong","purpose":"test"}'
+
+# Reveal med rätt password (returnerar plaintext + audit-rad)
+curl -X POST https://vm.hedburgaren.se/api/v1/credentials/<id>/reveal \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"password":"<vm-password>","purpose":"manual-check"}'
+```
+
+### 2B: Storage encryption + Notion-import (commit följer)
+
+**Storage encryption** är delvis bakåtkompatibel: gamla `StorageDestination`-rader med plaintext i `config` fortsätter fungera (rclone reading-path testar `enc:`-prefix). Vid nästa edit i UI re-encrypteras secrets.
+
+För att tvinga migration av existerande rader:
+```bash
+docker compose exec -T api python -c "
+import asyncio
+from sqlalchemy import select
+from api.database import async_session
+from api.models.storage_destination import StorageDestination
+from api.services.credentials_crypto import encrypt_dict_secrets
+
+async def migrate():
+    async with async_session() as db:
+        for d in (await db.execute(select(StorageDestination))).scalars():
+            d.config = encrypt_dict_secrets(dict(d.config or {}))
+        await db.commit()
+asyncio.run(migrate())
+"
+```
+
+**Notion-import:**
+
+```bash
+docker compose exec -T api python -m scripts.import_notion_credentials \
+  --base-url http://localhost:8000 \
+  --vm-username chrille \
+  --vm-password '<vm-password>' \
+  --notion-token 'ntn_...' \
+  --page-id 30974749d022812596cec035c2b799be
+# (dry-run by default — granska output)
+
+# När det ser bra ut, kör med --apply:
+docker compose exec -T api python -m scripts.import_notion_credentials \
+  --base-url http://localhost:8000 \
+  --vm-username chrille \
+  --vm-password '<vm-password>' \
+  --notion-token 'ntn_...' \
+  --page-id 30974749d022812596cec035c2b799be \
+  --apply
+```
+
+Idempotent på `name` — re-run uppdaterar existerande rader. Markera Notion-sidan `[migrerad]` manuellt efter lyckad import.
+
+**Rollback:**
+- Crypto: dropp `credential`-tabellen + ta bort `CREDENTIALS_MASTER_KEYS` ur env. API startar fortsatt.
+- Storage encryption: är defensivt — fallback till plaintext om crypto inte är konfig. Inga manuella steg.

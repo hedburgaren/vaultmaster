@@ -45,9 +45,18 @@ def _build_backend(dest) -> tuple[str, list[str]]:
     Uses inline backend flags so no rclone.conf is needed.
     Returns the remote spec (e.g. ':s3:bucket/path') and a list of
     --backend-flag=value arguments.
+
+    Decrypts any `enc:vN:...` values in config in-flight; secrets only
+    exist in plaintext for the duration of this call.
     """
     backend = dest.backend
-    cfg = dest.config or {}
+    # Work on a copy so we don't mutate the SQLAlchemy attribute (which
+    # would mark the row dirty and round-trip the plaintext to DB).
+    try:
+        from api.services.credentials_crypto import decrypt_dict_secrets
+        cfg = decrypt_dict_secrets(dict(dest.config or {})) or {}
+    except Exception:  # crypto not configured — fall back to raw config
+        cfg = dict(dest.config or {})
 
     if backend == "local":
         return cfg.get("path", "/mnt/backup"), []

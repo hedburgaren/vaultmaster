@@ -75,7 +75,10 @@ async def list_storage(db: AsyncSession = Depends(get_db)):
 
 @router.post("", response_model=StorageDestinationOut, status_code=status.HTTP_201_CREATED, dependencies=[_auth])
 async def create_storage(body: StorageDestinationCreate, db: AsyncSession = Depends(get_db)):
-    dest = StorageDestination(**body.model_dump())
+    from api.services.credentials_crypto import encrypt_dict_secrets
+    payload = body.model_dump()
+    payload["config"] = encrypt_dict_secrets(dict(payload.get("config") or {}), extra_keys=_SECRET_CONFIG_KEYS)
+    dest = StorageDestination(**payload)
     db.add(dest)
     await db.flush()
     await db.refresh(dest)
@@ -102,14 +105,18 @@ async def update_storage(storage_id: uuid.UUID, body: StorageDestinationUpdate, 
     dest = result.scalar_one_or_none()
     if not dest:
         raise HTTPException(status_code=404, detail="Storage destination not found")
+    from api.services.credentials_crypto import encrypt_dict_secrets
     data = body.model_dump(exclude_unset=True)
     # Merge config: preserve existing secret values when new value is empty
-    if "config" in data and dest.config:
-        old_cfg = dict(dest.config)
+    # (existing values are stored in encrypted form `enc:vN:...`).
+    if "config" in data:
+        old_cfg = dict(dest.config or {})
         new_cfg = data["config"] or {}
         for key in _SECRET_CONFIG_KEYS:
             if key in old_cfg and (not new_cfg.get(key)):
-                new_cfg[key] = old_cfg[key]
+                new_cfg[key] = old_cfg[key]  # already encrypted; pass through
+        # Encrypt any new plaintext secret values; pass-through already-encrypted ones.
+        new_cfg = encrypt_dict_secrets(new_cfg, extra_keys=_SECRET_CONFIG_KEYS)
         data["config"] = new_cfg
     for key, value in data.items():
         setattr(dest, key, value)
