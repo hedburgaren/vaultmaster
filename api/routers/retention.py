@@ -50,11 +50,25 @@ async def update_policy(policy_id: uuid.UUID, body: RetentionPolicyUpdate, db: A
 
 
 @router.delete("/{policy_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_policy(policy_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_policy(policy_id: uuid.UUID, force: bool = False, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(RetentionPolicy).where(RetentionPolicy.id == policy_id))
     policy = result.scalar_one_or_none()
     if not policy:
         raise HTTPException(status_code=404, detail="Retention policy not found")
+
+    # SPOF guard: jobs that point at this policy would lose rotation.
+    from sqlalchemy import func
+    from api.models.backup_job import BackupJob
+
+    job_count = (await db.execute(
+        select(func.count()).select_from(BackupJob).where(BackupJob.retention_id == policy_id)
+    )).scalar() or 0
+    if job_count > 0 and not force:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{job_count} backup job(s) reference this retention policy. "
+                   f"Reassign them first, or pass ?force=true.",
+        )
     await db.delete(policy)
 
 
