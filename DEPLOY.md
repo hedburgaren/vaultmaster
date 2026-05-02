@@ -443,3 +443,42 @@ Idempotent på `name` — re-run uppdaterar existerande rader. Markera Notion-si
 **Rollback:**
 - Crypto: dropp `credential`-tabellen + ta bort `CREDENTIALS_MASTER_KEYS` ur env. API startar fortsatt.
 - Storage encryption: är defensivt — fallback till plaintext om crypto inte är konfig. Inga manuella steg.
+
+---
+
+## EPIC 3 — Credential UI
+
+Innehåller:
+- `ui/src/components/Toast.tsx` — global toast-system med `<ToastProvider>` + `useToast()`
+- `ui/src/components/ConfirmModal.tsx` — destructive-aware confirm-dialog
+- `ui/src/app/(app)/layout.tsx` — `<ToastProvider>` runt hela appen
+- `ui/src/components/Sidebar.tsx` + `i18n.ts` — ny `Credentials`-flik
+- `ui/src/app/(app)/credentials/page.tsx` — full UI:
+  - Lista med sök, type-filter, tag-filter
+  - Detaljpanel med Info-/Audit-flikar
+  - Reveal-modal med re-auth + 60s auto-clear timer + copy-to-clipboard som rensar efter 30s
+  - Create-modal med show/hide-toggle
+  - Audit-flik visar `audit_log`-rader filtrerade på `resource_type=credential` + `resource_id`
+
+**Deploy:**
+```bash
+cd /srv/containers/vm.hedburgaren.se/ui
+rm -f package-lock.json
+cd ..
+docker compose build ui
+docker compose up -d ui
+```
+
+**Verifiering:**
+1. Logga in i UI, klicka Credentials i sidebar.
+2. Klicka "New" → skapa en test-credential.
+3. Klicka raden, klicka "Reveal", ange ditt password, syfte "test".
+4. Plaintext visas, timer räknar ner från 60. Klicka Copy.
+5. Vänta tills timer går till 0 — plaintext försvinner från DOM.
+6. Klicka Audit-flik på samma credential — se `credential.create` och `credential.reveal` med `purpose=test`.
+7. Försök Reveal med fel password → "Re-auth failed" toast + en `credential.reveal.denied`-rad i audit.
+
+**Begränsningar:**
+- Story 4 ("ersätt alert/confirm globalt"): infrastrukturen finns (`Toast`, `ConfirmModal`) och används i credentials-sidan. Refactor av befintliga `alert()`/`confirm()`-anrop i jobs/artifacts/etc. är scope-utvidgning som förvarvas separat.
+
+**Rollback:** `git revert <commit>` + `docker compose build ui && docker compose up -d ui`. Inga DB-ändringar.
