@@ -75,3 +75,30 @@ seedade DB-raderna kan tas bort via UI eller `DELETE /api/v1/notifications/chann
   eller `server`-tag är ett separat task (kommer i polish-pass).
 - `host.docker.internal` i `bridge_url` förutsätter att docker-compose-filen har
   `extra_hosts: host.docker.internal:host-gateway`. Den raden finns redan i `api`-tjänsten.
+
+### Story 2: Pausa seafile + beslutsdokument
+
+Innehåller:
+- `docs/seafile-backup-strategy.md` — beslutsunderlag (rekommendation: restic)
+- `scripts/pause_job.py` — pausa/återstarta jobb via API + ID-prefix
+
+**Pausa nuvarande seafile-jobbet** (UUID börjar `8d9a5991`):
+
+```bash
+cd /srv/containers/vm.hedburgaren.se
+docker compose exec -T api python -m scripts.pause_job \
+    --base-url http://localhost:8000 \
+    --username chrille \
+    --password '<vm-password>' \
+    --id-prefix 8d9a5991 \
+    --pause
+```
+
+Verifiering:
+- Inga nya retries i `docker compose logs --tail 100 worker`
+- I UI: jobbet visas som inaktivt
+- Celery-kön: `docker compose exec redis redis-cli LLEN backup` ska börja minska om något stack där
+
+**Beslutsdokumentet** (`docs/seafile-backup-strategy.md`) sammanfattar
+rsync vs restic vs seafile-native dump och rekommenderar restic. Läs och
+besluta innan Story 2 task 3 implementeras.
