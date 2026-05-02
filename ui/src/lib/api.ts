@@ -169,3 +169,14 @@ export const getValidations = (params?: string) => apiFetch(`/v1/validations${pa
 export const getLatestValidationsByJob = () => apiFetch('/v1/validations/latest-by-job');
 export const triggerValidation = (jobId: string, data?: any) =>
   apiFetch(`/v1/validations/jobs/${jobId}/trigger`, { method: 'POST', body: JSON.stringify(data || { check_type: 'restore' }) });
+
+// Credentials
+export const getCredentials = (params?: string) => apiFetch(`/v1/credentials${params ? '?' + params : ''}`);
+export const getCredential = (id: string) => apiFetch(`/v1/credentials/${id}`);
+export const createCredential = (data: any) => apiFetch('/v1/credentials', { method: 'POST', body: JSON.stringify(data) });
+export const updateCredential = (id: string, data: any) => apiFetch(`/v1/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const deleteCredential = (id: string) => apiFetch(`/v1/credentials/${id}`, { method: 'DELETE' });
+export const revealCredential = (id: string, password: string, purpose: string) =>
+  apiFetch(`/v1/credentials/${id}/reveal`, { method: 'POST', body: JSON.stringify({ password, purpose }) });
+export const rotateCredentialKey = (id: string) =>
+  apiFetch(`/v1/credentials/${id}/rotate-key`, { method: 'POST' });
