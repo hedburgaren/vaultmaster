@@ -63,6 +63,7 @@ async def _run_backup(task, job_id: str):
         execute_files_backup,
         execute_custom_backup,
     )
+    from api.services.restic_executor import execute_restic_backup
 
     async with get_task_session() as db:
         # Load job and server
@@ -97,6 +98,7 @@ async def _run_backup(task, job_id: str):
                 "docker_volumes": execute_docker_volumes_backup,
                 "files": execute_files_backup,
                 "custom": execute_custom_backup,
+                "restic": execute_restic_backup,
             }
 
             executor = executors.get(job.backup_type)
@@ -110,6 +112,25 @@ async def _run_backup(task, job_id: str):
                 run.size_bytes = result_data.get("size_bytes", 0)
                 run.log_lines = result_data.get("logs", [])
                 run.finished_at = datetime.now(timezone.utc)
+
+                # Restic and similar push-based executors handle their own
+                # storage transfer + retention; skip the rclone path entirely.
+                if result_data.get("skip_transfer"):
+                    meta = result_data.get("metadata") or {}
+                    if meta:
+                        logger.info(f"[{run.id}] push-based backup metadata: {meta}")
+                    await db.commit()
+
+                    from api.services.notifier import notify_event
+                    await notify_event(db, "run.success", {
+                        "job_name": job.name,
+                        "server_name": server.name,
+                        "size_bytes": run.size_bytes,
+                        "duration": str(run.finished_at - run.started_at) if run.finished_at and run.started_at else None,
+                        "snapshot_id": meta.get("snapshot_id"),
+                        "repo_url": meta.get("repo_url"),
+                    })
+                    return
 
                 # --- Transfer file to storage destinations ---
                 from api.models.storage_destination import StorageDestination
