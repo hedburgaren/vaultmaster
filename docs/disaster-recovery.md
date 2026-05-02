@@ -453,10 +453,28 @@ done
 secret som inte får backas tillsammans med data**. Om den läckt eller
 backats med data är hela credential-tabellen oåterhämtbar.
 
-**Off-host-strategi (story `01KQMAMTV9J97YWMXCPYKRJPD3` — TBD):**
-- 1 förseglat kuvert i bankfack (Chrille)
-- 1 kopia hos förtroend-nav (TBD)
-- 1 GPG-krypterad fil hos GitHub Secret eller Bitwarden Personal Vault
+**Off-host-strategi:**
+- 1 GPG-krypterad fil i bankfack (USB + utskriven QR-code)
+- 1 kopia i förtroend-nav lösenordshanterare (1Password / Bitwarden)
+- 1 fil hos en betrodd person med separat passphrase
+
+**Skapa GPG-krypterad backup:**
+```bash
+cd /srv/containers/vm.hedburgaren.se
+BACKUP_PASSPHRASE='<≥16-tecken stark recovery-passphrase som du KOM IHÅG separat>' \
+    python3 -m scripts.backup_master_key \
+    --output /srv/archive/master-key-$(date +%Y-%m-%d).asc
+
+# Verifiera att den går att dekryptera direkt:
+echo "$BACKUP_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+    --passphrase-fd 0 -d /srv/archive/master-key-2026-05-02.asc
+```
+
+**Cadens:** ny kopia varje gång `CREDENTIALS_MASTER_KEYS` roteras (lägg
+till en v2-nyckel) eller minst en gång om året. Föråldrade kopior
+behöver INTE förstöras — alla versioner är fortfarande giltiga via
+MultiFernet, så en gammal recovery fungerar (men decryptar inte
+post-rotation-data).
 
 Vid recovery:
 ```bash
