@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
@@ -161,11 +161,26 @@ async def update_server(server_id: uuid.UUID, body: ServerUpdate, db: AsyncSessi
 
 
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_server(server_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_server(server_id: uuid.UUID, force: bool = False, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Server).where(Server.id == server_id))
     server = result.scalar_one_or_none()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+
+    # SPOF guard: refuse if active backup jobs still target this server.
+    from api.models.backup_job import BackupJob
+    job_count = (await db.execute(
+        select(func.count()).select_from(BackupJob).where(
+            BackupJob.server_id == server_id,
+            BackupJob.is_active == True,
+        )
+    )).scalar() or 0
+    if job_count > 0 and not force:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{job_count} active backup job(s) target this server. "
+                   f"Disable or reassign them first, or pass ?force=true.",
+        )
     await db.delete(server)
 
 

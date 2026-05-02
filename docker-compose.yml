@@ -40,6 +40,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - /srv/archive/wal/vaultmaster:/var/lib/postgresql/wal-archive
     ports:
       - "127.0.0.1:5433:5432"
     healthcheck:

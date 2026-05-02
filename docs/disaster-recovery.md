@@ -207,16 +207,106 @@ mellan storage och DB.
 
 ### 3.4 Postgres point-in-time recovery (PITR)
 
-**Status: ej aktiverat idag.** Vi har dagliga pgdump:s, vilket ger upp
-till 24h dataförlust. För PITR krävs WAL-archiving.
+**Status:** AKTIVERAT på `vaultmaster-db` 2026-05-02. Övriga DB:er (Odoo×4,
+n8n, NocoDB) väntar separat aktiveringsbeslut.
 
-Plan i EPIC 7 Story `01KQMAMTV8E2NZD3NDPX077769`:
-- Aktivera `archive_mode=on` på alla Postgres-containers
-- `archive_command='cp %p /var/lib/postgresql/wal-archive/%f'`
-- Bind-mount wal-archive på /mnt/wal/<dbname>
-- Backup wal-archive-katalogen via VaultMaster files-jobb
+#### 3.4.1 Hur det är konfigurerat (vaultmaster-db)
 
-Tills aktiverat: max RPO är 24h.
+```
+archive_mode = on
+archive_command = test ! -f /var/lib/postgresql/wal-archive/%f \
+                  && cp %p /var/lib/postgresql/wal-archive/%f
+wal_level = replica
+```
+
+Bind-mount: `/srv/archive/wal/vaultmaster:/var/lib/postgresql/wal-archive`.
+WAL-segment är 16 MB, växlar typiskt en gång per bytt heltal av tid +
+beroende på DB-load.
+
+**Dagligt forcerat byte** (sätt på via cron eller VaultMaster-jobb):
+```sql
+SELECT pg_switch_wal();
+```
+
+**Diskutrymme:** 16 MB per segment. Vid normal låg DB-load:
+~5-50 MB/dag. Auto-prune via `pg_archivecleanup` när ny base-backup
+tagits.
+
+#### 3.4.2 Base-backup (kombinera med WAL för full PITR)
+
+För att restora till specifik tidpunkt behövs en **base-backup** + alla
+WAL-segment efter den. Kör från host (inte från i containern):
+
+```bash
+PGPASSWORD="$(grep ^POSTGRES_PASSWORD /srv/containers/vm.hedburgaren.se/.env | cut -d= -f2)" \
+  pg_basebackup -h 127.0.0.1 -p 5433 -U vaultmaster \
+    -D /srv/archive/basebackup/vaultmaster-$(date +%Y%m%d) \
+    -Ft -z -P
+```
+
+(`pg_basebackup` finns i `postgresql-client-16`-paketet på Ubuntu.)
+
+**Schema:** ta en base-backup veckovis. Old base-backups + tillhörande
+WAL-segment kan rensas månadsvis.
+
+#### 3.4.3 PITR — restore till specifik tidpunkt
+
+**Riktning:** Stoppa target DB, lägg base-backup på plats, lägg
+WAL-segmenten i `pg_wal/`, sätt `recovery_target_time`, starta DB.
+
+```bash
+TARGET="2026-05-02 14:30:00 CEST"
+RESTORE_DIR=/srv/restore/vaultmaster
+
+# 1. Stop DB
+cd /srv/containers/vm.hedburgaren.se && docker compose stop db
+
+# 2. Move current pgdata aside (keep as fallback)
+sudo mv /srv/docker/volumes/vmhedburgarense_pgdata/_data \
+        /srv/docker/volumes/vmhedburgarense_pgdata/_data.before-pitr
+
+# 3. Restore base-backup
+sudo mkdir -p /srv/docker/volumes/vmhedburgarense_pgdata/_data
+sudo tar -xzf /srv/archive/basebackup/vaultmaster-LATEST/base.tar.gz \
+        -C /srv/docker/volumes/vmhedburgarense_pgdata/_data
+sudo chown -R 70:70 /srv/docker/volumes/vmhedburgarense_pgdata/_data
+
+# 4. Tell postgres how to fetch WAL + when to stop
+cat | sudo tee /srv/docker/volumes/vmhedburgarense_pgdata/_data/postgresql.auto.conf <<EOF
+restore_command = 'cp /var/lib/postgresql/wal-archive/%f %p'
+recovery_target_time = '$TARGET'
+recovery_target_action = 'pause'
+EOF
+sudo touch /srv/docker/volumes/vmhedburgarense_pgdata/_data/recovery.signal
+
+# 5. Start DB and watch the recovery proceed
+docker compose start db
+docker compose logs -f db | grep -iE "recovery|restored|target reached"
+
+# 6. When recovery_target_time is reached, postgres pauses. Verify state:
+docker compose exec db psql -U vaultmaster -d vaultmaster -c \
+  "SELECT now(), max(created_at) FROM audit_log"
+
+# 7. Promote (commit recovery — irreversible past this point!):
+docker compose exec db psql -U vaultmaster -d vaultmaster -c \
+  "SELECT pg_wal_replay_resume()"
+
+# Or roll back to pre-PITR if recovery looks wrong:
+docker compose stop db
+sudo rm -rf /srv/docker/volumes/vmhedburgarense_pgdata/_data
+sudo mv /srv/docker/volumes/vmhedburgarense_pgdata/_data.before-pitr \
+        /srv/docker/volumes/vmhedburgarense_pgdata/_data
+docker compose start db
+```
+
+**RPO efter PITR-aktivering:** ≤ 1 minut (begränsat av WAL-segment-storlek).
+**RTO för PITR-restore:** 15-45 min beroende på DB-storlek.
+
+#### 3.4.4 Replikering till andra DB:er
+
+För Odoo×4, n8n, NocoDB: identisk setup men anpassa volym-paths. Story
+`01KQMAMTV8E2NZD3NDPX077769` täcker rollout till de andra DB:erna när
+detta första experiment är validerat (drill D4).
 
 ### 3.5 Docker-only services (n8n, NocoDB, Discord-bridge etc.)
 

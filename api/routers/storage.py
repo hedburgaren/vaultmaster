@@ -126,11 +126,37 @@ async def update_storage(storage_id: uuid.UUID, body: StorageDestinationUpdate, 
 
 
 @router.delete("/{storage_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[_auth])
-async def delete_storage(storage_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_storage(storage_id: uuid.UUID, force: bool = False, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(StorageDestination).where(StorageDestination.id == storage_id))
     dest = result.scalar_one_or_none()
     if not dest:
         raise HTTPException(status_code=404, detail="Storage destination not found")
+
+    # SPOF guard: refuse if backup jobs reference this destination, or
+    # any non-deleted artifact is stored on it.
+    from sqlalchemy import func, cast
+    from sqlalchemy.dialects.postgresql import ARRAY
+    from sqlalchemy.types import String as SAString
+    from api.models.backup_job import BackupJob
+    from api.models.backup_artifact import BackupArtifact
+
+    job_count = (await db.execute(
+        select(func.count()).select_from(BackupJob).where(
+            BackupJob.destination_ids.any(storage_id)
+        )
+    )).scalar() or 0
+    art_count = (await db.execute(
+        select(func.count()).select_from(BackupArtifact).where(
+            BackupArtifact.storage_id == storage_id,
+            BackupArtifact.is_deleted == False,
+        )
+    )).scalar() or 0
+    if (job_count or art_count) and not force:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Storage in use: {job_count} job(s) and {art_count} live artifact(s). "
+                   f"Reassign jobs and clean artifacts first, or pass ?force=true.",
+        )
     await db.delete(dest)
 
 
