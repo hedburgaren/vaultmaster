@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Block accidental commits of secret-bearing files.
+# Triggered by: any `git commit` (including via tooling).
+# Bypass (only when intentionally committing examples/docs):
+#   git commit --no-verify
+
+set -euo pipefail
+
+red()   { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
+yellow(){ printf '\033[0;33m%s\033[0m\n' "$*" >&2; }
+
+# 1. Filename blocklist — never commit these regardless of contents.
+BLOCKED_PATTERNS=(
+  '^\.env$'
+  '^\.env\.[^.]+$'                 # .env.local, .env.production, etc — but NOT .env.example
+  '^\.env\.bak.*'
+  '^\.env\.backup.*'
+  '\.env\.bak[^/]*$'               # any .env.bak* anywhere in tree
+  '^.*\.bak[0-9_-]*$'              # *.bak, *.bak-20260502, etc
+  '^.*credentials.*\.json$'
+  '^.*\.pem$'
+  '^.*\.key$'
+  '^id_rsa$'
+  '^id_ed25519$'
+)
+
+# Allowlist (files that match blocked patterns but are genuinely safe to commit)
+ALLOW_PATTERNS=(
+  '^\.env\.example$'
+  '^ui/\.env\.example$'
+  '^.*\.example$'
+  '^.*\.sample$'
+)
+
+is_allowed() {
+  local f="$1"
+  for p in "${ALLOW_PATTERNS[@]}"; do
+    if [[ "$f" =~ $p ]]; then return 0; fi
+  done
+  return 1
+}
+
+violations=()
+
+# Get list of staged files (Added or Modified)
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=AM 2>/dev/null || true)
+
+for file in "${STAGED[@]}"; do
+  [[ -z "$file" ]] && continue
+  if is_allowed "$file"; then continue; fi
+  for pat in "${BLOCKED_PATTERNS[@]}"; do
+    if [[ "$file" =~ $pat ]]; then
+      violations+=("$file (matched: $pat)")
+      break
+    fi
+  done
+done
+
+# 2. Content scan — high-entropy / known-secret patterns in the diff itself.
+# Only checks +added lines, not removed.
+DIFF_OUT=$(git diff --cached --diff-filter=AM -U0 2>/dev/null || true)
+
+declare -A CONTENT_RULES=(
+  ['Anthropic API key']='sk-ant-[A-Za-z0-9_-]{20,}'
+  ['OpenAI API key']='sk-[A-Za-z0-9]{20,}'
+  ['GitHub PAT (classic)']='ghp_[A-Za-z0-9]{20,}'
+  ['GitHub PAT (fine-grained)']='github_pat_[A-Za-z0-9_]{20,}'
+  ['Slack token']='xox[baprs]-[A-Za-z0-9-]{10,}'
+  ['Discord bot token']='[MN][A-Za-z0-9_-]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}'
+  ['AWS access key']='AKIA[0-9A-Z]{16}'
+  ['Generic password assignment']='(?i)(password|passwd|secret_key)[[:space:]]*=[[:space:]]*['\''\"]?[A-Za-z0-9_/+=!@#$%^&*-]{16,}['\''\"]?'
+  ['Postgres URL with embedded password']='postgres(ql)?(\+asyncpg)?://[^:@/]+:[^@/[:space:]]{8,}@'
+  ['Fernet/CREDENTIALS_MASTER_KEYS-style']='v[0-9]+:[A-Za-z0-9_-]{40,}={0,2}'
+)
+
+while IFS= read -r line; do
+  [[ "${line:0:1}" != "+" ]] && continue        # only added lines
+  [[ "${line:0:3}" == "+++" ]] && continue       # skip diff file headers
+  for label in "${!CONTENT_RULES[@]}"; do
+    if echo "$line" | grep -Pq "${CONTENT_RULES[$label]}"; then
+      violations+=("CONTENT: $label found in diff: ${line:0:100}")
+    fi
+  done
+done <<< "$DIFF_OUT"
+
+if (( ${#violations[@]} > 0 )); then
+  red "✖ pre-commit hook blocked this commit. Found:"
+  for v in "${violations[@]}"; do
+    red "   • $v"
+  done
+  echo
+  yellow "If you really mean to commit this (e.g. an example file or rotated/dead value):"
+  yellow "  • move the file to an allowlisted name (.env.example, *.sample)"
+  yellow "  • or as a last resort: git commit --no-verify"
+  exit 1
+fi
+
+exit 0
