@@ -109,6 +109,37 @@ async def update_user(user_id: uuid.UUID, body: UserUpdate, admin: User = Depend
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    is_self = user.id == admin.id
+
+    # Self-protection: an admin cannot strip their own admin/active status
+    # in a single request. The lock-yourself-out scenario from 2026-05-02
+    # took down the entire system because there was only one admin.
+    if is_self and body.is_active is False:
+        raise HTTPException(status_code=400, detail="You cannot deactivate yourself.")
+    if is_self and body.role is not None and body.role != "admin":
+        raise HTTPException(status_code=400, detail="You cannot demote yourself from admin.")
+
+    # Last-admin-standing protection: if this update would remove the
+    # last active admin, refuse.
+    will_lose_admin = (
+        (body.role is not None and body.role != "admin" and user.is_admin)
+        or (body.is_active is False and user.is_admin and user.is_active)
+    )
+    if will_lose_admin:
+        result = await db.execute(
+            select(User).where(
+                User.is_admin == True,
+                User.is_active == True,
+                User.id != user.id,
+            )
+        )
+        other_admins = result.scalars().all()
+        if not other_admins:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot remove the last active admin. Create another admin first.",
+            )
+
     if body.role is not None:
         if body.role not in ("admin", "operator", "viewer"):
             raise HTTPException(status_code=400, detail="Role must be admin, operator, or viewer")
