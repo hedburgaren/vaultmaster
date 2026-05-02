@@ -170,3 +170,33 @@ Och i VaultMaster: `BackupRun` visar `success` med `size_bytes` =
 `git revert` på commit 1f2a3b4 (eller motsvarande) plus `docker compose
 build api worker beat`. Restic-repon på dest påverkas inte av rollback —
 de är källkod-oberoende och kan användas via `restic` CLI direkt.
+
+### Story 3: Felmeddelanden visar verklig felorsak
+
+Innehåller:
+- `api/tasks/backup_tasks.py` — retry-meddelandet bär nu exc + senaste error-log som kontext
+- `api/routers/dashboard.py` — `recent_errors` joinar job + server, lägger till `last_log` och `retry_count`
+- `ui/src/components/Topbar.tsx` — full notifikations-info, klickbar → `/runs?expand=<id>`
+- `ui/src/app/(app)/runs/page.tsx` — auto-expand + scroll till rad från URL-param
+
+**Deploy:**
+
+```bash
+cd /srv/containers/vm.hedburgaren.se
+git pull
+docker compose build api worker beat ui   # ui rebuilds Next.js bundle
+docker compose up -d
+```
+
+**Verifiering:**
+
+1. Skapa eller pausa ett jobb så det failar (eller använd test-restore-failure).
+2. Vänta tills `BackupRun.status='failed'` syns i dashboard.
+3. Öppna VaultMaster i browsern → klicka på klock-ikonen i Topbar.
+4. En notis ska visa: jobnamn, server, full felorsak (på flera rader), och en sekundär grå rad med `last_log` om olika från error.
+5. Klick på notisen → navigerar till `/runs?expand=<id>`, raden auto-expanderas och scrollas in i view.
+
+**Förväntad förändring i Celery-loggar:**
+
+Före: `Retrying in 60s.`
+Efter: `Retrying [retry 1/3 in 60s] tar failed: file changed during read | last log: ...`

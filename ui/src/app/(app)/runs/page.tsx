@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, useEffect, useState, useMemo } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { getRuns, cancelRun, getJobs } from '@/lib/api';
 import { formatBytes, formatDate, formatRelative } from '@/lib/utils';
 import Badge from '@/components/Badge';
@@ -9,11 +10,18 @@ import { useT } from '@/lib/i18n';
 
 export default function RunsPage() {
   const t = useT();
+  const searchParams = useSearchParams();
+  const expandFromUrl = searchParams.get('expand');
   const [runs, setRuns] = useState<any[]>([]);
   const [jobs, setJobs] = useState<any[]>([]);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(() => expandFromUrl ? new Set([expandFromUrl]) : new Set());
   const load = () => { getRuns().then(setRuns).catch(() => {}); };
   useEffect(() => { load(); getJobs().then(setJobs).catch(() => {}); const i = setInterval(load, 10000); return () => clearInterval(i); }, []);
+  useEffect(() => {
+    if (!expandFromUrl) return;
+    const el = document.getElementById(`run-${expandFromUrl}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [expandFromUrl, runs.length]);
 
   const jobMap = useMemo(() => {
     const m: Record<string, string> = {};
@@ -60,7 +68,7 @@ export default function RunsPage() {
               const lastError = r.log_lines?.filter((l: any) => l.level === 'error').pop();
               return (
                 <Fragment key={r.id}>
-                  <tr onClick={() => toggleExpand(r.id)} className={`border-b border-vm-border/50 hover:bg-vm-surface2 transition-colors cursor-pointer ${isExpanded ? 'bg-vm-surface2' : ''}`}>
+                  <tr id={`run-${r.id}`} onClick={() => toggleExpand(r.id)} className={`border-b border-vm-border/50 hover:bg-vm-surface2 transition-colors cursor-pointer ${isExpanded ? 'bg-vm-surface2' : ''}`}>
                     <td className="px-4 py-3"><Badge status={r.status} /></td>
                     <td className="px-4 py-3 font-mono text-xs text-vm-text-bright">{jobMap[r.job_id] || <span className="text-vm-text-dim">{r.job_id?.slice(0, 8)}</span>}</td>
                     <td className="px-4 py-3 font-mono text-xs text-vm-text-dim">{formatDate(r.started_at)}</td>
