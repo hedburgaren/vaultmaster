@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 # ── Server ──
@@ -116,6 +116,11 @@ class StorageDestinationOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("config")
+    def _mask_secrets(self, v: dict, _info) -> dict:
+        from api.services.credentials_crypto import mask_dict_secrets
+        return mask_dict_secrets(dict(v or {})) or {}
 
 
 # ── Backup Job ──

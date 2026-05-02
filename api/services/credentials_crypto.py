@@ -150,3 +150,79 @@ def reset_crypto_for_tests() -> None:
     global _instance
     with _lock:
         _instance = None
+
+
+# ── Helpers for in-place dict encryption (e.g. StorageDestination.config) ──
+SECRET_FIELD_NAMES = {
+    "password",
+    "secret_access_key",
+    "secret_key",
+    "access_key_secret",
+    "oauth_token",
+    "refresh_token",
+    "client_secret",
+    "api_secret",
+    "private_key",
+    "smtp_password",
+    "bot_token",
+}
+
+_ENC_PREFIX = "enc:v"
+
+
+def encrypt_dict_secrets(d: dict | None, extra_keys: set[str] | None = None) -> dict | None:
+    """Encrypt sensitive values in a config dict in place.
+
+    Sensitive values become "enc:v<N>:<base64-token>". Already-encrypted
+    values are passed through. Non-sensitive fields are untouched.
+    """
+    if not d:
+        return d
+    crypto = get_crypto()
+    keys = SECRET_FIELD_NAMES | (extra_keys or set())
+    for k, v in list(d.items()):
+        if k.lower() not in keys:
+            continue
+        if not isinstance(v, str):
+            continue
+        if v.startswith(_ENC_PREFIX):
+            continue
+        token, ver = crypto.encrypt(v)
+        d[k] = f"{_ENC_PREFIX}{ver}:{token.decode('ascii')}"
+    return d
+
+
+def decrypt_dict_secrets(d: dict | None) -> dict | None:
+    """Decrypt any 'enc:vN:...'-prefixed string values in a dict in place."""
+    if not d:
+        return d
+    crypto = get_crypto()
+    for k, v in list(d.items()):
+        if not isinstance(v, str) or not v.startswith(_ENC_PREFIX):
+            continue
+        # Strip "enc:vN:" prefix
+        try:
+            _, _vN, token = v.split(":", 2)
+            d[k] = crypto.decrypt(token.encode("ascii"))
+        except Exception:
+            # Best-effort: leave malformed value alone rather than blow up
+            pass
+    return d
+
+
+def mask_dict_secrets(d: dict | None) -> dict | None:
+    """Return a copy of the dict where encrypted values are masked as '****'.
+
+    Used by GET endpoints so secrets never leave the server even in the
+    base64-encrypted form.
+    """
+    if not d:
+        return d
+    out = dict(d)
+    for k, v in out.items():
+        if isinstance(v, str) and v.startswith(_ENC_PREFIX):
+            out[k] = "********"
+        elif k.lower() in SECRET_FIELD_NAMES and isinstance(v, str) and v:
+            # Plaintext sensitive value (legacy / not yet migrated) — also mask.
+            out[k] = "********"
+    return out
