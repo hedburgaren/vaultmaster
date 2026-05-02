@@ -259,6 +259,7 @@ async def notify_event(db, event: str, data: dict):
         "validation.skipped": "Backup Validation Skipped",
         "credential.expiring": "Credential Expiring",
         "credential.expired": "Credential Expired",
+        "backup.anomaly": "Backup Anomaly Detected",
     }
 
     subject = subject_map.get(event, event)
@@ -305,5 +306,13 @@ def _format_event_message(event: str, data: dict) -> str:
                 f"Name: {data.get('name', 'N/A')}\n"
                 f"Type: {data.get('credential_type', 'N/A')}\n"
                 f"Expired: {data.get('expires_at', 'N/A')}")
+    elif event == "backup.anomaly":
+        return (f"🤖 Backup anomaly detected\n"
+                f"Job: {data.get('job_name', 'N/A')}\n"
+                f"Type: {data.get('anomaly', 'unknown')}\n"
+                f"Latest size: {data.get('latest_size', 0):,} bytes\n"
+                f"Mean over last {data.get('window', 7)} runs: {data.get('mean_size', 0):,.0f} bytes\n"
+                f"Δ: {data.get('delta_pct', 0):+.1f}%  ({data.get('z_score', 0):+.2f}σ)\n"
+                f"Possible cause: {data.get('hypothesis', 'investigate manually')}")
     else:
         return str(data)
