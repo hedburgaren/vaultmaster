@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, Text, func
+from sqlalchemy import String, DateTime, Text, Index, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,3 +21,10 @@ class AuditLog(Base):
     meta: Mapped[dict | None] = mapped_column(JSONB, default=dict)
     ip_address: Mapped[str | None] = mapped_column(String(45))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # The audit-router sorts by created_at DESC + LIMIT 50 on every
+    # /api/v1/audit hit. Without this index that's a Seq Scan + Sort on
+    # the whole table. Migration 0005 creates the matching DB index.
+    __table_args__ = (
+        Index("ix_audit_log_created_at", created_at.desc()),
+    )
