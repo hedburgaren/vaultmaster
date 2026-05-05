@@ -9,7 +9,7 @@ import hashlib
 from datetime import datetime, timezone
 
 from fastapi import Header, HTTPException, status, Depends
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
@@ -37,7 +37,19 @@ async def get_mcp_client(
     if client.expires_at and client.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=403, detail="MCP client key expired")
 
-    client.last_used_at = datetime.now(timezone.utc)
-    client.use_count = (client.use_count or 0) + 1
+    # Bug #21: atomic UPDATE prevents lost-increment under concurrent calls.
+    # Tidigare: read use_count, +1, flush — två requests samtidigt såg samma
+    # värde och båda skrev tillbaka N+1 i stället för N+2. The returned
+    # `client` ORM-object is best-effort stale on use_count (callers only
+    # rely on `id`/`name`/`is_active`); the persisted row is correct.
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(MCPClient)
+        .where(MCPClient.id == client.id)
+        .values(
+            last_used_at=now,
+            use_count=MCPClient.use_count + 1,
+        )
+    )
     await db.flush()
     return client

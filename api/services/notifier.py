@@ -255,7 +255,18 @@ async def _send_email(config: dict, subject: str, message: str) -> tuple[bool, s
 
 
 async def notify_event(db, event: str, data: dict):
-    """Send notifications for a specific event trigger to all matching channels."""
+    """Send notifications for a specific event trigger to all matching channels.
+
+    Bug #17: muterar ``channel.last_sent`` så att vi kan visa "senast skickad"
+    i UI. Tidigare litades på caller att committa, vilket innebar att om
+    callern senare gjorde en rollback (t.ex. `_check_health` som upptäcker
+    server-offline → notify → exception) försvann uppdateringen. Vi committar
+    nu uppdateringen explicit i ett fristående block.
+
+    Bug #24: SMTP/HTTP-anrop sker parallellt med ``asyncio.gather`` så att
+    en seg kanal (timeout 20s) inte blockerar resten. Tidigare var det
+    sekventiellt — N kanaler × timeout = total wall-clock blocker.
+    """
     from sqlalchemy import select
     from api.models.notification_channel import NotificationChannel
 
@@ -289,11 +300,37 @@ async def notify_event(db, event: str, data: dict):
     subject = subject_map.get(event, event)
     message = _format_event_message(event, data)
 
-    for channel in channels:
-        success, msg = await send_notification(channel, subject, message)
+    if not channels:
+        return
+
+    # Bug #24: parallel dispatch. SMTP is the worst offender (20s timeout),
+    # but bridges and webhooks add up too. return_exceptions=True so that
+    # one failed channel does not abort the rest.
+    import asyncio
+    results = await asyncio.gather(
+        *(send_notification(channel, subject, message) for channel in channels),
+        return_exceptions=True,
+    )
+
+    any_success = False
+    for channel, res in zip(channels, results):
+        if isinstance(res, BaseException):
+            logger.error(f"Notification {channel.name} ({channel.channel_type}): exception {res!r}")
+            continue
+        success, msg = res
         if success:
             channel.last_sent = datetime.now(timezone.utc)
+            any_success = True
         logger.info(f"Notification {channel.name} ({channel.channel_type}): {msg}")
+
+    # Bug #17: commit the last_sent updates ourselves. Otherwise a caller
+    # rollback (or a later exception in the same transaction) silently
+    # erases the audit trail of "we did send these".
+    if any_success:
+        try:
+            await db.commit()
+        except Exception as exc:
+            logger.warning(f"notify_event: commit of last_sent updates failed: {exc}")
 
 
 def _format_event_message(event: str, data: dict) -> str:
