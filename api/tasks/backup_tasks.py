@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 def _run_async(coro):
     """Helper to run async code from sync Celery tasks."""
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(coro)
     finally:
@@ -46,13 +47,13 @@ async def get_task_session():
 
 
 @celery_app.task(bind=True, name="api.tasks.backup_tasks.run_backup_task", max_retries=3)
-def run_backup_task(self, job_id: str):
+def run_backup_task(self, job_id: str, triggered_by: str = "manual"):
     """Execute a backup job."""
-    _run_async(_run_backup(self, job_id))
+    _run_async(_run_backup(self, job_id, triggered_by))
 
 
-async def _run_backup(task, job_id: str):
-    from sqlalchemy import select
+async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
+    from sqlalchemy import select, text
     from api.models.backup_job import BackupJob
     from api.models.backup_run import BackupRun
     from api.models.server import Server
@@ -66,6 +67,22 @@ async def _run_backup(task, job_id: str):
     from api.services.restic_executor import execute_restic_backup
 
     async with get_task_session() as db:
+        # Advisory lock per job_id — prevents two concurrent task deliveries
+        # from racing on the same backup job (visibility_timeout redelivery,
+        # manual + scheduler overlap, etc). Transaction-level lock — released
+        # automatically at the next commit/rollback. NOTE: this guards the
+        # initial run-record creation only; if duplicate prevention is needed
+        # for the entire job duration, switch to pg_try_advisory_lock (session)
+        # plus an explicit pg_advisory_unlock in the finally-block.
+        job_uuid = uuid.UUID(job_id)
+        lock_key = int.from_bytes(job_uuid.bytes[:8], "big", signed=True)
+        got_lock = (await db.execute(
+            text("SELECT pg_try_advisory_xact_lock(:k)").bindparams(k=lock_key)
+        )).scalar()
+        if not got_lock:
+            logger.warning(f"Job {job_id} already running (advisory lock held), skipping duplicate task")
+            return
+
         # Load job and server
         result = await db.execute(select(BackupJob).where(BackupJob.id == uuid.UUID(job_id)))
         job = result.scalar_one_or_none()
@@ -85,7 +102,7 @@ async def _run_backup(task, job_id: str):
             server_id=server.id,
             status="running",
             started_at=datetime.now(timezone.utc),
-            triggered_by="manual" if not hasattr(task, '_scheduled') else "scheduler",
+            triggered_by=triggered_by,
         )
         db.add(run)
         await db.commit()
@@ -403,7 +420,7 @@ async def _check_scheduled():
                     existing = run_result.scalar_one_or_none()
                     if not existing:
                         logger.info(f"Triggering scheduled backup: {job.name}")
-                        run_backup_task.delay(str(job.id))
+                        run_backup_task.apply_async(args=[str(job.id)], kwargs={"triggered_by": "scheduler"})
             except Exception as e:
                 logger.error(f"Error checking schedule for job {job.name}: {e}")
 
