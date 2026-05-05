@@ -394,45 +394,90 @@ def check_scheduled_jobs():
 
 
 async def _check_scheduled():
+    """Bug #28: bredare window (300s i st.f. 60s) + Redis SETNX-dedup.
+
+    Tidigare: 60-sekunders window. Om beat-tickern var sen (worker omstart,
+    GC-paus, tung scheduler-tick) eller om ``check-scheduled-jobs`` schemat
+    sköts upp 90s missades körningen helt — *jobbet kördes aldrig den
+    schemalagda timmen*.
+
+    Nu: 300s window + Redis SETNX på ``vm:last_scheduled:<job_id>:<epoch>``
+    (key TTL 1h) så att även om vi triggar två gånger inom samma 5-min-fönster
+    blir bara den första lyckosam — vi förlorar inga schemalagda kör­ningar
+    men fördubblar inte heller.
+    """
     from sqlalchemy import select
     from croniter import croniter
     from api.models.backup_job import BackupJob
     from api.models.backup_run import BackupRun
+
+    redis_client = None
+    try:
+        import redis as _redis  # type: ignore[import-not-found]
+        from api.config import get_settings as _get_settings
+        redis_client = _redis.from_url(_get_settings().redis_url, decode_responses=True)
+    except Exception as exc:
+        logger.warning(f"_check_scheduled: redis unavailable, falling back to DB-only dedup: {exc}")
 
     async with get_task_session() as db:
         result = await db.execute(select(BackupJob).where(BackupJob.is_active == True))
         jobs = result.scalars().all()
 
         now = datetime.now(timezone.utc)
+        WINDOW_SECONDS = 300  # was 60 — too tight if beat is late
 
         for job in jobs:
             try:
                 cron = croniter(job.schedule_cron, now)
                 prev_time = cron.get_prev(datetime)
 
-                # Check if we should have run in the last 60 seconds
-                if (now - prev_time).total_seconds() < 60:
-                    # Skip if this job already has a run still in progress
-                    running_result = await db.execute(
-                        select(BackupRun)
-                        .where(BackupRun.job_id == job.id, BackupRun.status == "running")
-                    )
-                    already_running = running_result.scalar_one_or_none()
-                    if already_running:
-                        logger.info(f"Skipping {job.name} — previous run still in progress (started {already_running.started_at})")
+                if (now - prev_time).total_seconds() >= WINDOW_SECONDS:
+                    continue
+
+                # Skip if this job already has a run still in progress.
+                running_result = await db.execute(
+                    select(BackupRun)
+                    .where(BackupRun.job_id == job.id, BackupRun.status == "running")
+                )
+                already_running = running_result.scalar_one_or_none()
+                if already_running:
+                    logger.info(f"Skipping {job.name} — previous run still in progress (started {already_running.started_at})")
+                    continue
+
+                # DB-side window check — keeps dedup correct even if Redis is down.
+                run_result = await db.execute(
+                    select(BackupRun)
+                    .where(BackupRun.job_id == job.id, BackupRun.created_at >= prev_time)
+                )
+                existing = run_result.scalar_one_or_none()
+                if existing:
+                    continue
+
+                # Redis SETNX dedup — keyed on (job_id, prev_time-epoch) so
+                # a single cron-bucket only triggers once even if multiple
+                # ticks land inside our widened 300s window.
+                if redis_client is not None:
+                    bucket_key = f"vm:last_scheduled:{job.id}:{int(prev_time.timestamp())}"
+                    try:
+                        # NX → only set if absent. EX 3600 → 1h TTL keeps redis tidy.
+                        acquired = redis_client.set(bucket_key, "1", nx=True, ex=3600)
+                    except Exception as exc:
+                        logger.warning(f"_check_scheduled: redis SETNX failed for {job.name}: {exc}; allowing trigger")
+                        acquired = True
+                    if not acquired:
+                        logger.debug(f"_check_scheduled: dedup hit for {job.name} bucket {bucket_key}")
                         continue
 
-                    # Check if we already have a run for this window
-                    run_result = await db.execute(
-                        select(BackupRun)
-                        .where(BackupRun.job_id == job.id, BackupRun.created_at >= prev_time)
-                    )
-                    existing = run_result.scalar_one_or_none()
-                    if not existing:
-                        logger.info(f"Triggering scheduled backup: {job.name}")
-                        run_backup_task.apply_async(args=[str(job.id)], kwargs={"triggered_by": "scheduler"})
+                logger.info(f"Triggering scheduled backup: {job.name}")
+                run_backup_task.apply_async(args=[str(job.id)], kwargs={"triggered_by": "scheduler"})
             except Exception as e:
                 logger.error(f"Error checking schedule for job {job.name}: {e}")
+
+    if redis_client is not None:
+        try:
+            redis_client.close()
+        except Exception:
+            pass
 
 
 @celery_app.task(name="api.tasks.backup_tasks.check_server_health")

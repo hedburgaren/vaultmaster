@@ -23,15 +23,40 @@ def _assign_bucket(dt: datetime) -> dict:
 
 
 async def apply_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str | None = None, storage_id: str | None = None) -> dict:
-    """Apply GFS rotation: keep configured number per time bucket, mark rest as deleted."""
+    """Apply GFS rotation: keep configured number per time bucket, mark rest as deleted.
+
+    Bug #13: explicit UUID cast on job_id (BackupRun.job_id is UUID, str equality
+    silently returns no rows on some dialects). Tom run_ids list short-circuits
+    så vi inte producerar `IN ()` SQL.
+
+    Bug #14: when job has multiple destinations (storage A + storage B), two
+    artifacts from the SAME run share created_at — bucket-keep keeps one and
+    rotation marks the other deleted, even though the user wanted both kept.
+    Caller is now expected to pass storage_id and call once per destination.
+    """
+    import uuid as _uuid
+
     query = select(BackupArtifact).where(BackupArtifact.is_deleted == False)
     if job_id:
         from api.models.backup_run import BackupRun
-        run_ids = await db.execute(select(BackupRun.id).where(BackupRun.job_id == job_id))
-        query = query.where(BackupArtifact.run_id.in_([r for r in run_ids.scalars().all()]))
+        try:
+            job_uuid = _uuid.UUID(str(job_id))
+        except (ValueError, AttributeError, TypeError) as exc:
+            logger.error(f"apply_rotation: invalid job_id {job_id!r}: {exc}")
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+        run_ids_result = await db.execute(select(BackupRun.id).where(BackupRun.job_id == job_uuid))
+        run_ids = list(run_ids_result.scalars().all())
+        if not run_ids:
+            # No runs for this job → nothing to rotate. Avoid `IN ()` SQL error.
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+        query = query.where(BackupArtifact.run_id.in_(run_ids))
     if storage_id:
-        import uuid as _uuid
-        query = query.where(BackupArtifact.storage_id == _uuid.UUID(storage_id))
+        try:
+            storage_uuid = _uuid.UUID(str(storage_id))
+        except (ValueError, AttributeError, TypeError) as exc:
+            logger.error(f"apply_rotation: invalid storage_id {storage_id!r}: {exc}")
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+        query = query.where(BackupArtifact.storage_id == storage_uuid)
 
     result = await db.execute(query.order_by(BackupArtifact.created_at.desc()))
     artifacts = result.scalars().all()
