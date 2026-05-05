@@ -164,7 +164,15 @@ SECRET_FIELD_NAMES = {
     "api_secret",
     "private_key",
     "smtp_password",
+    # Notification-channel secrets (Bug #22). webhook_url is included because
+    # Slack/Discord webhook URLs embed an unauthenticated bearer-equivalent
+    # token in the path — leaking one is functionally identical to leaking
+    # bot_token. chat_id is sensitive only as routing metadata, but treating
+    # it as a secret keeps the surface clean.
     "bot_token",
+    "bridge_token",
+    "webhook_url",
+    "chat_id",
 }
 
 _ENC_PREFIX = "enc:v"
