@@ -262,6 +262,15 @@ class NotificationChannelOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_serializer("config")
+    def _mask_secrets(self, v: dict, _info) -> dict:
+        # Bug #22 — mask sensitive notification-channel fields (bot_token,
+        # bridge_token, webhook_url, chat_id, smtp_password) so the GET
+        # responses don't leak ciphertext or any straggling plaintext that
+        # predates the encryption rollout.
+        from api.services.credentials_crypto import mask_dict_secrets
+        return mask_dict_secrets(dict(v or {})) or {}
+
 
 # ── Backup Validation ──
 class BackupValidationRunOut(BaseModel):

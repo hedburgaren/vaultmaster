@@ -6,6 +6,22 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _decrypt_config(config: dict | None) -> dict:
+    """Return a working copy of `config` with `enc:vN:...`-prefixed values decrypted.
+
+    Always operates on a copy so the SQLAlchemy-loaded dict on the channel
+    object is never mutated in place (which would cause the ORM to re-flush
+    plaintext values back to the database). Falls back to a shallow copy on
+    crypto errors so a missing/rotated key never blocks all notifications.
+    """
+    try:
+        from api.services.credentials_crypto import decrypt_dict_secrets
+        return decrypt_dict_secrets(dict(config or {})) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notifier: decrypt failed (%s) — falling back to raw config", exc)
+        return dict(config or {})
+
+
 async def send_test_notification(channel) -> tuple[bool, str]:
     """Send a test notification through a channel."""
     message = f"🔐 VaultMaster test notification — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
@@ -36,6 +52,7 @@ async def send_notification(channel, subject: str, message: str) -> tuple[bool, 
 
 async def _send_slack(config: dict, subject: str, message: str) -> tuple[bool, str]:
     # Support both webhook_url (classic incoming webhooks) and bot_token + channel (Bot API)
+    config = _decrypt_config(config)
     bot_token = config.get("bot_token")
     channel = config.get("channel")
     webhook_url = config.get("webhook_url")
@@ -62,6 +79,7 @@ async def _send_slack(config: dict, subject: str, message: str) -> tuple[bool, s
 
 
 async def _send_ntfy(config: dict, subject: str, message: str) -> tuple[bool, str]:
+    config = _decrypt_config(config)
     url = config.get("url")
     topic = config.get("topic", "vaultmaster")
     if not url:
@@ -78,6 +96,7 @@ async def _send_ntfy(config: dict, subject: str, message: str) -> tuple[bool, st
 
 
 async def _send_telegram(config: dict, subject: str, message: str) -> tuple[bool, str]:
+    config = _decrypt_config(config)
     bot_token = config.get("bot_token")
     chat_id = config.get("chat_id")
     if not bot_token or not chat_id:
@@ -109,6 +128,7 @@ async def _send_discord(config: dict, subject: str, message: str) -> tuple[bool,
       "embeds_enabled": bool (default True) — render as Discord embed instead of plain content.
       "username": str — webhook-mode only; overrides bot username for the message.
     """
+    config = _decrypt_config(config)
     bridge_url = config.get("bridge_url")
     bridge_token = config.get("bridge_token")
     channel = config.get("channel")
@@ -174,7 +194,10 @@ def _discord_color_for_subject(subject: str) -> int:
 
 
 async def _send_webhook(config: dict, subject: str, message: str) -> tuple[bool, str]:
-    url = config.get("url")
+    config = _decrypt_config(config)
+    # Generic webhook channel uses `url` key; tolerate `webhook_url` too because
+    # decrypt_dict_secrets handles both and the UI sometimes writes either.
+    url = config.get("url") or config.get("webhook_url")
     if not url:
         return False, "No webhook URL configured"
     async with httpx.AsyncClient() as client:
@@ -190,11 +213,7 @@ async def _send_email(config: dict, subject: str, message: str) -> tuple[bool, s
     from email.utils import formataddr
 
     # Decrypt secrets in-flight; .config is stored with `enc:vN:...`-prefixed values.
-    try:
-        from api.services.credentials_crypto import decrypt_dict_secrets
-        config = decrypt_dict_secrets(dict(config or {})) or {}
-    except Exception:
-        config = dict(config or {})
+    config = _decrypt_config(config)
 
     smtp_host = config.get("smtp_host")
     smtp_port = int(config.get("smtp_port", 587) or 587)

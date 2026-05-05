@@ -27,11 +27,55 @@ logger = logging.getLogger(__name__)
 _REDIS_PREFIX = "vm:oauth:"
 _TOKEN_TTL = 600  # seconds
 
+# Bug #15 — wrap the in-flight OAuth payload (which contains client_secret +
+# refresh_token) with the same versioned credentials-master-key crypto used
+# elsewhere in the app. The payload still lives in Redis but a Redis dump,
+# RDB backup, or replica leak no longer hands the attacker plaintext.
+#
+# Long-term TODO: persist client_secret in the Credentials table so it never
+# touches Redis at all. Today the OAuth router doesn't have access to that
+# table during the auth-URL handshake.
+_FLOW_ENC_PREFIX = "encflow:v"
+
 
 def _redis() -> redis.Redis:
     """Get a Redis connection."""
     settings = get_settings()
     return redis.from_url(settings.redis_url, decode_responses=True)
+
+
+def _serialize_flow(flow: dict) -> str:
+    """Encrypt the flow dict with the master-key crypto for Redis storage.
+
+    Falls back to plaintext JSON only if the crypto layer can't be loaded
+    (e.g. missing env in dev) — in that case the caller logs a warning and
+    OAuth still works, which preserves the old behavior we're hardening.
+    """
+    raw = json.dumps(flow)
+    try:
+        from api.services.credentials_crypto import get_crypto
+        token, ver = get_crypto().encrypt(raw)
+        return f"{_FLOW_ENC_PREFIX}{ver}:{token.decode('ascii')}"
+    except Exception as exc:
+        logger.warning("oauth_storage: encrypt unavailable (%s) — storing flow plaintext", exc)
+        return raw
+
+
+def _deserialize_flow(stored: str) -> dict:
+    """Inverse of _serialize_flow. Tolerates legacy plaintext entries."""
+    if stored.startswith(_FLOW_ENC_PREFIX):
+        try:
+            from api.services.credentials_crypto import get_crypto
+            _, _vN, token = stored.split(":", 2)
+            raw = get_crypto().decrypt(token.encode("ascii"))
+            return json.loads(raw)
+        except Exception as exc:
+            logger.error("oauth_storage: decrypt failed (%s)", exc)
+            raise
+    # Legacy plaintext payload — present only briefly during the rollout
+    # since TTL is 10 minutes. Read once, write back encrypted on the next
+    # update.
+    return json.loads(stored)
 
 
 # ── Provider definitions ──
@@ -72,7 +116,7 @@ def start_oauth(provider: str, client_id: str, client_secret: str, base_url: str
         "token": "",
     }
     r = _redis()
-    r.setex(f"{_REDIS_PREFIX}{state}", _TOKEN_TTL, json.dumps(flow))
+    r.setex(f"{_REDIS_PREFIX}{state}", _TOKEN_TTL, _serialize_flow(flow))
 
     params = {
         "client_id": client_id,
@@ -95,7 +139,7 @@ async def handle_callback(state: str, code: str) -> str:
     if not raw:
         return _error_html("OAuth state expired or invalid. Please try again from VaultMaster.")
 
-    flow = json.loads(raw)
+    flow = _deserialize_flow(raw)
     provider = flow["provider"]
     prov = PROVIDERS[provider]
 
@@ -131,7 +175,7 @@ async def handle_callback(state: str, code: str) -> str:
     flow["token"] = json.dumps(rclone_token)
     # Save back with remaining TTL
     ttl = r.ttl(f"{_REDIS_PREFIX}{state}")
-    r.setex(f"{_REDIS_PREFIX}{state}", max(ttl, 60), json.dumps(flow))
+    r.setex(f"{_REDIS_PREFIX}{state}", max(ttl, 60), _serialize_flow(flow))
     logger.info(f"OAuth token obtained for {provider} (state={state[:8]}...)")
 
     return _success_html()
@@ -143,7 +187,13 @@ def get_token(state: str) -> dict:
     raw = r.get(f"{_REDIS_PREFIX}{state}")
     if not raw:
         return {"status": "expired"}
-    flow = json.loads(raw)
+    try:
+        flow = _deserialize_flow(raw)
+    except Exception:
+        # Corrupt/unreadable payload — treat like expired so the frontend
+        # restarts the flow rather than infinite-polling.
+        r.delete(f"{_REDIS_PREFIX}{state}")
+        return {"status": "expired"}
     if not flow.get("token"):
         return {"status": "pending"}
     token = flow["token"]
