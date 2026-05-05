@@ -136,12 +136,18 @@ export default function JobsPage() {
   const handleTrigger = async (id: string) => { await triggerJob(id); alert(t('jobs.backup_queued')); };
   const handleDelete = async (id: string) => { if (confirm(t('jobs.confirm_delete'))) { await deleteJob(id); load(); } };
 
-  // Load databases when server changes and type is database
+  // Load databases when server changes and type is database. Bug #29:
+  // the previous gate was `selectedServer.meta.db_type` — a field
+  // that's optional and missing on most servers, which made the form
+  // permanently show "Servern har ingen databaskonfiguration" even on
+  // jobs that worked perfectly fine. The actual db_type we want is
+  // already known: it's the backup_type the user just picked.
   const loadDatabases = async () => {
-    if (!form.server_id || !selectedServer?.meta?.db_type) return;
+    if (!form.server_id) return;
+    const dbType = selectedServer?.meta?.db_type || form.backup_type || 'postgresql';
     setDbLoading(true); setDbError('');
     try {
-      const res = await getServerDatabases(form.server_id, selectedServer.meta.db_type);
+      const res = await getServerDatabases(form.server_id, dbType);
       if (res.databases?.[0]?.error) { setDbError(res.databases[0].error); setDatabases([]); }
       else { setDatabases(res.databases || []); }
     } catch (e: any) { setDbError(e.message); setDatabases([]); }
@@ -260,40 +266,52 @@ export default function JobsPage() {
               <span className="font-mono text-[10px] text-vm-accent tracking-[2px] uppercase">// {t('jobs.source_config')}</span>
             </div>
             <FormLabel label={t('jobs.db_name')} tooltip={t('jobs.db_name_tip')} />
-            {!selectedServer?.meta?.db_type ? (
-              <div className="font-mono text-xs text-vm-warning p-2 bg-vm-warning/10 border border-vm-warning/30 rounded">{t('jobs.db_no_config')}</div>
-            ) : (
-              <>
-                <div className="flex gap-2 mb-2">
-                  <button type="button" onClick={loadDatabases} disabled={dbLoading} className="flex items-center gap-1.5 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08] disabled:opacity-50">
-                    {dbLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                    {dbLoading ? t('jobs.db_loading') : t('action.run')}
+            {/* Bug #29: previously this branched on `selectedServer.meta.db_type`
+                — a field that's almost never set in practice — and unconditionally
+                showed "Servern har ingen databaskonfiguration" for every existing
+                job. The endpoint /api/v1/servers/{id}/databases is the authority on
+                whether discovery works; we always render the picker, surface
+                already-selected db_names so the form is editable on existing jobs,
+                and only show the warning if discovery actually fails. */}
+            {form.db_names.length > 0 && (
+              <div className="grid grid-cols-2 gap-1.5 mb-2">
+                {form.db_names.map(name => (
+                  <button key={name} type="button" onClick={() => toggleDbName(name)}
+                    className="flex items-center gap-2 px-3 py-2 rounded border font-mono text-[11px] transition-all text-left bg-vm-accent/10 border-vm-accent text-vm-accent">
+                    <span className="w-3 h-3 rounded-sm border bg-vm-accent border-vm-accent flex-shrink-0">
+                      <span className="block w-full h-full text-center text-[8px] text-vm-bg leading-3">✓</span>
+                    </span>
+                    <span className="truncate">{name}</span>
                   </button>
-                  {databases.length > 0 && (
-                    <button type="button" onClick={() => setForm(f => ({ ...f, db_names: databases.map(d => d.name) }))} className="px-3 py-1.5 text-xs font-bold text-vm-text-dim tracking-wider uppercase hover:text-vm-accent">
-                      {t('jobs.db_select_all')}
-                    </button>
-                  )}
-                </div>
-                {dbError && <div className="font-mono text-xs text-vm-danger p-2 bg-vm-danger/10 border border-vm-danger/30 rounded mb-2">{t('jobs.db_error')}: {dbError}</div>}
-                {databases.length > 0 && (
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {databases.map(db => (
-                      <button key={db.name} type="button" onClick={() => toggleDbName(db.name)}
-                        className={`flex items-center gap-2 px-3 py-2 rounded border font-mono text-[11px] transition-all text-left ${form.db_names.includes(db.name) ? 'bg-vm-accent/10 border-vm-accent text-vm-accent' : 'bg-vm-surface border-vm-border text-vm-text-dim hover:border-vm-accent/50'}`}>
-                        <span className={`w-3 h-3 rounded-sm border flex-shrink-0 ${form.db_names.includes(db.name) ? 'bg-vm-accent border-vm-accent' : 'border-vm-border'}`}>
-                          {form.db_names.includes(db.name) && <span className="block w-full h-full text-center text-[8px] text-vm-bg leading-3">✓</span>}
-                        </span>
-                        <span className="truncate">{db.name}</span>
-                        {db.size_bytes > 0 && <span className="ml-auto text-[10px] text-vm-text-dim flex-shrink-0">{formatBytes(db.size_bytes)}</span>}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {databases.length === 0 && !dbLoading && !dbError && (
-                  <div className="font-mono text-xs text-vm-text-dim py-2">{t('jobs.db_loading')} — {t('action.run')}</div>
-                )}
-              </>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2 mb-2">
+              <button type="button" onClick={loadDatabases} disabled={dbLoading} className="flex items-center gap-1.5 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08] disabled:opacity-50">
+                {dbLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                {dbLoading ? t('jobs.db_loading') : t('action.run')}
+              </button>
+              {databases.length > 0 && (
+                <button type="button" onClick={() => setForm(f => ({ ...f, db_names: databases.map(d => d.name) }))} className="px-3 py-1.5 text-xs font-bold text-vm-text-dim tracking-wider uppercase hover:text-vm-accent">
+                  {t('jobs.db_select_all')}
+                </button>
+              )}
+            </div>
+            {dbError && <div className="font-mono text-xs text-vm-warning p-2 bg-vm-warning/10 border border-vm-warning/30 rounded mb-2">{dbError}</div>}
+            {databases.length > 0 && (
+              <div className="grid grid-cols-2 gap-1.5">
+                {databases.filter(db => !form.db_names.includes(db.name)).map(db => (
+                  <button key={db.name} type="button" onClick={() => toggleDbName(db.name)}
+                    className="flex items-center gap-2 px-3 py-2 rounded border font-mono text-[11px] transition-all text-left bg-vm-surface border-vm-border text-vm-text-dim hover:border-vm-accent/50">
+                    <span className="w-3 h-3 rounded-sm border border-vm-border flex-shrink-0" />
+                    <span className="truncate">{db.name}</span>
+                    {db.size_bytes > 0 && <span className="ml-auto text-[10px] text-vm-text-dim flex-shrink-0">{formatBytes(db.size_bytes)}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+            {databases.length === 0 && !dbLoading && !dbError && form.db_names.length === 0 && (
+              <div className="font-mono text-xs text-vm-text-dim py-2">{t('jobs.db_no_config_hint') || `${t('jobs.db_loading')} — ${t('action.run')}`}</div>
             )}
           </div>
         );
