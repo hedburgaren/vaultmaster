@@ -23,6 +23,12 @@ class BackupRun(Base):
     triggered_by: Mapped[str] = mapped_column(String(50), default="scheduler")  # scheduler, manual, retry
     retry_count: Mapped[int] = mapped_column(default=0)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Celery task id for the AsyncResult backing this run. Populated when
+    # _run_backup creates the run-record so /runs/{id}/cancel can issue a
+    # `celery_app.control.revoke(..., terminate=True)` instead of only
+    # flipping DB status (Bug #12). NULL on legacy rows + on the in-flight
+    # run that pre-dates the migration.
+    celery_task_id: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
