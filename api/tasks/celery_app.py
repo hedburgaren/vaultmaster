@@ -29,6 +29,11 @@ celery_app.conf.update(
         "api.tasks.credential_tasks.*": {"queue": "notification"},
         "api.tasks.cleanup_tasks.*": {"queue": "rotation"},
     },
+    broker_transport_options={
+        "visibility_timeout": 86400,  # 24h — backup-jobb kan ta länge
+    },
+    task_time_limit=43200,        # hard kill efter 12h
+    task_soft_time_limit=39600,   # graceful efter 11h (raises SoftTimeLimitExceeded)
     beat_schedule={
         "check-scheduled-jobs": {
             "task": "api.tasks.backup_tasks.check_scheduled_jobs",
