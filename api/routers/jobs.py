@@ -89,7 +89,7 @@ async def trigger_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     from api.tasks.backup_tasks import run_backup_task
-    task = run_backup_task.delay(str(job_id))
+    task = run_backup_task.apply_async(args=[str(job_id)], kwargs={"triggered_by": "manual"})
     return {"task_id": task.id, "status": "queued", "job_id": str(job_id)}
 
 
