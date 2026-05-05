@@ -138,20 +138,63 @@ async def run_remote_command(server, command: str, timeout: int = 300) -> tuple[
 
     kwargs = _build_connect_kwargs(server)
 
+    async def _do_one_attempt() -> tuple[int, str, str]:
+        async with asyncssh.connect(**kwargs) as conn:
+            result = await conn.run(command, check=False, timeout=timeout)
+            return result.exit_status, result.stdout, result.stderr
+
+    # Wall-clock cap that includes asyncssh's __aexit__ — that step is NOT
+    # protected by conn.run's timeout, so a dead TCP socket can hang the
+    # session-close indefinitely. Bug #7. Add a 30s grace on top of timeout.
+    overall_timeout = timeout + 30
+
+    # Retry classification — Bug #25.
+    transient_messages = (
+        "Connect call failed",
+        "Connection refused",
+        "Connection reset",
+        "Connection lost",
+        "timed out",
+        "Network is unreachable",
+        "No route to host",
+    )
+
     max_retries = 3
+    last_exc: BaseException | None = None
     for attempt in range(max_retries + 1):
         try:
-            async with asyncssh.connect(**kwargs) as conn:
-                result = await conn.run(command, check=False, timeout=timeout)
-                return result.exit_status, result.stdout, result.stderr
+            return await asyncio.wait_for(_do_one_attempt(), timeout=overall_timeout)
+        except asyncio.TimeoutError as e:
+            last_exc = e
+            msg = f"SSH wall-clock timeout after {overall_timeout}s"
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                logger.warning(f"SSH attempt {attempt + 1} {msg}, retrying in {wait}s...")
+                await asyncio.sleep(wait)
+                continue
+            raise OSError(msg) from e
+        except (asyncssh.ConnectionLost, asyncssh.DisconnectError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                logger.warning(f"SSH attempt {attempt + 1} failed ({type(e).__name__}: {e}), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+                continue
+            raise
         except OSError as e:
-            # Retry on connection refused / reset (Errno 111, 104)
-            if attempt < max_retries and ("Connect call failed" in str(e) or "Connection refused" in str(e) or "Connection reset" in str(e)):
+            last_exc = e
+            err_str = str(e)
+            if attempt < max_retries and any(token in err_str for token in transient_messages):
                 wait = 2 ** attempt  # 1s, 2s, 4s
                 logger.warning(f"SSH connection attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
                 await asyncio.sleep(wait)
-            else:
-                raise
+                continue
+            raise
+
+    # Exhausted retries without raising — should never happen, but be safe.
+    if last_exc:
+        raise last_exc
+    raise OSError("SSH retries exhausted with no recorded exception")
 
 
 async def list_remote_databases(server, db_type: str = "postgresql") -> list[dict]:
@@ -359,21 +402,60 @@ def is_local_server(server) -> bool:
     return host.lower() in LOCAL_HOSTS
 
 
-async def download_remote_file(server, remote_path: str, local_path: str) -> tuple[bool, str]:
+async def download_remote_file(
+    server,
+    remote_path: str,
+    local_path: str,
+    timeout: int = 4 * 3600,
+    max_retries: int = 2,
+) -> tuple[bool, str]:
     """Download a file from a remote server via SFTP.
 
     For localhost servers the file is typically accessible via bind-mount,
     so callers should check is_local_server() first and skip this.
+
+    Bug #9: SFTP transfers of large files (200 GB+) could hang for hours
+    without progress. We wrap the whole transfer in asyncio.wait_for and
+    retry up to `max_retries` times with exponential backoff. Default 4h
+    cap is comfortable for ~200 GB at gigabit speeds.
     """
-    try:
-        kwargs = _build_connect_kwargs(server)
+    kwargs = _build_connect_kwargs(server)
+    last_err: str = ""
+
+    async def _do_transfer() -> None:
         async with asyncssh.connect(**kwargs) as conn:
             async with conn.start_sftp_client() as sftp:
                 await sftp.get(remote_path, local_path)
-        return True, f"Downloaded {remote_path} to {local_path}"
-    except Exception as e:
-        logger.error(f"SFTP download failed for {remote_path}: {e}")
-        return False, str(e)
+
+    for attempt in range(max_retries + 1):
+        try:
+            await asyncio.wait_for(_do_transfer(), timeout=timeout)
+            return True, f"Downloaded {remote_path} to {local_path}"
+        except asyncio.TimeoutError:
+            last_err = f"SFTP wall-clock timeout after {timeout}s for {remote_path}"
+            logger.error(last_err)
+            if attempt < max_retries:
+                wait = 2 ** attempt * 5  # 5s, 10s
+                logger.warning(f"SFTP attempt {attempt + 1} timed out, retrying in {wait}s...")
+                await asyncio.sleep(wait)
+                continue
+            return False, last_err
+        except (asyncssh.ConnectionLost, asyncssh.DisconnectError, OSError) as e:
+            last_err = f"{type(e).__name__}: {e}"
+            logger.error(f"SFTP download failed (attempt {attempt + 1}) for {remote_path}: {last_err}")
+            if attempt < max_retries:
+                wait = 2 ** attempt * 5  # 5s, 10s
+                logger.warning(f"SFTP attempt {attempt + 1} failed, retrying in {wait}s...")
+                await asyncio.sleep(wait)
+                continue
+            return False, last_err
+        except Exception as e:
+            # Non-retriable (auth errors, etc.)
+            last_err = str(e)
+            logger.error(f"SFTP download failed for {remote_path}: {e}")
+            return False, last_err
+
+    return False, last_err or "SFTP retries exhausted"
 
 
 async def delete_remote_file(server, remote_path: str) -> tuple[bool, str]:
