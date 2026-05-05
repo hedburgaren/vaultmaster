@@ -96,13 +96,23 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
             logger.error(f"Server {job.server_id} not found for job {job_id}")
             return
 
-        # Create run record
+        # Create run record. Capture the Celery task id so the cancel-
+        # endpoint can issue a control.revoke(...) instead of only flipping
+        # DB status — bug #12. `task.request.id` is set by Celery for every
+        # bound task; manual instantiations (no .delay/.apply_async) won't
+        # have one, hence the getattr-with-default.
+        celery_task_id = None
+        try:
+            celery_task_id = getattr(getattr(task, "request", None), "id", None)
+        except Exception:
+            pass
         run = BackupRun(
             job_id=job.id,
             server_id=server.id,
             status="running",
             started_at=datetime.now(timezone.utc),
             triggered_by=triggered_by,
+            celery_task_id=celery_task_id,
         )
         db.add(run)
         await db.commit()
