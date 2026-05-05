@@ -7,12 +7,38 @@ import asyncssh
 
 logger = logging.getLogger(__name__)
 
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+LOCAL_HOSTS = {
+    "127.0.0.1",
+    "127.0.1.1",
+    "localhost",
+    "localhost.localdomain",
+    "::1",
+    "[::1]",
+    "0.0.0.0",
+    "host.docker.internal",
+    "gateway.docker.internal",
+}
+
+
+def _normalize_host(host: str) -> str:
+    """Lowercase and strip IPv6 brackets so LOCAL_HOSTS matching is consistent.
+
+    Bug #26: tidigare missade detta `[::1]` (med klammer) och
+    `localhost.localdomain` (Debian-default). Ingången till SSH/local
+    detection ska normalisera *innan* listmatch.
+    """
+    if not host:
+        return ""
+    h = host.strip().lower()
+    # Strip IPv6 square brackets: "[::1]" → "::1"
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h
 
 
 def _resolve_host(host: str) -> str:
     """Rewrite localhost addresses to host.docker.internal so the container can reach the host."""
-    if host.lower() in LOCAL_HOSTS:
+    if _normalize_host(host) in LOCAL_HOSTS:
         return "host.docker.internal"
     return host
 
@@ -50,13 +76,39 @@ def _build_connect_kwargs(server) -> dict:
 
 
 async def test_ssh_connection(server) -> tuple[bool, str]:
-    """Test SSH connectivity to a server."""
+    """Test SSH connectivity to a server.
+
+    Bug #27: tidigare returnerade auth_type='local'/'api' alltid True utan
+    någon kontroll alls — UI:t visade "ok" även när containern inte alls
+    nådde Docker-värden. Nu körs en lättviktig probe för local-typen
+    (``uname -a`` via subprocess) och en strukturkoll för api-typen
+    (kräver att ``server.host`` ser ut som en URL).
+    """
     try:
         if getattr(server, 'auth_type', '') == "local":
-            return True, "Local server — always reachable"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "uname", "-a",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=5)
+                if proc.returncode == 0 and stdout_b.strip():
+                    return True, f"Local probe OK: {stdout_b.decode(errors='replace').strip()[:120]}"
+                return False, f"Local probe failed (exit {proc.returncode}): {stderr_b.decode(errors='replace').strip()[:200]}"
+            except (asyncio.TimeoutError, FileNotFoundError, OSError) as exc:
+                return False, f"Local probe failed: {type(exc).__name__}: {exc}"
 
         if getattr(server, 'auth_type', '') == "api":
-            return True, "API-based server — use provider API to test"
+            host = getattr(server, 'host', '') or ''
+            if not host:
+                return False, "API-based server has no host configured"
+            # We don't know the API protocol without provider context, so a
+            # structural check is the strongest non-arbitrary thing we can
+            # do here. Real connectivity is verified by the provider client.
+            if not (host.startswith("http://") or host.startswith("https://") or "." in host or ":" in host):
+                return False, f"API host {host!r} doesn't look like a URL/hostname"
+            return True, f"API-based server (host={host}) — provider client tests connectivity"
 
         kwargs = _build_connect_kwargs(server)
         async with asyncssh.connect(**kwargs) as conn:
@@ -397,9 +449,19 @@ async def list_remote_docker(server) -> dict:
 
 
 def is_local_server(server) -> bool:
-    """Check if a server points to localhost (the Docker host)."""
+    """Check if a server points to localhost (the Docker host).
+
+    Bug #26: also catches ``host.docker.internal`` (used by callers that have
+    already gone through ``_resolve_host``), bracketed IPv6 (``[::1]``), and
+    the Debian-default 127.0.1.1.
+    """
     host = getattr(server, 'host', '') or ''
-    return host.lower() in LOCAL_HOSTS
+    if _normalize_host(host) in LOCAL_HOSTS:
+        return True
+    # Also accept auth_type='local' servers regardless of the configured host.
+    if getattr(server, 'auth_type', '') == 'local':
+        return True
+    return False
 
 
 async def download_remote_file(

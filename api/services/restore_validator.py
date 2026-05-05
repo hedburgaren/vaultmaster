@@ -104,7 +104,12 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
     if not artifact:
         return {"status": "skipped", "error": "no artifact to validate", "logs": logs}
 
-    container_name = f"vm-validate-{str(artifact.id)[:8]}"
+    # Bug #18: full UUID (no truncation) prevents collisions when two
+    # validations run for artifacts that happen to share the first 8 chars.
+    # Defensive `docker rm -f` before `docker run` covers the edge case where
+    # a stale container with the exact same name still exists from a
+    # previously-killed validation (rare but observed in tests).
+    container_name = f"vm-validate-{artifact.id}"
     workdir = tempfile.mkdtemp(prefix="vm-validate-")
     local_dump = os.path.join(workdir, artifact.filename or "dump.gz")
 
@@ -119,6 +124,11 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
         log("info", f"Downloaded {size} bytes to {local_dump}")
         if size == 0:
             return {"status": "failed", "error": "downloaded artifact is 0 bytes", "logs": logs}
+
+        # Defensive cleanup of any stale container with the same name.
+        # `docker rm -f` exits non-zero if it doesn't exist — that's fine,
+        # we ignore the rc and only care about the subsequent `run`.
+        await _run(["docker", "rm", "-f", container_name], timeout=15)
 
         log("info", f"Starting temp postgres container: {container_name}")
         code, _, stderr = await _run([

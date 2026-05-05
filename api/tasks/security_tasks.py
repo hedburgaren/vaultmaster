@@ -101,7 +101,16 @@ async def _run_scan() -> None:
 
 
 async def _pip_audit() -> list[dict]:
-    """Run pip-audit and parse JSON output. Returns [] on any failure."""
+    """Run pip-audit and parse JSON output. Returns [] on any failure.
+
+    Bug #16 (deferred — too large for this batch): pip-audit currently runs
+    inside the api container as the celery worker user (often root) and
+    contacts the public PyPI / OSV indexes. A poisoned PyPI mirror or a CVE
+    in pip-audit itself would have full network/FS reach inside the api
+    container. Long-term mitigation is to invoke pip-audit inside a
+    short-lived, network-restricted container (e.g. ``docker run --rm
+    --network none --read-only``) — tracked separately.
+    """
     if not shutil.which("pip-audit"):
         logger.warning("pip-audit not on PATH; skipping Python CVE scan")
         return []
