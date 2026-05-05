@@ -1,23 +1,28 @@
 """Audit-logging middleware.
 
-Catches every authenticated mutating request (POST/PUT/PATCH/DELETE)
-under /api/v1/ and writes an audit_log row capturing:
+Catches every mutating request (POST/PUT/PATCH/DELETE) under /api/v1/
+and writes an audit_log row capturing:
 
   - the resolved user (if any) — extracted from the same JWT/API-key
-    flow get_current_user uses
+    flow get_current_user uses; null for unauthenticated attempts
   - HTTP method + path
-  - response status code
+  - response status code (success and failure alike)
   - client IP
+  - meta: {"status_code": …, "unauthenticated": True/False,
+           "had_authorization_header": True/False}
 
 Routers that already write a domain-specific audit row (e.g. credentials,
 mcp_clients) keep doing so — the middleware adds a generic row that
 captures the request envelope. This is the cheap blanket coverage; a
 domain-specific row is what we read for "what changed" detail.
 
-Skip list: /auth/login, /auth/setup, /auth/setup-status, /auth/me,
-/auth/change-password (these have their own auth-specific audit lines
-where appropriate, and login can't be middleware-audited because the
-token isn't issued yet).
+Bug #6 history: this middleware previously short-circuited on
+status >= 400 *and* user is None, which left brute-force attempts
+and 401/403 floods invisible. We now log them all.
+
+Skip list: /auth/login, /auth/setup, /auth/setup-status (these have
+their own auth-specific audit lines where appropriate, and login can't
+be middleware-audited because the token isn't issued yet).
 """
 
 from __future__ import annotations
@@ -103,15 +108,24 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                 return response
             if any(path.startswith(p) for p in _SKIP_PREFIXES):
                 return response
-            if response.status_code >= 400:
-                return response  # don't audit errors — handlers can if they want
 
+            # Bug #6 — previously this middleware skipped 4xx responses *and*
+            # unauthenticated requests, so a flood of 401/403 attempts left
+            # zero trace. We now log everything that survives the skip-list
+            # and the method/path filter; meta carries enough context to
+            # reconstruct the attempt without polluting the main columns.
             user = await _resolve_user(request)
-            if user is None:
-                return response
+            unauthenticated = user is None
 
             from api.database import async_session
             from api.routers.audit import log_action
+
+            meta: dict = {"status_code": response.status_code}
+            if unauthenticated:
+                meta["unauthenticated"] = True
+                meta["had_authorization_header"] = bool(
+                    request.headers.get("authorization") or request.headers.get("x-api-key")
+                )
 
             async with async_session() as db:
                 await log_action(
@@ -121,6 +135,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     resource_type=path.lstrip("/").split("/")[2] if path.startswith("/api/v1/") else None,
                     resource_id=None,
                     detail=f"{method} {path} → {response.status_code}",
+                    meta=meta,
                     ip_address=_client_ip(request),
                 )
                 await db.commit()

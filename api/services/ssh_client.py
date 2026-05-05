@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import shlex
 from datetime import datetime, timezone
 
 import asyncssh
@@ -376,9 +377,14 @@ async def download_remote_file(server, remote_path: str, local_path: str) -> tup
 
 
 async def delete_remote_file(server, remote_path: str) -> tuple[bool, str]:
-    """Delete a file on a remote server via SSH."""
+    """Delete a file on a remote server via SSH.
+
+    The remote_path is shell-quoted to prevent command injection — callers may
+    pass paths derived from user input (e.g. backup filenames in DB).
+    """
     try:
-        exit_code, stdout, stderr = await run_remote_command(server, f"rm -f {remote_path}")
+        quoted_path = shlex.quote(remote_path)
+        exit_code, stdout, stderr = await run_remote_command(server, f"rm -f {quoted_path}")
         if exit_code == 0:
             return True, f"Deleted {remote_path}"
         return False, f"rm failed: {stderr}"
