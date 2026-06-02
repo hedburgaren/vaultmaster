@@ -347,7 +347,7 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
             })
 
         except Exception as e:
-            # Don't squash a Retry — let Celery handle it.
+            # Don't squash a Retry, let Celery handle it.
             from celery.exceptions import Retry
             if isinstance(e, Retry):
                 raise
@@ -356,6 +356,21 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
             run.finished_at = datetime.now(timezone.utc)
             await db.commit()
             logger.error(f"Backup task failed for job {job_id}: {type(e).__name__}: {e}")
+            # Notify on exception-path failures too. Previously notify_event
+            # only fired on the normal-exit failure path (rad ~341), so any
+            # backup that died via raised exception (ssh timeout, executor
+            # crash, transfer error) silently skipped all configured channels.
+            try:
+                from api.services.notifier import notify_event
+                await notify_event(db, "run.failed", {
+                    "job_name": job.name,
+                    "server_name": server.name,
+                    "size_bytes": run.size_bytes,
+                    "error": run.error_message,
+                    "duration": str(run.finished_at - run.started_at) if run.finished_at and run.started_at else None,
+                })
+            except Exception as notify_err:
+                logger.warning(f"[{run.id}] notify on exception-path failed: {notify_err}")
             raise
 
         finally:

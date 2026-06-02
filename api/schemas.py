@@ -453,10 +453,6 @@ class UserOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ProfileUpdate(BaseModel):
-    email_addresses: list[str] | None = None
-
-
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str

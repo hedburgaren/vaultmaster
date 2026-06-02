@@ -137,7 +137,6 @@ export async function setupAdmin(username: string, password: string) {
 
 // Profile
 export const getProfile = () => apiFetch('/v1/auth/me');
-export const updateProfile = (data: any) => apiFetch('/v1/auth/profile', { method: 'PUT', body: JSON.stringify(data) });
 export const changePassword = (currentPassword: string, newPassword: string) =>
   apiFetch('/v1/auth/change-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) });
 export const generateApiKey = () => apiFetch('/v1/auth/api-key', { method: 'POST' });

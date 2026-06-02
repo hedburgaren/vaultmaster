@@ -12,7 +12,7 @@ from api.models.user import User
 from api.rate_limiter import limiter
 from api.schemas import (
     LoginRequest, Token, UserOut, SetupRequest, SetupStatus,
-    ProfileUpdate, ChangePasswordRequest, ApiKeyOut,
+    ChangePasswordRequest, ApiKeyOut,
     TotpSetupOut, TotpVerifyRequest, TotpDisableRequest,
 )
 
@@ -157,20 +157,6 @@ def _qr_png_base64(uri: str) -> str:
 
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user)):
-    return user
-
-
-@router.put("/profile", response_model=UserOut)
-async def update_profile(
-    body: ProfileUpdate,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Update the current user's profile (email addresses)."""
-    if body.email_addresses is not None:
-        user.email_addresses = body.email_addresses
-    await db.commit()
-    await db.refresh(user)
     return user
 
 

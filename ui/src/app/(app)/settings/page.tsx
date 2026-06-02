@@ -3,11 +3,11 @@
 import { useEffect, useState } from 'react';
 import {
   getRetentionPolicies, createRetentionPolicy, deleteRetentionPolicy, previewRotation,
-  getProfile, updateProfile, changePassword, generateApiKey, revokeApiKey,
+  getProfile, changePassword, generateApiKey, revokeApiKey,
   getSSHKeys, generateSSHKey,
   getSystemSettings, updateSystemSettings,
 } from '@/lib/api';
-import { Plus, Trash2, Eye, Settings, User, Key, Mail, Lock, Copy, RefreshCw, KeyRound, Sparkles, Rocket, BarChart3, Globe2, Puzzle, Zap, Shield, Wrench, FolderOpen, Save } from 'lucide-react';
+import { Plus, Trash2, Eye, Settings, User, Key, Lock, Copy, RefreshCw, KeyRound, Sparkles, Rocket, BarChart3, Globe2, Puzzle, Zap, Shield, Wrench, FolderOpen, Save } from 'lucide-react';
 import FormLabel from '@/components/FormLabel';
 import { useT, useLocale, type Locale } from '@/lib/i18n';
 
@@ -18,11 +18,8 @@ export default function SettingsPage() {
 
   // Profile state
   const [profile, setProfile] = useState<any>(null);
-  const [emails, setEmails] = useState<string[]>([]);
-  const [newEmail, setNewEmail] = useState('');
   const [pwForm, setPwForm] = useState({ current: '', new: '', confirm: '' });
   const [pwMsg, setPwMsg] = useState('');
-  const [profileMsg, setProfileMsg] = useState('');
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [apiKeyMsg, setApiKeyMsg] = useState('');
 
@@ -42,7 +39,7 @@ export default function SettingsPage() {
   const [sysForm, setSysForm] = useState<Record<string, string>>({});
   const [sysMsg, setSysMsg] = useState('');
 
-  const loadProfile = () => getProfile().then((p: any) => { setProfile(p); setEmails(p.email_addresses || []); }).catch(() => {});
+  const loadProfile = () => getProfile().then((p: any) => { setProfile(p); }).catch(() => {});
   const loadPolicies = () => getRetentionPolicies().then(setPolicies).catch(() => {});
   const loadSSHKeys = () => getSSHKeys().then(setSshKeys).catch(() => {});
   const loadSystemSettings = () => getSystemSettings().then((s: any) => { setSysSettings(s); setSysForm(s); }).catch(() => {});
@@ -56,21 +53,6 @@ export default function SettingsPage() {
       setSysMsg(t('settings.system_saved'));
       setTimeout(() => setSysMsg(''), 3000);
     } catch (e: any) { setSysMsg(e.message); }
-  };
-
-  const handleAddEmail = () => {
-    if (newEmail && !emails.includes(newEmail)) {
-      const updated = [...emails, newEmail];
-      setEmails(updated);
-      setNewEmail('');
-      updateProfile({ email_addresses: updated }).then(() => { setProfileMsg(t('settings.emails_updated')); loadProfile(); setTimeout(() => setProfileMsg(''), 3000); });
-    }
-  };
-
-  const handleRemoveEmail = (email: string) => {
-    const updated = emails.filter(e => e !== email);
-    setEmails(updated);
-    updateProfile({ email_addresses: updated }).then(() => { setProfileMsg(t('settings.email_removed')); loadProfile(); setTimeout(() => setProfileMsg(''), 3000); });
   };
 
   const handleChangePassword = async () => {
@@ -161,26 +143,6 @@ export default function SettingsPage() {
                 <div className="font-mono text-sm text-vm-text-bright">{profile.role === 'admin' || profile.is_admin ? t('settings.role_admin') : profile.role === 'operator' ? t('settings.role_operator') : t('settings.role_viewer')}</div>
               </div>
             </div>
-          </div>
-
-          {/* Email addresses */}
-          <div className="bg-vm-surface border border-vm-border rounded p-6">
-            <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider flex items-center gap-2"><Mail className="w-5 h-5 text-vm-accent" /> {t('settings.emails')}</h3>
-            <div className="font-mono text-[11px] text-vm-text-dim mb-3">{t('settings.emails_desc')}</div>
-            <div className="space-y-2 mb-4">
-              {emails.map((email) => (
-                <div key={email} className="flex items-center gap-2 bg-vm-surface2 border border-vm-border rounded px-3 py-2">
-                  <span className="font-mono text-sm text-vm-text flex-1">{email}</span>
-                  <button onClick={() => handleRemoveEmail(email)} className="text-vm-danger hover:text-red-400 text-xs font-bold">{t('action.remove')}</button>
-                </div>
-              ))}
-              {emails.length === 0 && <div className="font-mono text-xs text-vm-text-dim">{t('settings.no_emails')}</div>}
-            </div>
-            <div className="flex gap-2">
-              <input value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="user@example.com" className="flex-1 bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" onKeyDown={e => e.key === 'Enter' && handleAddEmail()} />
-              <button onClick={handleAddEmail} className="px-4 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase">{t('action.add')}</button>
-            </div>
-            {profileMsg && <div className="mt-2 font-mono text-xs text-vm-success">{profileMsg}</div>}
           </div>
 
           {/* Change password */}
