@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Pause or resume a VaultMaster backup job by ID prefix.
 
-Used to disable jobs that are misbehaving (e.g. the seafile job that
-times out at the 2h mark) without going through the UI.
+Used to disable jobs that are misbehaving (timeouts, repeated failures)
+without going through the UI.
 
 Usage:
     python -m scripts.pause_job \
         --base-url http://localhost:8000 \
-        --username chrille \
+        --username admin \
         --password '<pwd>' \
         --id-prefix 8d9a5991 \
         --pause
@@ -26,7 +26,7 @@ import httpx
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Pause or resume a backup job by ID prefix")
-    p.add_argument("--base-url", default="https://vm.example.com")
+    p.add_argument("--base-url", default="http://localhost:8000")
     p.add_argument("--username", required=True)
     p.add_argument("--password", required=True)
     p.add_argument("--id-prefix", required=True, help="UUID prefix that uniquely matches one job")
@@ -76,7 +76,7 @@ def main() -> int:
         if resp.status_code >= 300:
             print(f"PUT failed: {resp.status_code} {resp.text}", file=sys.stderr)
             return 4
-        print(f"OK — is_active={resp.json()['is_active']}")
+        print(f"OK, is_active={resp.json()['is_active']}")
 
     return 0
 

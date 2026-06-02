@@ -20,3 +20,10 @@ ui/.env.local
 scripts/import_credentials_from_notion_data.py
 scripts/setup_smtp_hedburgaren.py
 scripts/import_credentials_v2_complete.py
+
+# Deployment-specific runbooks (kept local, not in public repo)
+DEPLOY.md
+docs/disaster-recovery.md
+docs/seafile-backup-strategy.md
+scripts/seed_discord_channels.py
+ui/.next.bak.*/

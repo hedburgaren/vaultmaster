@@ -7,11 +7,11 @@ VaultMaster. Idempotent on (name) — existing credentials are PATCHed.
 
 Usage:
     python -m scripts.import_notion_credentials \
-        --base-url https://vm.example.com \
-        --vm-username chrille \
+        --base-url http://localhost:8000 \
+        --vm-username admin \
         --vm-password '<vm-password>' \
         --notion-token '<notion-integration-token>' \
-        --page-id NOTION_PAGE_ID \
+        --page-id '<notion-page-id>' \
         --dry-run
 
 After dry-run looks reasonable, drop --dry-run. Use --apply to actually
@@ -208,7 +208,7 @@ def upsert_credential(client: httpx.Client, existing: dict[str, dict], name: str
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Import credentials from a Notion page into VaultMaster")
-    p.add_argument("--base-url", default="https://vm.example.com")
+    p.add_argument("--base-url", default="http://localhost:8000")
     p.add_argument("--vm-username")
     p.add_argument("--vm-password")
     p.add_argument("--vm-api-key", help="Alternative to --vm-username/--vm-password: an X-API-Key value")

@@ -21,7 +21,7 @@ class BackupJob(Base):
     retention_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("retention_policy.id"))
     retention_overrides: Mapped[dict | None] = mapped_column(JSONB, default=dict)  # {dest_id: policy_id} per-destination override
     tags: Mapped[list | None] = mapped_column(ARRAY(String), default=list)
-    domain: Mapped[str | None] = mapped_column(String(100))  # plastshop, heartpro, arc_gruppen, etc.
+    domain: Mapped[str | None] = mapped_column(String(100))  # optional grouping label, e.g. project or environment name
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     encrypt: Mapped[bool] = mapped_column(Boolean, default=False)
     pre_script: Mapped[str | None] = mapped_column(String(1000))  # shell command to run before backup

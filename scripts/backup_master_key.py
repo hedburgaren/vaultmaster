@@ -70,7 +70,8 @@ def gpg_encrypt(plaintext: str, passphrase: str) -> bytes:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="GPG-encrypt CREDENTIALS_MASTER_KEYS for off-host backup")
-    p.add_argument("--env-file", default="/srv/containers/vm.example.com/.env")
+    p.add_argument("--env-file", default=".env",
+                   help="Path to the .env file containing CREDENTIALS_MASTER_KEYS")
     p.add_argument("--output", required=True, help="Path to write the .asc file (or '-' for stdout)")
     p.add_argument("--passphrase-env", default="BACKUP_PASSPHRASE", help="Env var holding the passphrase")
     args = p.parse_args()

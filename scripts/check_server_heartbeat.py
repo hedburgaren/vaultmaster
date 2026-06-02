@@ -7,8 +7,8 @@ part of the EPIC 5 server-heartbeat-recovery workflow.
 
 Usage:
     python -m scripts.check_server_heartbeat \
-        --base-url https://vm.example.com \
-        --username chrille --password '<vm-password>' \
+        --base-url https://vaultmaster.example.com \
+        --username admin --password '<vm-password>' \
         --threshold-minutes 15
 """
 
@@ -23,7 +23,7 @@ import httpx
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--base-url", default="https://vm.example.com")
+    p.add_argument("--base-url", default="http://localhost:8000")
     p.add_argument("--username", required=True)
     p.add_argument("--password", required=True)
     p.add_argument("--threshold-minutes", type=int, default=15,
@@ -63,8 +63,8 @@ def main() -> int:
         print("  1. SSH into the server and confirm the agent process is running")
         print("     (ps aux | grep vaultmaster, or check the systemd unit)")
         print("  2. Check the agent logs (journalctl -u vaultmaster-agent or container logs)")
-        print("  3. From the server: curl https://vm.example.com/api/health → 200?")
-        print("  4. If the server's clock is skewed > 5 min, JWT auth fails — `timedatectl status`")
+        print("  3. From the server: curl <base-url>/api/health, expect 200")
+        print("  4. If the server's clock is skewed > 5 min, JWT auth fails, run `timedatectl status`")
         print("  5. If agent is dead, restart and watch the next heartbeat in the dashboard")
         return 2
 

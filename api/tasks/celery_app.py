@@ -8,7 +8,7 @@ celery_app = Celery(
     "vaultmaster",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["api.tasks.backup_tasks", "api.tasks.rotation_tasks", "api.tasks.validation_tasks", "api.tasks.credential_tasks", "api.tasks.anomaly_tasks", "api.tasks.security_tasks", "api.tasks.cleanup_tasks"],
+    include=["api.tasks.backup_tasks", "api.tasks.rotation_tasks", "api.tasks.validation_tasks", "api.tasks.credential_tasks", "api.tasks.anomaly_tasks", "api.tasks.security_tasks", "api.tasks.cleanup_tasks", "api.tasks.storage_tasks"],
 )
 
 celery_app.conf.update(
@@ -28,6 +28,7 @@ celery_app.conf.update(
         "api.tasks.anomaly_tasks.*": {"queue": "notification"},
         "api.tasks.credential_tasks.*": {"queue": "notification"},
         "api.tasks.cleanup_tasks.*": {"queue": "rotation"},
+        "api.tasks.storage_tasks.*": {"queue": "notification"},
     },
     broker_transport_options={
         "visibility_timeout": 86400,  # 24h — backup-jobb kan ta länge
@@ -62,6 +63,10 @@ celery_app.conf.update(
         "scan-orphan-temp-files": {
             "task": "api.tasks.cleanup_tasks.scan_orphan_temp_files",
             "schedule": 21600.0,  # every 6h — sweeps abandoned tar.gz/dump.gz from work_dir
+        },
+        "refresh-storage-usage": {
+            "task": "api.tasks.storage_tasks.refresh_storage_usage",
+            "schedule": 900.0,
         },
     },
 )

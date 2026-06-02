@@ -220,7 +220,7 @@ export default function NotificationsPage() {
                 </div>
                 <div>
                   <FormLabel label="SMTP host" />
-                  <input value={emailSmtpHost} onChange={e => setEmailSmtpHost(e.target.value)} className={INPUT} placeholder="smtp-host.example.com" />
+                  <input value={emailSmtpHost} onChange={e => setEmailSmtpHost(e.target.value)} className={INPUT} placeholder="smtp.example.com" />
                 </div>
                 <div>
                   <FormLabel label="SMTP port" />
@@ -228,7 +228,7 @@ export default function NotificationsPage() {
                 </div>
                 <div>
                   <FormLabel label="SMTP user" />
-                  <input value={emailSmtpUser} onChange={e => setEmailSmtpUser(e.target.value)} className={INPUT} placeholder="info@example.com" />
+                  <input value={emailSmtpUser} onChange={e => setEmailSmtpUser(e.target.value)} className={INPUT} placeholder="notifier@example.com" />
                 </div>
                 <div>
                   <FormLabel label="SMTP password" />

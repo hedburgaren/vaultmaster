@@ -115,11 +115,12 @@ async def _send_discord(config: dict, subject: str, message: str) -> tuple[bool,
     """Send a Discord notification.
 
     Two transport modes:
-      1. Bridge mode (preferred for hedburgaren) — POST to arc-discord-bridge.
+      1. Bridge mode. POST to a self-hosted Discord bridge service that
+         maps channel slugs to actual Discord channels.
          config = {
-             "bridge_url": "http://arc-discord-bridge:8600",
+             "bridge_url": "http://discord-bridge:8600",
              "bridge_token": "...",
-             "channel": "plastshop"
+             "channel": "ops"
          }
       2. Webhook mode — POST directly to a Discord channel webhook URL.
          config = {"webhook_url": "https://discord.com/api/webhooks/..."}
