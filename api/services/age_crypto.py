@@ -27,7 +27,7 @@ import logging
 import re
 import shlex
 
-from api.config import settings
+from api.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class EncryptionUnavailable(Exception):
 
 
 def get_public_key() -> str:
-    return (settings.age_public_key or "").strip()
+    return (get_settings().age_public_key or "").strip()
 
 
 def is_configured() -> bool:

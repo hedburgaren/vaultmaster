@@ -11,6 +11,19 @@ from api.models.retention_policy import RetentionPolicy
 logger = logging.getLogger(__name__)
 
 
+def _gfs_configured(policy: RetentionPolicy) -> bool:
+    """True when the policy asks for any grandfather-father-son thinning.
+
+    When every keep_* is 0 the policy is pure max-age: keep everything until it
+    passes max_age_days. Distinguishing the two is what stops rotation from
+    treating "no bucket claimed this" as "delete this".
+    """
+    return any(
+        int(getattr(policy, attr, 0) or 0) > 0
+        for attr in ("keep_hourly", "keep_daily", "keep_weekly", "keep_monthly", "keep_yearly")
+    )
+
+
 def _assign_bucket(dt: datetime) -> dict:
     """Assign time buckets for GFS rotation."""
     return {
@@ -101,16 +114,31 @@ async def apply_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str 
     keep_from_bucket(buckets["monthly"], policy.keep_monthly)
     keep_from_bucket(buckets["yearly"], policy.keep_yearly)
 
+    gfs_configured = _gfs_configured(policy)
+
     # Mark deletions
+    #
+    # Bug (found 2026-07-19): this used to read "if artifact.id not in keep_ids:
+    # should_delete = True", i.e. anything no GFS bucket claimed was deleted.
+    # For a pure-max-age policy (all keep_* = 0, which is what all 47 jobs
+    # actually use) keep_ids is always empty, so every artifact was marked
+    # deleted 1 to 15 seconds after it was created, including the one the run
+    # had just produced. 8305 of 8311 artifacts were flagged deleted while the
+    # files sat on disk, which hid real backups from the restore path.
+    #
+    # Correct semantics: max_age is the sole criterion when no GFS buckets are
+    # configured. GFS thinning only applies when the policy actually asks for
+    # it. A policy that specifies neither keeps everything, which is the safe
+    # direction to fail.
     deleted = []
     for artifact in artifacts:
-        should_delete = False
-        if artifact.id not in keep_ids:
-            should_delete = True
-        if max_age_cutoff and artifact.created_at < max_age_cutoff:
-            should_delete = True
+        if artifact.id in keep_ids:
+            continue
 
-        if should_delete and artifact.id not in keep_ids:
+        too_old = bool(max_age_cutoff and artifact.created_at < max_age_cutoff)
+        should_delete = gfs_configured or too_old
+
+        if should_delete:
             artifact.is_deleted = True
             artifact.deleted_at = now
             deleted.append(str(artifact.id))
@@ -160,15 +188,24 @@ async def preview_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: st
     keep_from_bucket(buckets["monthly"], policy.keep_monthly)
     keep_from_bucket(buckets["yearly"], policy.keep_yearly)
 
+    gfs_configured = _gfs_configured(policy)
+
+    # Must mirror apply_rotation exactly. A preview that disagrees with the
+    # real thing is worse than no preview, since it is used to sanity-check
+    # policy changes before they run.
     would_delete = []
     for artifact in artifacts:
-        if artifact.id not in keep_ids:
+        if artifact.id in keep_ids:
+            continue
+
+        too_old = bool(max_age_cutoff and artifact.created_at < max_age_cutoff)
+        if gfs_configured or too_old:
             would_delete.append({
                 "id": str(artifact.id),
                 "filename": artifact.filename,
                 "created_at": artifact.created_at.isoformat(),
                 "size_bytes": artifact.size_bytes,
-                "reason": "max_age" if max_age_cutoff and artifact.created_at < max_age_cutoff else "rotation",
+                "reason": "max_age" if too_old else "rotation",
             })
 
     return {
