@@ -197,7 +197,8 @@ See [`.env.example`](.env.example) for all options.
 | `DATABASE_URL` | ✅ | Async PostgreSQL connection string |
 | `SECRET_KEY` | ✅ | JWT signing key (random, 32+ chars) |
 | `ALLOWED_ORIGINS` | | Comma-separated CORS origins |
-| `AGE_PUBLIC_KEY` | | age public key for backup encryption |
+| `AGE_PUBLIC_KEY` | | age public recipient. Jobs with `encrypt=true` fail if unset (no plaintext fallback). Requires the `age` binary on each source host. |
+| `AGE_IDENTITY_FILE` | `/etc/vaultmaster/age-identity.key` | age private identity, restore only. Mount read-only, keep an off-box copy. |
 | `VAULTMASTER_PLUGINS_DIR` | | Path to plugins directory |
 | `SMTP_*` | | SMTP settings for email notifications |
 

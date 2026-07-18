@@ -29,6 +29,7 @@ services:
         condition: service_healthy
     networks:
       - vaultmaster
+      - arc-vm-link
 
   db:
     image: postgres:16-alpine
@@ -85,6 +86,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /root/.ssh:/root/.ssh:ro
       - /root/.config/rclone:/root/.config/rclone:ro
+      # age private identity, read-only. Only the worker gets it: it is the
+      # only service that decrypts (restore + hourly restore-validation).
+      # api and beat deliberately do not mount it.
+      - /etc/vaultmaster/age-identity.key:/etc/vaultmaster/age-identity.key:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -121,3 +126,5 @@ volumes:
 networks:
   vaultmaster:
     driver: bridge
+  arc-vm-link:
+    external: true
