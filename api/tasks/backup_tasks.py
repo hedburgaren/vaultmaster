@@ -390,9 +390,132 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
 
 @celery_app.task(name="api.tasks.backup_tasks.run_restore_task")
 def run_restore_task(artifact_id: str, target_server_id: str | None = None, target_db_name: str | None = None):
-    """Restore a backup artifact."""
-    logger.info(f"Restore task queued for artifact {artifact_id}")
-    # TODO: Implement restore logic (download artifact, decrypt, pg_restore/tar extract)
+    """Restore a backup artifact into an explicitly named target database.
+
+    Previously this was a stub that logged "queued" and returned, which is worse
+    than not existing: a caller could reasonably believe a restore had happened.
+
+    Restoring overwrites whatever is in the target, so the target is never
+    inferred. Both target_server_id and target_db_name are required, and the
+    task refuses to restore into the database the artifact was taken from unless
+    that database is named explicitly. The intent is that you cannot clobber
+    production by accident, only on purpose.
+
+    Non-destructive verification lives in api.services.restore_validator, which
+    restores into a throwaway container and is what the hourly validation sweep
+    uses. Prefer that for "does this backup work?".
+    """
+    return _run_async(_run_restore(artifact_id, target_server_id, target_db_name))
+
+
+async def _run_restore(artifact_id: str, target_server_id: str | None, target_db_name: str | None):
+    import shlex
+    import shutil
+    import tempfile
+
+    from sqlalchemy import select
+
+    from api.models.backup_artifact import BackupArtifact
+    from api.models.server import Server
+    from api.services import age_crypto
+    from api.services.restore_validator import _download_artifact_to_temp, _decrypt_if_needed, _run
+    from api.services.ssh_client import run_remote_command
+
+    logs: list[str] = []
+
+    def log(msg: str) -> None:
+        logs.append(msg)
+        logger.info(f"[restore {artifact_id}] {msg}")
+
+    if not target_server_id or not target_db_name:
+        msg = (
+            "Restore refused: both target_server_id and target_db_name are required. "
+            "The restore target is never inferred, because restoring overwrites it. "
+            "To verify a backup without overwriting anything, use the restore "
+            "validator (it restores into a throwaway container)."
+        )
+        logger.error(f"[restore {artifact_id}] {msg}")
+        return {"status": "refused", "error": msg}
+
+    workdir = tempfile.mkdtemp(prefix="vm-restore-")
+    try:
+        async with get_task_session() as db:
+            artifact = (await db.execute(
+                select(BackupArtifact).where(BackupArtifact.id == uuid.UUID(str(artifact_id)))
+            )).scalar_one_or_none()
+            if not artifact:
+                return {"status": "failed", "error": f"artifact {artifact_id} not found"}
+
+            server = (await db.execute(
+                select(Server).where(Server.id == uuid.UUID(str(target_server_id)))
+            )).scalar_one_or_none()
+            if not server:
+                return {"status": "failed", "error": f"target server {target_server_id} not found"}
+
+            filename = artifact.filename or "restore.dump.gz"
+            backup_type = artifact.backup_type
+
+        local_path = os.path.join(workdir, filename)
+        log(f"downloading {filename}")
+        ok, msg = await _download_artifact_to_temp(artifact, local_path)
+        if not ok:
+            return {"status": "failed", "error": f"download failed: {msg}", "logs": logs}
+
+        if not os.path.isfile(local_path) or os.path.getsize(local_path) == 0:
+            return {"status": "failed", "error": "downloaded artifact is 0 bytes", "logs": logs}
+
+        # Dispatch on magic bytes, not artifact.is_encrypted. That column is
+        # untrustworthy for anything written before 2026-07-19.
+        local_path = await _decrypt_if_needed(local_path, lambda _lvl, m: log(m))
+
+        if backup_type != "postgresql":
+            return {
+                "status": "failed",
+                "error": (
+                    f"Automated restore is only implemented for postgresql artifacts, "
+                    f"got backup_type={backup_type!r}. The artifact has been downloaded "
+                    f"and decrypted to {local_path} for manual restore."
+                ),
+                "logs": logs,
+            }
+
+        db_q = shlex.quote(target_db_name)
+        log(f"restoring into database {target_db_name} on {server.name}")
+
+        remote_tmp = f"/tmp/vaultmaster/restore_{artifact_id}"
+        await run_remote_command(server, f"mkdir -p {shlex.quote(os.path.dirname(remote_tmp))}")
+
+        code, out, err = await _run(
+            ["scp", "-P", str(server.port), local_path,
+             f"{server.ssh_user}@{server.host}:{remote_tmp}"],
+            timeout=3600,
+        )
+        if code != 0:
+            return {"status": "failed", "error": f"scp to target failed: {(err or out)[:300]}", "logs": logs}
+
+        restore_cmd = (
+            f"gunzip -c {shlex.quote(remote_tmp)} | "
+            f"pg_restore --no-owner --no-acl -d {db_q} 2>&1 || "
+            f"gunzip -c {shlex.quote(remote_tmp)} | psql -d {db_q} 2>&1"
+        )
+        exit_code, stdout, stderr = await run_remote_command(server, restore_cmd, timeout=7200)
+        await run_remote_command(server, f"rm -f {shlex.quote(remote_tmp)}")
+
+        if exit_code != 0:
+            return {
+                "status": "failed",
+                "error": f"restore failed (exit {exit_code}): {(stderr or stdout or '').strip()[:500]}",
+                "logs": logs,
+            }
+
+        log("restore completed")
+        return {"status": "completed", "target_db": target_db_name, "logs": logs}
+
+    except Exception as e:
+        logger.exception(f"[restore {artifact_id}] failed")
+        return {"status": "failed", "error": f"{type(e).__name__}: {e}", "logs": logs}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 @celery_app.task(name="api.tasks.backup_tasks.verify_artifact_checksum")

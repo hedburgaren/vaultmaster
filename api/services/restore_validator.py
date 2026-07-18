@@ -38,12 +38,43 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from api.services import age_crypto
+
 logger = logging.getLogger(__name__)
 
 POSTGRES_IMAGE = "postgres:16-alpine"
 TEMP_DB = "vmverify"
 TEMP_USER = "postgres"
 TEMP_PASSWORD = "vmverify-temp-password"
+
+
+async def _decrypt_if_needed(local_path: str, log) -> str:
+    """Decrypt an age-encrypted artifact in place, returning the usable path.
+
+    Dispatches on the file's actual magic bytes rather than artifact.is_encrypted,
+    because that column lied for every artifact written before 2026-07-19 (5336
+    rows claimed encryption that never happened). Reading the bytes works for
+    both the old plaintext artifacts and the new encrypted ones, which is what
+    lets validation span the changeover without special-casing.
+    """
+    if not age_crypto.file_is_age_encrypted(local_path):
+        return local_path
+
+    if local_path.endswith(age_crypto.AGE_SUFFIX):
+        decrypted = local_path[: -len(age_crypto.AGE_SUFFIX)]
+    else:
+        decrypted = f"{local_path}.decrypted"
+
+    log("info", "Artifact is age-encrypted, decrypting with configured identity")
+    await age_crypto.decrypt_local_file(local_path, decrypted, _run)
+
+    try:
+        os.remove(local_path)
+    except OSError:
+        pass
+
+    log("info", f"Decrypted to {os.path.basename(decrypted)} ({os.path.getsize(decrypted)} bytes)")
+    return decrypted
 
 
 def _now() -> str:
@@ -124,6 +155,10 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
         log("info", f"Downloaded {size} bytes to {local_dump}")
         if size == 0:
             return {"status": "failed", "error": "downloaded artifact is 0 bytes", "logs": logs}
+
+        # Must happen before the workdir is mounted into the temp container:
+        # pg_restore cannot read an age file.
+        local_dump = await _decrypt_if_needed(local_dump, log)
 
         # Defensive cleanup of any stale container with the same name.
         # `docker rm -f` exits non-zero if it doesn't exist — that's fine,
@@ -247,6 +282,11 @@ async def validate_files_artifact(job, artifact) -> dict:
         size = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
         if size == 0:
             return {"status": "failed", "error": "downloaded archive is 0 bytes", "logs": logs}
+
+        # tar cannot read an age file. Reassigning local_path also keeps the
+        # finally-block cleanup pointed at the file that actually exists.
+        local_path = await _decrypt_if_needed(local_path, log)
+        size = os.path.getsize(local_path)
 
         log("info", f"tar -tzf check on {size} bytes")
         code, stdout, stderr = await _run(["tar", "-tzf", local_path], timeout=600)

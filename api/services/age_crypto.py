@@ -24,6 +24,7 @@ whose only key sits on the machine being backed up is not a backup.
 """
 
 import logging
+import os
 import re
 import shlex
 
@@ -165,6 +166,56 @@ async def verify_encrypted(server, run_command, remote_path: str) -> None:
         f"Encryption verification FAILED for {remote_path}: unexpected magic "
         f"bytes {magic!r}, expected {AGE_MAGIC_HEX} (age)."
     )
+
+
+def get_identity_path() -> str:
+    return (get_settings().age_identity_file or "").strip()
+
+
+def identity_available() -> bool:
+    path = get_identity_path()
+    return bool(path) and os.path.isfile(path)
+
+
+def file_is_age_encrypted(path: str) -> bool:
+    """Check a *local* file's magic bytes.
+
+    Used on the restore side, where we must not assume the artifact row's
+    is_encrypted flag is truthful. For everything written before 2026-07-19 it
+    is not: 5336 rows claim encryption that never happened.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4).hex().lower().startswith(AGE_MAGIC_HEX)
+    except OSError:
+        return False
+
+
+async def decrypt_local_file(src: str, dst: str, run) -> None:
+    """Decrypt a local age file to dst using the configured identity.
+
+    `run` is an async callable taking a list[str] argv and returning
+    (exit_code, stdout, stderr), matching restore_validator._run.
+    """
+    identity = get_identity_path()
+    if not identity or not os.path.isfile(identity):
+        raise EncryptionUnavailable(
+            f"Artifact is age-encrypted but no identity file is available at "
+            f"{identity or '<unset>'}. Restore is impossible without the private "
+            "key. Set AGE_IDENTITY_FILE and mount the key into the container."
+        )
+
+    code, stdout, stderr = await run(
+        ["age", "--decrypt", "--identity", identity, "--output", dst, src],
+        timeout=3600,
+    )
+    if code != 0:
+        raise Exception(
+            f"age decryption failed (exit {code}): {(stderr or stdout or '').strip()[:300]}. "
+            "The identity may not match the recipient the artifact was encrypted to."
+        )
+    if not os.path.isfile(dst) or os.path.getsize(dst) == 0:
+        raise Exception(f"age decryption produced no output at {dst}")
 
 
 async def detect_is_encrypted(server, run_command, remote_path: str) -> bool:

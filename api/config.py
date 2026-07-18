@@ -20,8 +20,15 @@ class Settings(BaseSettings):
     # Base URL (for OAuth callbacks etc.)
     base_url: str = "http://localhost:8000"
 
-    # Encryption
+    # Backup encryption (age).
+    # age_public_key is the recipient used to encrypt new artifacts. It is not
+    # secret and is passed to the source host on the command line.
+    # age_identity_file points at the PRIVATE key, needed only to decrypt during
+    # restore/validation. Mount it read-only and keep an off-box copy: an
+    # encrypted backup whose only key lives on the backed-up machine is not a
+    # backup. See api/services/age_crypto.py for the fail-closed rules.
     age_public_key: str = ""
+    age_identity_file: str = "/etc/vaultmaster/age-identity.key"
 
     # Credential vault — separate from JWT secret_key by design.
     # Format: "v1:<base64-Fernet-key>,v2:<base64-Fernet-key>"
