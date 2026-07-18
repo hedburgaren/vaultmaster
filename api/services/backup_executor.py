@@ -6,6 +6,7 @@ import shlex
 import tempfile
 from datetime import datetime, timezone
 
+from api.services import age_crypto
 from api.services.ssh_client import run_remote_command
 
 logger = logging.getLogger(__name__)
@@ -98,9 +99,11 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
         log("error", str(e))
         return {"success": False, "error": str(e), "logs": logs}
 
+    encrypt = bool(getattr(job, "encrypt", False))
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     ext = "dump" if dump_format == "custom" else "sql"
-    filename = f"{db_name}_{timestamp}.{ext}.gz"
+    filename = f"{db_name}_{timestamp}.{ext}.gz" + (age_crypto.AGE_SUFFIX if encrypt else "")
     remote_path = f"{output_dir_v}/{filename}"
     output_dir_q = shlex.quote(output_dir_v)
     remote_path_q = shlex.quote(remote_path)
@@ -108,6 +111,12 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
     pg_user_q = shlex.quote(pg_user)
 
     try:
+        # Fail closed before anything is written. A job that asks for
+        # encryption we cannot deliver must not fall through to plaintext.
+        recipient = await age_crypto.preflight(server, run_remote_command, encrypt)
+        if recipient:
+            log("info", "Encryption enabled (age recipient validated, binary present on source host)")
+
         await run_remote_command(server, f"mkdir -p {output_dir_q}")
 
         if stop_containers:
@@ -121,13 +130,18 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
         else:
             pg_dump_cmd = f"pg_dump -U {pg_user_q} {db_name_q}"
 
+        # Producer stages only; age_crypto.wrap_pipeline appends the age stage
+        # (when encrypting) and the redirect, under `bash -o pipefail` so a
+        # failing pg_dump cannot be sealed inside a valid-looking archive.
         if container:
             container_q = shlex.quote(container)
-            dump_cmd = f"docker exec {container_q} {pg_dump_cmd} | gzip > {remote_path_q}"
+            producer = f"docker exec {container_q} {pg_dump_cmd} | gzip"
         elif dump_format == "custom":
-            dump_cmd = f"{pg_dump_cmd} > {remote_path_q}"
+            producer = pg_dump_cmd
         else:
-            dump_cmd = f"{pg_dump_cmd} | gzip -{compress_level} > {remote_path_q}"
+            producer = f"{pg_dump_cmd} | gzip -{compress_level}"
+
+        dump_cmd = age_crypto.wrap_pipeline(producer, recipient, remote_path)
 
         log("info", f"Running pg_dump for {db_name}" + (f" via container {container}" if container else ""))
         exit_code, stdout, stderr = await run_remote_command(server, dump_cmd, timeout=3600)
@@ -142,6 +156,12 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
             raise Exception(f"pg_dump failed with exit code {exit_code}: {stderr}")
 
         log("info", "pg_dump completed successfully")
+
+        # Read the bytes back. This is the check whose absence let 5336
+        # plaintext artifacts be recorded as encrypted.
+        if recipient:
+            await age_crypto.verify_encrypted(server, run_remote_command, remote_path)
+            log("info", "Encryption verified on disk (age magic bytes present)")
 
         exit_code, stdout, _ = await run_remote_command(server, f"stat -c %s {remote_path_q}")
         size_bytes = int(stdout.strip()) if exit_code == 0 else 0
@@ -166,6 +186,8 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
             "remote_path": remote_path,
             "size_bytes": size_bytes,
             "checksum_sha256": checksum,
+            # Verified above by readback, not copied from job.encrypt.
+            "is_encrypted": bool(recipient),
             "logs": logs,
         }
 
@@ -195,13 +217,19 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
         log("error", str(e))
         return {"success": False, "error": str(e), "logs": logs}
 
+    encrypt = bool(getattr(job, "encrypt", False))
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"docker_volumes_{timestamp}.tar.gz"
+    filename = f"docker_volumes_{timestamp}.tar.gz" + (age_crypto.AGE_SUFFIX if encrypt else "")
     remote_path = f"{work_dir_v}/{filename}"
     work_dir_q = shlex.quote(work_dir_v)
     remote_path_q = shlex.quote(remote_path)
 
     try:
+        recipient = await age_crypto.preflight(server, run_remote_command, encrypt)
+        if recipient:
+            log("info", "Encryption enabled (age recipient validated, binary present on source host)")
+
         await run_remote_command(server, f"mkdir -p {work_dir_q}")
 
         if volumes:
@@ -210,7 +238,9 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
             volume_paths_q = shlex.quote("/var/lib/docker/volumes")
 
         log("info", f"Archiving Docker volumes: {volume_paths_q}")
-        cmd = f"tar -czf {remote_path_q} {volume_paths_q}"
+        # tar to stdout so the age stage can consume it; wrap_pipeline adds
+        # the redirect. Previously this was `tar -czf <path>` writing direct.
+        cmd = age_crypto.wrap_pipeline(f"tar -cz {volume_paths_q}", recipient, remote_path)
         exit_code, stdout, stderr = await run_remote_command(server, cmd, timeout=3600)
 
         sudo_err = _check_sudo_failure(stderr)
@@ -221,6 +251,10 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
         if exit_code != 0:
             log("error", f"tar failed: {stderr}")
             raise Exception(f"tar failed: {stderr}")
+
+        if recipient:
+            await age_crypto.verify_encrypted(server, run_remote_command, remote_path)
+            log("info", "Encryption verified on disk (age magic bytes present)")
 
         exit_code, stdout, _ = await run_remote_command(server, f"stat -c %s {remote_path_q}")
         size_bytes = int(stdout.strip()) if exit_code == 0 else 0
@@ -240,6 +274,7 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
             "remote_path": remote_path,
             "size_bytes": size_bytes,
             "checksum_sha256": checksum,
+            "is_encrypted": bool(recipient),
             "logs": logs,
         }
 
@@ -273,18 +308,26 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
         log("error", str(e))
         return {"success": False, "error": str(e), "logs": logs}
 
+    encrypt = bool(getattr(job, "encrypt", False))
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"files_{timestamp}.tar.gz"
+    filename = f"files_{timestamp}.tar.gz" + (age_crypto.AGE_SUFFIX if encrypt else "")
     remote_path = f"{work_dir_v}/{filename}"
     work_dir_q = shlex.quote(work_dir_v)
     remote_path_q = shlex.quote(remote_path)
 
     try:
+        recipient = await age_crypto.preflight(server, run_remote_command, encrypt)
+        if recipient:
+            log("info", "Encryption enabled (age recipient validated, binary present on source host)")
+
         await run_remote_command(server, f"mkdir -p {work_dir_q}")
 
         exclude_flags = " ".join(f"--exclude={shlex.quote(e)}" for e in excludes)
         path_str_q = " ".join(shlex.quote(p) for p in paths)
-        cmd = f"tar -czf {remote_path_q} {exclude_flags} {path_str_q}"
+        cmd = age_crypto.wrap_pipeline(
+            f"tar -cz {exclude_flags} {path_str_q}", recipient, remote_path
+        )
 
         log("info", f"Archiving files: {path_str_q}")
         log("info", f"Work dir: {work_dir_v} → {remote_path}")
@@ -305,6 +348,10 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
         # From this point a tar file exists on disk. Record it so the
         # caller's finally-block can guarantee cleanup even if the
         # post-tar steps (stat / sha256sum / transfer) blow up.
+
+        if recipient:
+            await age_crypto.verify_encrypted(server, run_remote_command, remote_path)
+            log("info", "Encryption verified on disk (age magic bytes present)")
 
         exit_code, stdout, stderr = await run_remote_command(server, f"stat -c %s {remote_path_q}")
         if exit_code != 0:
@@ -329,6 +376,7 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
             "remote_path": remote_path,
             "size_bytes": size_bytes,
             "checksum_sha256": checksum,
+            "is_encrypted": bool(recipient),
             "logs": logs,
         }
 
@@ -352,6 +400,21 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
     script = config.get("command") or config.get("script", "")
     if not script:
         return {"success": False, "error": "No command or script configured", "logs": []}
+
+    # Custom scripts own their output path, so we cannot pipe them through age.
+    # Fail closed rather than produce plaintext and call it encrypted, which is
+    # exactly the failure mode this whole change exists to remove.
+    if bool(getattr(job, "encrypt", False)):
+        msg = (
+            "Job requests encryption, but custom-script jobs write their own "
+            "output and cannot be encrypted in-pipe by VaultMaster. Either "
+            "encrypt inside the script (pipe through `age -r <recipient>`) and "
+            "turn encrypt off on the job, or switch the job to a built-in "
+            "backup type."
+        )
+        return {"success": False, "error": msg, "logs": [
+            {"ts": datetime.now(timezone.utc).isoformat(), "level": "error", "msg": msg}
+        ]}
 
     output_dir = config.get("output_dir")
     min_bytes = int(config.get("min_output_bytes", 1024))  # default: ≥1 KB
