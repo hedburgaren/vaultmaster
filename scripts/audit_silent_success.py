@@ -54,49 +54,49 @@ TEMPERATURE = 1
 # That is the exact defect class this script exists to find, reproduced in the
 # tool itself. Hence both the larger budget and the starvation check in
 # call_kimi(): an empty answer must be a loud failure, never a clean result.
-MAX_TOKENS = 32000
+MAX_TOKENS = 125000
 
 # Chunks are grouped by concern rather than by directory, so related code is
 # reviewed together. A bug like #3 is only visible when the producer
 # (backup_executor) and the consumer (backup_tasks) are read side by side.
 CHUNKS = [
-    ("backup-execution", [
-        "api/services/backup_executor.py",
-        "api/services/ssh_client.py",
-    ]),
-    ("task-orchestration", [
-        "api/tasks/backup_tasks.py",
-        "api/tasks/celery_app.py",
-    ]),
-    ("retention", [
-        "api/services/rotation.py",
-        "api/services/purge.py",
-        "api/tasks/rotation_tasks.py",
-        "api/tasks/cleanup_tasks.py",
-    ]),
-    ("storage-transfer", [
-        "api/services/rclone_client.py",
-        "api/tasks/storage_tasks.py",
-    ]),
-    ("restore-and-validation", [
-        "api/services/restore_validator.py",
-        "api/tasks/validation_tasks.py",
-    ]),
+    ("backup-executor", ["api/services/backup_executor.py"]),
+    ("ssh-transport", ["api/services/ssh_client.py"]),
+    ("backup-orchestration", ["api/tasks/backup_tasks.py"]),
+    ("scheduling", ["api/tasks/celery_app.py", "api/tasks/rotation_tasks.py"]),
+    ("retention-logic", ["api/services/rotation.py", "api/services/purge.py"]),
+    ("cleanup", ["api/tasks/cleanup_tasks.py"]),
+    ("storage-transfer", ["api/services/rclone_client.py", "api/tasks/storage_tasks.py"]),
+    ("restore-validation", ["api/services/restore_validator.py", "api/tasks/validation_tasks.py"]),
     ("crypto", [
         "api/services/age_crypto.py",
         "api/services/encryption.py",
         "api/services/credentials_crypto.py",
     ]),
-    ("notification-and-alerting", [
-        "api/services/notifier.py",
-        "api/tasks/anomaly_tasks.py",
-    ]),
+    ("alerting", ["api/services/notifier.py", "api/tasks/anomaly_tasks.py"]),
 ]
 
-SYSTEM = """You are auditing a backup system. Backup software has an unusual
-property: when it fails silently, nobody finds out until they need a restore,
-and by then the data is gone. A crash is survivable. A green checkmark over
-work that never happened is not.
+SYSTEM = """You are auditing the ONLY backup system of a real company. Every
+database, every website, every file the business owns is protected by nothing
+except this code. If it is wrong, the company loses everything and finds out on
+the day it needs a restore.
+
+Be brutal. Politeness here is a liability. The owner has said explicitly that he
+would rather you tear this work apart than be left without backups.
+
+Most of this file was written or modified in the last 24 hours by an AI agent
+who was fixing this exact defect class, and who has already shipped three new
+instances of it while doing so. Recently added guards, comments claiming a bug
+is fixed, and confident-sounding docstrings are NOT evidence. Read what the code
+does, never what its comments say it does. A comment saying "verified before the
+plaintext is deleted" is a claim to be checked, not a fact.
+
+Assume the code is broken and try to prove it. If you cannot break it, say so in
+one line and move on.
+
+Suppressing a finding because you are unsure is the worst outcome available to
+you. Report it with confidence "low" and let a human check. A false positive
+costs someone ten minutes. A missed defect costs the company its data.
 
 You are hunting exactly one class of defect:
 
@@ -120,14 +120,30 @@ Sub-patterns, all of which have already been found in this codebase:
   G. Verification that cannot fail. A check that would pass even if the
      underlying operation did nothing.
 
+Pay particular attention to these, which are where the recent work is likely
+to have gone wrong:
+
+  - Guards added to "fail closed". Does the guard actually run before the
+    dangerous operation, on every path including exceptions and early returns?
+  - Verification steps. Would the check still pass if the operation did
+    nothing? Is it performed before or after the irreversible step?
+  - Deletion of a source copy. Is it provably conditional on a destination
+    copy existing? What happens on a partial or exception path?
+  - Order of operations around anything irreversible: delete, overwrite,
+    truncate, mark-as-done.
+  - Newly extracted helper functions: does every caller actually use the
+    result, or is it computed and discarded?
+  - Error paths and `except` blocks: is a failure converted into a success
+    further up the stack?
+
 Rules:
   - Report only defects you can point at in the code shown. No speculation
     about files you cannot see.
   - For each finding, state the concrete consequence in terms of data: what
     would be lost, corrupted, or falsely believed safe.
   - Rank by blast radius, worst first.
-  - If a chunk is clean for this class, say so plainly rather than padding
-    with style notes. A short honest answer beats a long hedged one.
+  - If a chunk is genuinely clean, say so in one line. Do not pad with style
+    notes to look thorough.
   - Ignore formatting, naming, and typing issues entirely. They are not what
     loses data.
 
