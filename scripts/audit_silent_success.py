@@ -60,6 +60,7 @@ MAX_TOKENS = 125000
 # reviewed together. A bug like #3 is only visible when the producer
 # (backup_executor) and the consumer (backup_tasks) are read side by side.
 CHUNKS = [
+    # --- already covered in the first pass, kept so a full run is a full run ---
     ("backup-executor", ["api/services/backup_executor.py"]),
     ("ssh-transport", ["api/services/ssh_client.py"]),
     ("backup-orchestration", ["api/tasks/backup_tasks.py"]),
@@ -74,6 +75,76 @@ CHUNKS = [
         "api/services/credentials_crypto.py",
     ]),
     ("alerting", ["api/services/notifier.py", "api/tasks/anomaly_tasks.py"]),
+
+    # --- never audited until 2026-07-19 ---
+    ("core-app", [
+        "api/main.py",
+        "api/config.py",
+        "api/database.py",
+        "api/rate_limiter.py",
+    ]),
+    ("auth-and-access", [
+        "api/auth.py",
+        "api/routers/auth.py",
+        "api/routers/users.py",
+        "api/middleware/audit.py",
+    ]),
+    ("mcp-surface", [
+        "api/mcp/server.py",
+        "api/mcp/auth.py",
+        "api/routers/mcp_clients.py",
+    ]),
+    ("router-jobs-runs", [
+        "api/routers/jobs.py",
+        "api/routers/runs.py",
+    ]),
+    ("router-artifacts-storage", [
+        "api/routers/artifacts.py",
+        "api/routers/storage.py",
+    ]),
+    ("router-servers-retention", [
+        "api/routers/servers.py",
+        "api/routers/retention.py",
+    ]),
+    ("router-secrets", [
+        "api/routers/credentials.py",
+        "api/routers/notifications.py",
+        "api/services/oauth_storage.py",
+    ]),
+    ("router-observability", [
+        "api/routers/dashboard.py",
+        "api/routers/metrics.py",
+        "api/routers/audit.py",
+        "api/routers/validations.py",
+    ]),
+    ("router-misc", [
+        "api/routers/webhooks.py",
+        "api/routers/system_settings.py",
+    ]),
+    ("schemas-and-models", [
+        "api/schemas.py",
+        "api/models/backup_artifact.py",
+        "api/models/backup_job.py",
+        "api/models/backup_run.py",
+        "api/models/retention_policy.py",
+        "api/models/storage_destination.py",
+    ]),
+    ("remaining-tasks", [
+        "api/tasks/credential_tasks.py",
+        "api/tasks/security_tasks.py",
+        "api/services/restic_executor.py",
+    ]),
+    ("remaining-models", [
+        "api/models/user.py",
+        "api/models/credential.py",
+        "api/models/server.py",
+        "api/models/mcp_client.py",
+        "api/models/notification_channel.py",
+        "api/models/webhook.py",
+        "api/models/audit_log.py",
+        "api/models/backup_validation_run.py",
+        "api/models/system_settings.py",
+    ]),
 ]
 
 SYSTEM = """You are auditing the ONLY backup system of a real company. Every
@@ -119,6 +190,12 @@ Sub-patterns, all of which have already been found in this codebase:
      weaker result than the caller believes it got.
   G. Verification that cannot fail. A check that would pass even if the
      underlying operation did nothing.
+  H. Protection that does not protect. An endpoint or resource that appears
+     guarded but is not: a missing auth dependency, a permission check that
+     cannot return false, an ownership filter absent from a query so one
+     caller reads or edits another's rows, a secret returned in a response
+     that claims to redact it. Treat this as the same defect: something
+     presents itself as safe while not being so.
 
 Pay particular attention to these, which are where the recent work is likely
 to have gone wrong:
