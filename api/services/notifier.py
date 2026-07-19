@@ -249,7 +249,12 @@ async def _send_email(config: dict, subject: str, message: str) -> tuple[bool, s
             if use_starttls and not use_ssl:
                 server.starttls()
             server.login(smtp_user, smtp_password)
-            server.send_message(msg)
+            # send_message returns a dict of recipients the server REFUSED.
+            # Discarding it (as this did until 2026-07-19) means a message
+            # accepted for nobody still reports "Email sent".
+            refused = server.send_message(msg)
+        if refused:
+            return False, f"Email refused for {len(refused)} recipient(s): {list(refused)[:3]}"
         return True, "Email sent"
     except Exception as e:
         return False, f"Email failed: {e}"
@@ -302,7 +307,11 @@ async def notify_event(db, event: str, data: dict):
     message = _format_event_message(event, data)
 
     if not channels:
-        return
+        # No channel subscribes to this event. Worth saying out loud: an event
+        # nobody listens to is indistinguishable from one that was delivered.
+        logger.warning("notify_event(%s): no active channel subscribes to this event", event)
+        return {"delivered": [], "failed": [], "any_success": False,
+                "committed": True, "no_channels": True}
 
     # Bug #24: parallel dispatch. SMTP is the worst offender (20s timeout),
     # but bridges and webhooks add up too. return_exceptions=True so that
@@ -314,24 +323,61 @@ async def notify_event(db, event: str, data: dict):
     )
 
     any_success = False
+    delivered: list[str] = []
+    failed: list[str] = []
     for channel, res in zip(channels, results):
         if isinstance(res, BaseException):
             logger.error(f"Notification {channel.name} ({channel.channel_type}): exception {res!r}")
+            failed.append(f"{channel.name}: {res!r}"[:200])
             continue
         success, msg = res
         if success:
             channel.last_sent = datetime.now(timezone.utc)
             any_success = True
+            delivered.append(channel.name)
+        else:
+            failed.append(f"{channel.name}: {msg}"[:200])
         logger.info(f"Notification {channel.name} ({channel.channel_type}): {msg}")
+
+    # A notifier that cannot report its own failure is the alarm equivalent of
+    # everything else that went wrong in this system: it looks fine right up
+    # until the moment you needed it. Until 2026-07-19 this returned None
+    # unconditionally, so no caller could tell the difference between "alerted
+    # everyone" and "reached nobody".
+    if not any_success:
+        logger.error(
+            "notify_event(%s): DELIVERED TO NOBODY. All %d channel(s) failed: %s. "
+            "Alerts are not reaching anyone right now.",
+            event, len(channels), "; ".join(failed) or "unknown",
+        )
+    elif failed:
+        logger.warning(
+            "notify_event(%s): partial delivery, %d ok, %d failed: %s",
+            event, len(delivered), len(failed), "; ".join(failed),
+        )
 
     # Bug #17: commit the last_sent updates ourselves. Otherwise a caller
     # rollback (or a later exception in the same transaction) silently
     # erases the audit trail of "we did send these".
+    #
+    # Caveat worth knowing: this commits the CALLER's session, so any pending
+    # state the caller has not finalised is persisted here too. Left as is
+    # because removing it reintroduces bug #17, but callers must not rely on
+    # being able to roll back after calling this.
+    committed = True
     if any_success:
         try:
             await db.commit()
         except Exception as exc:
+            committed = False
             logger.warning(f"notify_event: commit of last_sent updates failed: {exc}")
+
+    return {
+        "delivered": delivered,
+        "failed": failed,
+        "any_success": any_success,
+        "committed": committed,
+    }
 
 
 def _format_event_message(event: str, data: dict) -> str:
