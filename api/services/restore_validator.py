@@ -35,6 +35,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -154,7 +155,17 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
     # Defensive `docker rm -f` before `docker run` covers the edge case where
     # a stale container with the exact same name still exists from a
     # previously-killed validation (rare but observed in tests).
-    container_name = f"vm-validate-{artifact.id}"
+    # Unique per VALIDATION, not per artifact. It used to be
+    # f"vm-validate-{artifact.id}", which is deterministic, combined with a
+    # defensive `docker rm -f` on that name just before `docker run`. Two
+    # validations of the same artifact therefore raced: the second one killed
+    # the first one's container in the middle of its pg_restore, and the first
+    # reported "pg_restore exit 1" on a backup that was perfectly fine.
+    #
+    # Observed for real on 2026-07-19: a PlastShop validation failed that way
+    # and passed on a rerun minutes later. A spurious validation.failed is not
+    # a harmless false alarm here, it is the alert people learn to ignore.
+    container_name = f"vm-validate-{artifact.id}-{uuid.uuid4().hex[:8]}"
     os.makedirs(SHARED_TMP, exist_ok=True)
     workdir = tempfile.mkdtemp(prefix="vm-validate-", dir=SHARED_TMP)
     local_dump = os.path.join(workdir, artifact.filename or "dump.gz")

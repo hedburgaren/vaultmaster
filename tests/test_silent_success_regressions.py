@@ -414,7 +414,82 @@ def test_checksum_verdicts():
     )
 
 
+# ---------------------------------------------------------------------------
+# Defect, and a regression introduced while fixing its predecessor: deciding
+# "the file is already gone" from a probe that can itself fail.
+#
+# v1 matched "does not exist" in stderr; rclone says "doesn't exist", so every
+# already-deleted file was reported as a failure and retried forever.
+# v2 replaced that with an `lsf` existence check, but treated a FAILING lsf as
+# proof of absence. An auth failure, network outage, permission denial or
+# timeout then reads as "deleted", the row gets flagged, and a file that is
+# still there disappears from the system's view while still consuming quota.
+#
+# Absence is only established by a probe that ran and found nothing.
+# ---------------------------------------------------------------------------
+def test_absence_requires_a_successful_probe():
+    from api.services.rclone_client import probe_says_absent
+
+    check(
+        probe_says_absent(0, "") is True,
+        "probe succeeded and listed nothing -> genuinely absent",
+    )
+    check(
+        probe_says_absent(0, "file.age\n") is False,
+        "probe succeeded and listed the file -> still present",
+    )
+    for code in (1, 3, 143):
+        check(
+            probe_says_absent(code, "") is False,
+            f"probe FAILED (exit {code}) -> unknown, must not count as absent",
+        )
+    check(
+        probe_says_absent(None, "") is False,
+        "no probe result at all -> unknown, must not count as absent",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Defect: the never-empty guard read `if live_count and ...`, so a (job,
+# destination) with ZERO live rows short-circuited it entirely. That is not a
+# rare edge: it is precisely the corruption this module was written to survive,
+# where every row is flagged deleted while the files are still on disk. The
+# floor would be empty, the guard skipped, and purge would delete the only
+# surviving copies while reporting successful deletions.
+#
+# Zero live artifacts is an anomaly to refuse, never a licence to proceed.
+# ---------------------------------------------------------------------------
+def test_purge_refuses_when_nothing_is_live():
+    from api.services.purge import purge_decision
+
+    # Normal: some live, some expiring.
+    ok, reason = purge_decision(live_count=10, live_expired=3, total=12)
+    check(ok is True, f"a normal thinning proceeds (got {reason!r})")
+
+    # Would remove every surviving copy.
+    ok, reason = purge_decision(live_count=4, live_expired=4, total=9)
+    check(ok is False, "deleting every live copy is refused")
+    check("surviving" in reason.lower() or "all" in reason.lower(),
+          f"the refusal says why (got {reason[:70]!r})")
+
+    # The corruption case: rows exist, none are live.
+    ok, reason = purge_decision(live_count=0, live_expired=0, total=17)
+    check(ok is False, "zero live artifacts but 17 rows -> REFUSED, not proceeded")
+    check(
+        "flagged" in reason.lower() or "no live" in reason.lower(),
+        f"the refusal names the anomaly (got {reason[:70]!r})",
+    )
+
+    # Genuinely empty pair: nothing to do, nothing to protect.
+    ok, _ = purge_decision(live_count=0, live_expired=0, total=0)
+    check(ok is True, "a pair with no artifacts at all is not an anomaly")
+
+
 async def main():
+    print("test_purge_refuses_when_nothing_is_live")
+    test_purge_refuses_when_nothing_is_live()
+    print("test_absence_requires_a_successful_probe")
+    test_absence_requires_a_successful_probe()
     print("test_checksum_verdicts")
     test_checksum_verdicts()
     print("test_offsite_destinations_refuse_plaintext")

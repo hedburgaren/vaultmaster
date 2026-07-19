@@ -252,6 +252,19 @@ async def copy_file_to_storage(dest, local_path: str, remote_subpath: str) -> tu
 _LEGACY_PATH_PREFIX = "Copied to "
 
 
+def probe_says_absent(exit_code: int | None, listing: str | None) -> bool:
+    """True only when an existence probe RAN and found nothing.
+
+    A probe that failed tells us nothing about the file. Reading its failure as
+    absence is how a file that is still there gets recorded as deleted: the row
+    is flagged, the artifact vanishes from every view the system offers, and the
+    bytes keep occupying the quota nobody is now counting.
+
+    Unknown is not absent.
+    """
+    return exit_code == 0 and not (listing or "").strip()
+
+
 def normalize_stored_path(remote_path: str) -> str:
     """Strip the legacy "Copied to " prefix from a stored artifact path.
 
@@ -304,11 +317,22 @@ async def delete_file_from_storage(dest, remote_path: str) -> tuple[bool, str]:
     # bucket-not-found and permission problems, which are real failures. Check
     # the actual state instead: if the file is not there, the desired end state
     # is reached, whatever rclone said on the way.
-    check_code, check_out, _ = await _run_rclone(
+    # The probe itself must succeed for its answer to mean anything. An earlier
+    # version accepted ANY non-zero exit as proof of absence, which turned auth
+    # failures, network outages, permission denials and timeouts into "deleted".
+    # The row would then be flagged while the file sat there consuming quota,
+    # invisible to the system. Swapping a bad inference from stderr for a bad
+    # inference from a failed probe is not an improvement.
+    check_code, check_out, check_err = await _run_rclone(
         ["lsf", target] + flags, timeout=120
     )
-    if check_code != 0 or not (check_out or "").strip():
+    if probe_says_absent(check_code, check_out):
         return True, f"already absent: {target}"
+    if check_code != 0:
+        return False, (
+            f"delete failed and existence could not be confirmed either "
+            f"(lsf exit {check_code}): {(check_err or stderr or '').strip()[:160]}"
+        )
 
     return False, f"delete failed, file still present: {stderr.strip()[:200]}"
 

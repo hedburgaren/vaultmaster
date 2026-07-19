@@ -544,12 +544,28 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
                     raise
                 log("warn", f"size-check skipped: {size_err}")
 
+        # Hash the artifact we are about to hand over. This returned "" until
+        # 2026-07-19, so all 26 custom-job artifacts carried checksum 'pending'
+        # and could never be integrity-checked, including the eleven databases
+        # whose transfer had only just been repaired. The other executors have
+        # always done this; custom was simply left out.
+        custom_checksum = ""
+        if produced_path:
+            ec, out, _err = await run_remote_command(
+                server, f"sha256sum {shlex.quote(produced_path)}", timeout=3600
+            )
+            if ec == 0 and (out or "").strip():
+                custom_checksum = out.split()[0]
+            else:
+                log("warn", f"could not compute sha256 for {latest_filename}; "
+                            "artifact will not be integrity-verifiable")
+
         return {
             "success": True,
             "filename": latest_filename,
             "remote_path": produced_path,
             "size_bytes": size_bytes,
-            "checksum_sha256": "",
+            "checksum_sha256": custom_checksum,
             # Verified by readback above before the plaintext was deleted.
             "is_encrypted": bool(recipient),
             "logs": logs,

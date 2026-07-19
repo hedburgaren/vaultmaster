@@ -199,9 +199,19 @@ async def _do_rotation(policy_id: str, job_id: str | None):
         storage_ids = [str(s) for s in storage_ids_result.scalars().all()]
 
         if not storage_ids:
-            # Legacy path: no storage_id partitioning available — fall back to
-            # global rotation. (Old artifacts before storage_id was added.)
-            storage_ids = [None]
+            # There is nothing to rotate for this scope. The old behaviour here
+            # was to fall back to storage_id=None, which makes apply_rotation
+            # pool every destination's artifacts into one bucket set. That is
+            # bug #14 by construction: two copies of the same run compete for
+            # the same slot and one gets flagged even though both were wanted.
+            #
+            # Falling back to a mode known to be wrong is worse than doing
+            # nothing, because it produces confident output either way.
+            logger.info(
+                "Rotation: no artifacts with a storage_id in scope (job_id=%s), "
+                "nothing to rotate", job_id,
+            )
+            return
 
         total_kept = 0
         total_deleted = 0

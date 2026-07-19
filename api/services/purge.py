@@ -48,6 +48,38 @@ logger = logging.getLogger(__name__)
 DEFAULT_SAFETY_FLOOR = 3
 
 
+def purge_decision(live_count: int, live_expired: int, total: int) -> tuple[bool, str]:
+    """Decide whether a (job, destination) group may be purged at all.
+
+    Three cases, and the middle one is the whole reason this exists:
+
+      total == 0            nothing recorded, nothing to protect, proceed
+      live_count == 0       rows exist but none are live. That is not an empty
+                            group, it is a group whose every row claims to be
+                            deleted, which is exactly the corruption this module
+                            was written to survive (8305 rows once claimed that
+                            while the files sat on disk). Refuse.
+      live_expired >= live  purging would remove every surviving copy. Refuse.
+
+    An earlier version wrote `if live_count and len(live_expired) >= live_count`,
+    so the zero case short-circuited the guard entirely and purge proceeded to
+    delete the only files that were actually there. Zero is an anomaly to stop
+    on, never a licence.
+    """
+    if total == 0:
+        return True, ""
+    if live_count == 0:
+        return False, (
+            f"all {total} artifact(s) are flagged deleted and none are live. "
+            "Refusing to purge: this is the flag-corruption state, and the files "
+            "may still exist. Reconcile the flags first "
+            "(scripts/repair_rotation_flags.py)."
+        )
+    if live_expired >= live_count:
+        return False, f"would delete all {live_count} surviving artifact(s)"
+    return True, ""
+
+
 def select_floor(artifacts, safety_floor: int) -> list:
     """Return the newest `safety_floor` artifacts that still exist.
 
@@ -137,20 +169,19 @@ async def plan_purge(db, safety_floor: int = DEFAULT_SAFETY_FLOOR) -> dict:
         if not expired:
             continue
 
-        # Rule 3: refuse to leave a (job, destination) with no surviving copy.
-        #
-        # Both sides of this comparison must count the same thing. An earlier
-        # version compared len(expired), which includes already-deleted ghosts,
-        # against the live count, and so refused to purge jobs that were in no
-        # danger at all. Only live artifacts can be lost, so only live ones are
-        # counted here.
+        # Rule 3, delegated to purge_decision so the zero-live case cannot be
+        # short-circuited by a falsy count again. Both sides count live rows
+        # only: an earlier version compared expired-including-ghosts against
+        # live, and refused to purge jobs that were in no danger at all.
         live_count = sum(1 for a in artifacts if not getattr(a, "is_deleted", False))
-        live_expired = [a for a in expired if not getattr(a, "is_deleted", False)]
-        if live_count and len(live_expired) >= live_count:
+        live_expired = sum(1 for a in expired if not getattr(a, "is_deleted", False))
+        may_purge, why = purge_decision(live_count, live_expired, len(artifacts))
+        if not may_purge:
+            logger.warning("purge: refusing %s/%s: %s", job_names[key], key[1], why)
             refused.append({
                 "job": job_names[key],
                 "storage_id": key[1],
-                "reason": f"would delete all {live_count} surviving artifact(s)",
+                "reason": why,
             })
             continue
 

@@ -455,8 +455,22 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             "failed_destinations": ", ".join(summary["failed"]),
                         })
 
+                elif filename and (job.destination_ids or []):
+                    # Destinations ARE configured, yet the transfer block above
+                    # was skipped, which means remote_path came back empty. That
+                    # is a broken executor contract, not a "no destinations"
+                    # case. Recording artifacts here would point them at an
+                    # empty path and call the run a success, which is how custom
+                    # jobs silently never left staging for 615 runs.
+                    raise Exception(
+                        f"Executor produced '{filename}' but no usable remote_path, "
+                        f"while {len(job.destination_ids)} destination(s) are configured. "
+                        "Refusing to record artifacts for a transfer that never happened."
+                    )
+
                 elif filename:
-                    # No destinations configured — just record artifacts without transfer
+                    # Genuinely no destinations configured: record the artifact
+                    # against nothing so the run is still traceable.
                     for dest_id in (job.destination_ids or []):
                         artifact = BackupArtifact(
                             run_id=run.id,
