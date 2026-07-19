@@ -265,6 +265,39 @@ def normalize_stored_path(remote_path: str) -> str:
     return p
 
 
+async def delete_file_from_storage(dest, remote_path: str) -> tuple[bool, str]:
+    """Delete a single artifact file from a storage destination.
+
+    This did not exist until 2026-07-19, which is why nothing ever reclaimed
+    space: rotation only ever set a database flag. Retention was enforced on
+    paper and nowhere else.
+
+    A missing file counts as success. Purge is expected to be re-runnable and
+    an already-gone file is the desired end state, not an error.
+    """
+    path = normalize_stored_path(remote_path)
+    if not path:
+        return False, "empty remote_path"
+
+    if dest.backend == "local":
+        if not os.path.isfile(path):
+            return True, f"already absent: {path}"
+        try:
+            os.remove(path)
+            return True, f"deleted {path}"
+        except OSError as e:
+            return False, f"delete failed: {e}"
+
+    remote, flags = _build_backend(dest)
+    target = path if ":" in path else f"{remote}/{path}"
+    exit_code, _stdout, stderr = await _run_rclone(["deletefile", target] + flags, timeout=300)
+    if exit_code == 0:
+        return True, f"deleted {target}"
+    if "not found" in (stderr or "").lower() or "does not exist" in (stderr or "").lower():
+        return True, f"already absent: {target}"
+    return False, f"delete failed: {stderr.strip()[:200]}"
+
+
 async def download_file_from_storage(dest, remote_path: str, local_path: str) -> tuple[bool, str]:
     """Download an artifact from a storage destination to a local file.
 
