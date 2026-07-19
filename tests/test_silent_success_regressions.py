@@ -259,7 +259,54 @@ def test_purge_looks_up_artifacts_by_uuid():
     )
 
 
+# ---------------------------------------------------------------------------
+# Defect (adversarial audit, in a fix written minutes earlier): _run_backup
+# decides to KEEP the source temp file when not every destination received a
+# copy, and logs that it is doing so. But the path was registered in
+# temp_files_to_clean before the transfer, and the finally block deletes every
+# entry unconditionally. The decision was therefore inert, and the log line
+# claiming the source was preserved was itself false.
+#
+# The retention decision has to actually withdraw the file from cleanup, not
+# merely announce an intention.
+# ---------------------------------------------------------------------------
+def test_preserved_source_is_withdrawn_from_cleanup():
+    withdraw = backup_tasks.withdraw_from_cleanup
+
+    srv = object()
+    other = object()
+    entries = [(srv, "/tmp/a.gz"), (other, "/tmp/b.gz")]
+
+    remaining = withdraw(entries, srv, "/tmp/a.gz")
+    check(
+        (srv, "/tmp/a.gz") not in remaining,
+        "the preserved file is removed from the cleanup list",
+    )
+    check(
+        (other, "/tmp/b.gz") in remaining,
+        "other servers' temp files are left alone",
+    )
+
+    # Withdrawing something absent must not explode or drop anything.
+    same = withdraw(entries, srv, "/tmp/nonexistent.gz")
+    check(len(same) == 2, "withdrawing an unknown path is a no-op")
+
+
+def test_run_backup_withdraws_before_finally():
+    import inspect
+
+    src = inspect.getsource(backup_tasks._run_backup)
+    check(
+        "withdraw_from_cleanup" in src,
+        "_run_backup withdraws the preserved source from the finally-block cleanup list",
+    )
+
+
 async def main():
+    print("test_preserved_source_is_withdrawn_from_cleanup")
+    test_preserved_source_is_withdrawn_from_cleanup()
+    print("test_run_backup_withdraws_before_finally")
+    test_run_backup_withdraws_before_finally()
     print("test_safety_floor_counts_only_live_artifacts")
     test_safety_floor_counts_only_live_artifacts()
     print("test_purge_looks_up_artifacts_by_uuid")

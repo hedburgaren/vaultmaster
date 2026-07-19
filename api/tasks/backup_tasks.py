@@ -45,6 +45,24 @@ def summarise_transfers(results: list[tuple[str, bool]]) -> dict:
     }
 
 
+def withdraw_from_cleanup(entries: list, server, path: str) -> list:
+    """Remove one (server, path) pair from the guaranteed-cleanup list.
+
+    The finally block in _run_backup deletes every registered temp file no
+    matter how the run ended, which is correct for the normal case: an orphaned
+    temp file would otherwise leak forever.
+
+    It is wrong for the one case where the temp file is the only surviving copy.
+    When a destination fails, the source must be kept so the transfer can be
+    retried, and that decision has to physically withdraw the file from the
+    cleanup list. An earlier version only logged its intention and let the
+    finally block delete the file anyway, so the log claimed the source was
+    preserved while it was being removed. Announcing a decision is not the same
+    as taking it.
+    """
+    return [(s, p) for (s, p) in entries if not (s is server and p == path)]
+
+
 def file_is_free(fuser_rc: int | None) -> bool:
     """True only when `fuser` positively reported the file as unused.
 
@@ -340,10 +358,17 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             await delete_remote_file(server, remote_path)
                             logger.info(f"[{run.id}] Cleaned up remote temp file: {remote_path}")
                     else:
+                        # Withdraw it from the finally-block cleanup, otherwise
+                        # this branch only logs an intention that the finally
+                        # block then overrides.
+                        temp_files_to_clean = withdraw_from_cleanup(
+                            temp_files_to_clean, server, remote_path
+                        )
                         logger.error(
                             f"[{run.id}] KEEPING source file {remote_path}: only "
                             f"{summary['ok_count']}/{summary['total']} destination(s) "
-                            f"received it. Failed: {summary['failed']}"
+                            f"received it. Failed: {summary['failed']}. "
+                            f"Withdrawn from temp cleanup so it can be retried."
                         )
 
                     # A run where nothing reached storage is not a success. The
