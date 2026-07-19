@@ -133,4 +133,49 @@ app.include_router(metrics.router, prefix="/api")
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "vaultmaster"}
+    """Report whether the dependencies this service cannot work without are up.
+
+    Used to return a static {"status": "ok"} that could not fail. A health check
+    that cannot fail is not a health check: it reports the web process is
+    accepting connections, which the caller already knew by getting a response,
+    and stays green through a dead database or a stopped worker.
+
+    Returns 503 when a dependency is down, so anything watching this endpoint
+    finds out from the endpoint rather than from a missing backup.
+    """
+    from sqlalchemy import text as _text
+
+    from api.database import async_session
+
+    checks: dict[str, str] = {}
+    healthy = True
+
+    try:
+        async with async_session() as session:
+            await session.execute(_text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"FAILED: {type(e).__name__}: {str(e)[:120]}"
+        healthy = False
+
+    try:
+        import redis.asyncio as _redis
+
+        client = _redis.from_url(get_settings().redis_url)
+        try:
+            await client.ping()
+            checks["redis"] = "ok"
+        finally:
+            await client.aclose()
+    except Exception as e:
+        checks["redis"] = f"FAILED: {type(e).__name__}: {str(e)[:120]}"
+        healthy = False
+
+    body = {
+        "status": "ok" if healthy else "degraded",
+        "service": "vaultmaster",
+        "checks": checks,
+    }
+    if not healthy:
+        return JSONResponse(status_code=503, content=body)
+    return body
