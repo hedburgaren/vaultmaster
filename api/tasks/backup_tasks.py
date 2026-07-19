@@ -678,7 +678,7 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
     from api.models.server import Server
     from api.services import age_crypto
     from api.services.restore_validator import _download_artifact_to_temp, _decrypt_if_needed, _run
-    from api.services.ssh_client import run_remote_command
+    from api.services.ssh_client import run_remote_command, upload_remote_file
 
     logs: list[str] = []
 
@@ -714,6 +714,25 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
             filename = artifact.filename or "restore.dump.gz"
             backup_type = artifact.backup_type
 
+            # Restore has to run where the dump was produced, with the same
+            # client version and role. Running it on the host instead failed two
+            # ways at once: the host's pg_restore is older than the source
+            # server (PG 17 writes archive 1.16, which pg_restore 16 rejects),
+            # and psql connected as the sudo user, giving "role root does not
+            # exist". The backup path already knew all this; the restore path
+            # was written without looking at it.
+            from api.models.backup_job import BackupJob
+            from api.models.backup_run import BackupRun
+
+            src_job = (await db.execute(
+                select(BackupJob)
+                .join(BackupRun, BackupRun.job_id == BackupJob.id)
+                .where(BackupRun.id == artifact.run_id)
+            )).scalar_one_or_none()
+            src_cfg = (src_job.source_config if src_job else {}) or {}
+            src_container = src_cfg.get("container")
+            src_user = src_cfg.get("username") or src_cfg.get("pg_user") or "postgres"
+
         local_path = os.path.join(workdir, filename)
         log(f"downloading {filename}")
         ok, msg = await _download_artifact_to_temp(artifact, local_path)
@@ -744,29 +763,46 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
         remote_tmp = f"/tmp/vaultmaster/restore_{artifact_id}"
         await run_remote_command(server, f"mkdir -p {shlex.quote(os.path.dirname(remote_tmp))}")
 
-        code, out, err = await _run(
-            ["scp", "-P", str(server.port), local_path,
-             f"{server.ssh_user}@{server.host}:{remote_tmp}"],
-            timeout=3600,
-        )
-        if code != 0:
-            return {"status": "failed", "error": f"scp to target failed: {(err or out)[:300]}", "logs": logs}
+        # Use the shared SSH helper, not raw scp. scp with server.host verbatim
+        # resolves 127.0.0.1 to this container's loopback rather than the Docker
+        # host, so every restore failed with "connection refused" on a port that
+        # was open the whole time. _build_connect_kwargs knows how to reach the
+        # host; going around it threw that knowledge away.
+        ok, msg = await upload_remote_file(server, local_path, remote_tmp)
+        if not ok:
+            return {"status": "failed", "error": f"upload to target failed: {msg[:300]}", "logs": logs}
 
         # Same masking hazard as restore_validator: a bare `pg_restore || psql`
         # reports only the fallback's status, so a failed restore looks like a
         # success. Each reader's outcome is captured explicitly instead, and
         # ON_ERROR_STOP makes psql fail on the first error rather than plough on.
         q = shlex.quote(remote_tmp)
-        restore_cmd = (
-            f"set -o pipefail; "
-            f"if gunzip -c {q} | pg_restore --no-owner --no-acl -d {db_q} 2>&1; then "
+        # Wrapped in bash explicitly. `set -o pipefail` bare would run under
+        # whatever /bin/sh is, and run_remote_command puts sudo'd commands
+        # through `sh -c`, which on Ubuntu is dash: "Illegal option -o pipefail".
+        # Same reasoning as age_crypto.wrap_pipeline, which got this right; this
+        # call site did not.
+        u_q = shlex.quote(src_user)
+        if src_container:
+            # Stream the dump into the database container over stdin, matching
+            # how the backup produced it (docker exec ... pg_dump).
+            c_q = shlex.quote(src_container)
+            pg_restore = f"docker exec -i {c_q} pg_restore -U {u_q} --no-owner --no-acl -d {db_q}"
+            psql = f"docker exec -i {c_q} psql -U {u_q} -d {db_q} -v ON_ERROR_STOP=1"
+        else:
+            pg_restore = f"pg_restore -U {u_q} --no-owner --no-acl -d {db_q}"
+            psql = f"psql -U {u_q} -d {db_q} -v ON_ERROR_STOP=1"
+
+        inner = (
+            f"if gunzip -c {q} | {pg_restore} 2>&1; then "
             f"  echo 'VM_RESTORE_VIA=pg_restore'; "
-            f"elif gunzip -c {q} | psql -d {db_q} -v ON_ERROR_STOP=1 2>&1; then "
+            f"elif gunzip -c {q} | {psql} 2>&1; then "
             f"  echo 'VM_RESTORE_VIA=psql'; "
             f"else "
             f"  echo 'VM_RESTORE_VIA=none'; exit 1; "
             f"fi"
         )
+        restore_cmd = f"bash -o pipefail -c {shlex.quote(inner)}"
         exit_code, stdout, stderr = await run_remote_command(server, restore_cmd, timeout=7200)
         await run_remote_command(server, f"rm -f {shlex.quote(remote_tmp)}")
 

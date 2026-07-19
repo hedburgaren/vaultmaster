@@ -507,6 +507,49 @@ def is_local_server(server) -> bool:
     return False
 
 
+async def upload_remote_file(
+    server,
+    local_path: str,
+    remote_path: str,
+    timeout: int = 4 * 3600,
+    max_retries: int = 2,
+) -> tuple[bool, str]:
+    """Upload a local file to a server via SFTP.
+
+    Added 2026-07-19 because the restore path shelled out to `scp` with
+    `server.host` verbatim. Inside this container 127.0.0.1 is the container's
+    own loopback, not the Docker host, so every restore died with "connection
+    refused" on a port that is open. _build_connect_kwargs already rewrites
+    localhost via _resolve_host, which is exactly the knowledge the raw scp
+    call threw away.
+
+    Uses the same connection setup as every other SSH operation here, so host
+    resolution, auth and key handling cannot drift apart from them again.
+    """
+    kwargs = _build_connect_kwargs(server)
+    last_err: str = ""
+
+    async def _do_transfer() -> None:
+        async with asyncssh.connect(**kwargs) as conn:
+            async with conn.start_sftp_client() as sftp:
+                await sftp.put(local_path, remote_path)
+
+    for attempt in range(max_retries + 1):
+        try:
+            await asyncio.wait_for(_do_transfer(), timeout=timeout)
+            return True, f"Uploaded {local_path} to {remote_path}"
+        except asyncio.TimeoutError:
+            last_err = f"SFTP upload wall-clock timeout after {timeout}s for {remote_path}"
+            logger.error(last_err)
+        except Exception as e:
+            last_err = f"SFTP upload failed: {e}"
+            logger.error(last_err)
+        if attempt < max_retries:
+            await asyncio.sleep(2 ** attempt * 5)
+
+    return False, last_err
+
+
 async def download_remote_file(
     server,
     remote_path: str,
