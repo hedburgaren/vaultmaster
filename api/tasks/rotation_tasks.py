@@ -69,6 +69,8 @@ async def _do_enforce_retention():
         }
 
         rotated = 0
+        newly_flagged = 0
+        skipped: list[str] = []
         for job in jobs:
             overrides = job.retention_overrides or {}
             for dest_id in (job.destination_ids or []):
@@ -78,10 +80,29 @@ async def _do_enforce_retention():
                 )
                 policy = policies.get(str(policy_id)) if policy_id else None
                 if not policy:
+                    # A pair with no resolvable policy is never rotated and
+                    # never purged, so it grows forever. Skipping it silently
+                    # (which is what this did) makes that invisible.
+                    skipped.append(f"{job.name}/{dest_str}")
                     continue
-                await apply_rotation(db, policy, str(job.id), storage_id=dest_str)
+                res = await apply_rotation(db, policy, str(job.id), storage_id=dest_str)
                 rotated += 1
+                newly_flagged += res.get("deleted", 0)
         await db.commit()
+
+        if skipped:
+            # Loud on purpose: this is a retention hole, not a detail.
+            logger.error(
+                "enforce_retention: %d job/destination pair(s) have NO resolvable "
+                "retention policy and were not rotated or purged. They will grow "
+                "without bound: %s",
+                len(skipped), ", ".join(skipped[:20]),
+            )
+            await notify_event(db, "retention.unconfigured", {
+                "count": len(skipped),
+                "pairs": ", ".join(skipped[:10]),
+            })
+            await db.commit()
 
         # Phase 2: reclaim the space. Flags alone were the original bug.
         if not getattr(settings, "purge_enabled", True):
@@ -91,7 +112,16 @@ async def _do_enforce_retention():
             )
             return {"rotated": rotated, "purge": "disabled"}
 
-        floor = int(getattr(settings, "purge_safety_floor", 3) or 3)
+        # `x or 3` would turn an explicit 0 back into 3, so a deliberate
+        # "no floor" setting would silently not apply. 0 is a legitimate if
+        # risky choice; honour it and say so rather than overriding it quietly.
+        raw_floor = getattr(settings, "purge_safety_floor", 3)
+        floor = 3 if raw_floor is None else int(raw_floor)
+        if floor <= 0:
+            logger.warning(
+                "enforce_retention: purge_safety_floor is %d, so NO minimum number "
+                "of backups is protected from deletion by policy.", floor,
+            )
         plan = await plan_purge(db, safety_floor=floor)
 
         if plan["refused"]:
@@ -100,11 +130,17 @@ async def _do_enforce_retention():
 
         if not plan["to_delete"]:
             logger.info("enforce_retention: rotation done (%d pairs), nothing to purge", rotated)
-            return {"rotated": rotated, "deleted": 0, "reclaimed_bytes": 0}
+            return {"rotated": rotated, "newly_flagged": newly_flagged,
+                    "skipped_no_policy": skipped, "deleted": 0, "reclaimed_bytes": 0}
 
         result = await execute_purge(db, plan)
 
-        if result["deleted"]:
+        # Commit unconditionally: execute_purge mutates rows on the partial-
+        # failure path too, and gating the commit on a non-zero delete count
+        # would strand those changes.
+        await db.commit()
+
+        if result["deleted"] or result["failed"]:
             await notify_event(db, "retention.purged", {
                 "deleted": result["deleted"],
                 "reclaimed_gb": round(result["reclaimed_bytes"] / 1e9, 1),
@@ -116,7 +152,8 @@ async def _do_enforce_retention():
             "enforce_retention: rotated %d pairs, deleted %d artifacts, reclaimed %.1f GB",
             rotated, result["deleted"], result["reclaimed_bytes"] / 1e9,
         )
-        return {"rotated": rotated, **result}
+        return {"rotated": rotated, "newly_flagged": newly_flagged,
+                "skipped_no_policy": skipped, **result}
 
 
 async def _do_rotation(policy_id: str, job_id: str | None):

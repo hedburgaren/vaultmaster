@@ -441,7 +441,28 @@ async def list_remote_docker(server) -> dict:
                         "used_by": volume_to_containers.get(vol_name, []),
                     })
 
-            return {"containers": containers, "volumes": volumes, "error": None}
+            # A failed docker command used to leave its list empty and still
+            # report error=None, so "docker is unreachable" and "this host runs
+            # no containers" looked identical to the caller and the UI.
+            probe_errors = []
+            if c_result.exit_status != 0:
+                probe_errors.append(
+                    f"docker ps failed (exit {c_result.exit_status}): "
+                    f"{(c_result.stderr or '').strip()[:150]}"
+                )
+            if v_result.exit_status != 0:
+                probe_errors.append(
+                    f"docker volume ls failed (exit {v_result.exit_status}): "
+                    f"{(v_result.stderr or '').strip()[:150]}"
+                )
+            if probe_errors:
+                logger.warning(f"list_remote_docker({server.name}): {'; '.join(probe_errors)}")
+
+            return {
+                "containers": containers,
+                "volumes": volumes,
+                "error": "; ".join(probe_errors) if probe_errors else None,
+            }
 
     except Exception as e:
         logger.error(f"Failed to list Docker on {getattr(server, 'name', '?')}: {e}")

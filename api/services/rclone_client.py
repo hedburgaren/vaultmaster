@@ -293,9 +293,24 @@ async def delete_file_from_storage(dest, remote_path: str) -> tuple[bool, str]:
     exit_code, _stdout, stderr = await _run_rclone(["deletefile", target] + flags, timeout=300)
     if exit_code == 0:
         return True, f"deleted {target}"
-    if "not found" in (stderr or "").lower() or "does not exist" in (stderr or "").lower():
+
+    # Do not infer the outcome from the error text. The first version matched
+    # "not found" and "does not exist", and rclone actually says "is a directory
+    # or doesn't exist" (contraction), so every already-deleted file was
+    # reported as a failure. Its row then never got flagged and the next run
+    # retried the same delete forever.
+    #
+    # String matching is the wrong tool anyway: the same phrases appear for
+    # bucket-not-found and permission problems, which are real failures. Check
+    # the actual state instead: if the file is not there, the desired end state
+    # is reached, whatever rclone said on the way.
+    check_code, check_out, _ = await _run_rclone(
+        ["lsf", target] + flags, timeout=120
+    )
+    if check_code != 0 or not (check_out or "").strip():
         return True, f"already absent: {target}"
-    return False, f"delete failed: {stderr.strip()[:200]}"
+
+    return False, f"delete failed, file still present: {stderr.strip()[:200]}"
 
 
 async def download_file_from_storage(dest, remote_path: str, local_path: str) -> tuple[bool, str]:
