@@ -39,6 +39,7 @@ from api.models.backup_run import BackupRun
 from api.models.retention_policy import RetentionPolicy
 from api.models.storage_destination import StorageDestination
 from api.services.rclone_client import delete_file_from_storage
+from api.services.rotation import select_expired
 
 logger = logging.getLogger(__name__)
 
@@ -79,20 +80,18 @@ async def plan_purge(db, safety_floor: int = DEFAULT_SAFETY_FLOOR) -> dict:
 
     for key, artifacts in grouped.items():
         policy = policies[key]
-        max_age_days = int(getattr(policy, "max_age_days", 0) or 0)
-        if max_age_days <= 0:
-            # No age limit configured. GFS thinning is rotation's job; this
-            # module only reclaims space for things that have aged out.
-            continue
-
-        cutoff = now - timedelta(days=max_age_days)
         artifacts.sort(key=lambda a: a.created_at, reverse=True)
+
+        # Same decision function rotation uses, so the flag and the file can
+        # never disagree. Recomputed from the policy, never read from
+        # is_deleted, which is corrupt for 8305 historical rows.
+        expired_ids = select_expired(artifacts, policy, now)
 
         floor = artifacts[:safety_floor]
         candidates = artifacts[safety_floor:]
         kept_by_floor += len(floor)
 
-        expired = [a for a in candidates if a.created_at < cutoff]
+        expired = [a for a in candidates if a.id in expired_ids]
         if not expired:
             continue
 
@@ -115,7 +114,7 @@ async def plan_purge(db, safety_floor: int = DEFAULT_SAFETY_FLOOR) -> dict:
                 "size_bytes": a.size_bytes or 0,
                 "created_at": a.created_at,
                 "age_days": (now - a.created_at).days,
-                "max_age_days": max_age_days,
+                "max_age_days": int(getattr(policy, "max_age_days", 0) or 0),
             })
 
     return {
