@@ -1105,7 +1105,7 @@ def check_server_health():
 async def _check_health():
     from sqlalchemy import select
     from api.models.server import Server
-    from api.services.ssh_client import test_ssh_connection
+    from api.services.ssh_client import test_ssh_connection, connectivity_is_testable
     from api.services.notifier import notify_event
 
     async with get_task_session() as db:
@@ -1116,7 +1116,16 @@ async def _check_health():
             success, message = await test_ssh_connection(server)
             was_online = server.last_seen and (datetime.now(timezone.utc) - server.last_seen).total_seconds() < 600
 
-            if success:
+            if success and not connectivity_is_testable(server):
+                # Nothing was probed, so nothing was learned. Stamping last_seen
+                # here kept API-type servers permanently "seen 0 seconds ago",
+                # which made was_online always true and server.offline
+                # unreachable for exactly the servers we could not verify.
+                logger.info(
+                    "health check: %s is auth_type=api, connectivity NOT verified "
+                    "(%s). Leaving last_seen untouched.", server.name, message,
+                )
+            elif success:
                 server.last_seen = datetime.now(timezone.utc)
                 server.last_error = None
             else:

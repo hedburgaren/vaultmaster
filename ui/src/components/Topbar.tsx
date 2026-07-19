@@ -17,7 +17,10 @@ export default function Topbar() {
 
   const load = () => {
     getDashboard().then((d: any) => {
-      setFailedCount(d.runs_failed_24h || 0);
+      // Bell shows what still needs a human, so acknowledging clears it.
+      // The dashboard card uses runs_failed_24h, the honest total, which
+      // acknowledging must NOT clear.
+      setFailedCount(d.runs_failed_unacked_24h ?? d.runs_failed_24h ?? 0);
       setErrorCount(d.recent_errors?.length || 0);
       setErrors(d.recent_errors || []);
     }).catch(() => {});

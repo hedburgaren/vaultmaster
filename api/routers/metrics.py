@@ -48,7 +48,15 @@ async def prometheus_metrics(db: AsyncSession = Depends(get_db)):
     gauge("vaultmaster_runs_24h_total", "Total runs in last 24h", len(runs_24h))
     gauge("vaultmaster_runs_24h_success", "Successful runs in last 24h", sum(1 for r in runs_24h if r.status == "success"))
     gauge("vaultmaster_runs_24h_failed", "Failed runs in last 24h", sum(1 for r in runs_24h if r.status == "failed"))
-    gauge("vaultmaster_runs_active", "Currently running backups", sum(1 for r in runs_24h if r.status == "running"))
+    # Deliberately NOT computed from runs_24h. A run stuck in "running" for
+    # more than a day is exactly the one worth alerting on, and windowing the
+    # query to 24h made it drop out of the gauge: the longer a backup hangs,
+    # the healthier this number looked. dashboard.py:82 already queries it
+    # unwindowed, which is the correct shape.
+    active_runs = (await db.execute(
+        select(BackupRun).where(BackupRun.status == "running")
+    )).scalars().all()
+    gauge("vaultmaster_runs_active", "Currently running backups", len(active_runs))
 
     # Success rate
     success = sum(1 for r in runs_24h if r.status == "success")

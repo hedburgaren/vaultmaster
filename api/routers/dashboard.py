@@ -53,10 +53,16 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
     )
     runs = runs_result.scalars().all()
     runs_success = sum(1 for r in runs if r.status == "success")
-    # Failed-count for the topbar bell counts only un-acknowledged ones,
-    # so it stays in lockstep with the recent_errors panel below.
-    # Status text on dashboard still reflects total failure rate.
-    runs_failed = sum(1 for r in runs if r.status == "failed" and r.acknowledged_at is None)
+    # Two different questions, two different fields. Conflating them made the
+    # dashboard card flip to green "all clear" the moment somebody clicked
+    # acknowledge, while the backups were still failing: acknowledging an
+    # error is a statement about the operator, not about the system.
+    #
+    #   runs_failed_24h         what actually happened. Drives the card.
+    #   runs_failed_unacked_24h what still needs a human. Drives the bell.
+    runs_failed_unacked = sum(
+        1 for r in runs if r.status == "failed" and r.acknowledged_at is None
+    )
     runs_failed_total = sum(1 for r in runs if r.status == "failed")
     success_rate = round(runs_success / max(runs_success + runs_failed_total, 1) * 100, 1)
 
@@ -178,7 +184,8 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         storage_destinations=storage_info,
         runs_24h=len(runs),
         runs_success_24h=runs_success,
-        runs_failed_24h=runs_failed,
+        runs_failed_24h=runs_failed_total,
+        runs_failed_unacked_24h=runs_failed_unacked,
         success_rate=success_rate,
         next_runs=next_runs[:10],
         active_runs=active_runs,

@@ -140,17 +140,24 @@ async def _do_enforce_retention():
         # would strand those changes.
         await db.commit()
 
+        # already_gone deliberately does NOT trigger a notification on its own.
+        # Reconciling rows for files that were already absent frees nothing, so
+        # announcing it as a purge would be the same false report this task
+        # exists to remove.
         if result["deleted"] or result["failed"]:
             await notify_event(db, "retention.purged", {
                 "deleted": result["deleted"],
                 "reclaimed_gb": round(result["reclaimed_bytes"] / 1e9, 1),
+                "already_gone": result.get("already_gone", 0),
                 "failed": result["failed"],
             })
             await db.commit()
 
         logger.info(
-            "enforce_retention: rotated %d pairs, deleted %d artifacts, reclaimed %.1f GB",
+            "enforce_retention: rotated %d pairs, deleted %d artifacts, "
+            "reclaimed %.1f GB, %d already gone",
             rotated, result["deleted"], result["reclaimed_bytes"] / 1e9,
+            result.get("already_gone", 0),
         )
         return {"rotated": rotated, "newly_flagged": newly_flagged,
                 "skipped_no_policy": skipped, **result}

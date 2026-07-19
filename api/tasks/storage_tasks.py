@@ -37,20 +37,27 @@ async def _refresh() -> None:
         )
         destinations = result.scalars().all()
 
+        refreshed = 0
+        stale: list[str] = []
+
         for dest in destinations:
             try:
                 usage = await get_storage_usage(dest)
             except Exception as exc:
                 logger.warning(f"storage usage probe failed for {dest.name}: {exc}")
+                stale.append(f"{dest.name} (probe raised: {exc})")
                 continue
 
             if "error" in usage:
                 logger.warning(f"storage usage probe error for {dest.name}: {usage['error']}")
+                stale.append(f"{dest.name} ({usage['error']})")
                 continue
 
             total = usage.get("total_bytes")
             used = usage.get("used_bytes")
             if used is None:
+                logger.warning(f"storage usage probe for {dest.name} returned no used_bytes")
+                stale.append(f"{dest.name} (no used_bytes in response)")
                 continue
 
             prev_used = dest.used_bytes or 0
@@ -77,5 +84,20 @@ async def _refresh() -> None:
                         "percent_used": round(ratio * 100, 1),
                     })
 
+            refreshed += 1
+
         await db.commit()
-        logger.info(f"refreshed usage for {len(destinations)} destinations")
+
+        # Report what was updated, not what was selected. The old line counted
+        # destinations chosen for the loop, so a destination whose probe failed
+        # kept its stale used_bytes and stale last_checked while the log claimed
+        # it had just been refreshed. A quota reading nobody could tell was old
+        # is how you run into a full disk that the dashboard says is at 40%.
+        logger.info(
+            "refreshed usage for %d of %d destinations", refreshed, len(destinations)
+        )
+        if stale:
+            logger.error(
+                "storage usage: %d destination(s) NOT refreshed, their figures are "
+                "stale: %s", len(stale), "; ".join(stale[:10]),
+            )

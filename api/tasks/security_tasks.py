@@ -40,10 +40,11 @@ async def _run_scan() -> None:
         "credential_expiry": {"expired": 0, "expiring_30d": 0, "unbounded": 0, "total": 0},
         "mcp_orphans": [],
         "mcp_expired": [],
+        "python_scan_error": None,
         "scan_started_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    findings["python_vulns"] = await _pip_audit()
+    findings["python_vulns"], findings["python_scan_error"] = await _pip_audit()
 
     from sqlalchemy import select
     from api.models.credential import Credential
@@ -91,6 +92,12 @@ async def _run_scan() -> None:
     n_vulns = len(findings["python_vulns"])
     n_orphans = len(findings["mcp_orphans"])
     n_expired_mcp = len(findings["mcp_expired"])
+    if findings["python_scan_error"]:
+        logger.error(
+            "security scan: Python CVE scan DID NOT RUN (%s). The report says so "
+            "explicitly rather than implying an all-clear.",
+            findings["python_scan_error"],
+        )
     logger.info(
         "security scan: %d Python vulns, %d expired creds, %d MCP orphans, %d MCP expired",
         n_vulns,
@@ -100,20 +107,31 @@ async def _run_scan() -> None:
     )
 
 
-async def _pip_audit() -> list[dict]:
-    """Run pip-audit and parse JSON output. Returns [] on any failure.
+async def _pip_audit() -> tuple[list[dict], str | None]:
+    """Run pip-audit and parse JSON output.
 
-    Bug #16 (deferred — too large for this batch): pip-audit currently runs
+    Returns (vulnerabilities, error). `error` is None only when the scan
+    actually ran to completion. An empty list with error=None means "scanned,
+    found nothing". An empty list with an error string means "did not scan".
+
+    This used to return a bare [] on every failure path, and the notifier
+    rendered any empty list as "Python CVEs: none detected". A network failure
+    against PyPI, the 180s timeout, or malformed JSON therefore produced a
+    weekly email that actively asserted the absence of CVEs nobody had looked
+    for. Silence and an all-clear are not the same message.
+
+    Bug #16 (deferred, too large for this batch): pip-audit currently runs
     inside the api container as the celery worker user (often root) and
     contacts the public PyPI / OSV indexes. A poisoned PyPI mirror or a CVE
     in pip-audit itself would have full network/FS reach inside the api
     container. Long-term mitigation is to invoke pip-audit inside a
     short-lived, network-restricted container (e.g. ``docker run --rm
-    --network none --read-only``) — tracked separately.
+    --network none --read-only``), tracked separately.
     """
     if not shutil.which("pip-audit"):
         logger.warning("pip-audit not on PATH; skipping Python CVE scan")
-        return []
+        return [], "pip-audit not installed"
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "pip-audit", "--format=json", "--progress-spinner=off",
@@ -122,19 +140,44 @@ async def _pip_audit() -> list[dict]:
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
     except asyncio.TimeoutError:
+        # Without the kill the subprocess outlives the task and keeps holding
+        # its pipes, so repeated weekly timeouts leak one process each.
         logger.error("pip-audit timed out after 3 min")
-        return []
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+        return [], "pip-audit timed out after 180s"
+    except OSError as exc:
+        logger.error("pip-audit could not be started: %s", exc)
+        return [], f"pip-audit could not be started: {exc}"
+
+    if proc.returncode not in (0, 1):
+        # pip-audit exits 1 when it FINDS vulnerabilities, which is a
+        # successful scan. Anything else means it did not complete.
+        err = (stderr or b"").decode(errors="replace").strip()[:200]
+        logger.error("pip-audit exited %s: %s", proc.returncode, err)
+        return [], f"pip-audit exited {proc.returncode}: {err or 'no stderr'}"
     if not stdout:
-        logger.warning("pip-audit produced no output: %s", stderr.decode(errors="replace")[:200])
-        return []
+        detail = (stderr or b"").decode(errors="replace")[:200]
+        logger.warning("pip-audit produced no output: %s", detail)
+        return [], f"pip-audit produced no output: {detail or 'no stderr'}"
     try:
         data = json.loads(stdout)
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as exc:
+        logger.error("pip-audit output was not valid JSON: %s", exc)
+        return [], f"pip-audit output was not valid JSON: {exc}"
     out: list[dict] = []
     deps = data.get("dependencies") if isinstance(data, dict) else data
+    if deps is None:
+        # Valid JSON in a shape we do not recognise. Not the same as an
+        # audit of zero packages.
+        return [], "pip-audit returned JSON without a dependencies list"
     if not deps:
-        return out
+        # An audit that inspected zero packages has not cleared anything.
+        return [], "pip-audit reported zero packages, nothing was audited"
     for dep in deps:
         for vuln in dep.get("vulns", []):
             out.append({
@@ -144,4 +187,4 @@ async def _pip_audit() -> list[dict]:
                 "fix_versions": vuln.get("fix_versions", []),
                 "description": (vuln.get("description") or "")[:300],
             })
-    return out
+    return out, None

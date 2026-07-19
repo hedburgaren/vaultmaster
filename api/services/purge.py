@@ -112,10 +112,22 @@ async def plan_purge(db, safety_floor: int = DEFAULT_SAFETY_FLOOR) -> dict:
     """
     now = datetime.now(timezone.utc)
 
+    # deleted_at, not is_deleted. Only execute_purge sets deleted_at, and only
+    # after the backend confirmed the file is gone, so it means "physically
+    # purged by us". is_deleted is the weaker signal: rotation sets it from
+    # policy alone, which is why 8305 historical rows carried it without any
+    # file ever having been removed.
+    #
+    # Without this filter every already-purged row was re-planned on every run.
+    # delete_file_from_storage answers "already absent" with ok=True, so the
+    # same artifacts were counted as freshly deleted and their bytes as freshly
+    # reclaimed, every single day, forever. The daily retention.purged notice
+    # reported the same GB over and over for space that was released once.
     rows = (await db.execute(
         select(BackupArtifact, BackupJob)
         .join(BackupRun, BackupRun.id == BackupArtifact.run_id)
         .join(BackupJob, BackupJob.id == BackupRun.job_id)
+        .where(BackupArtifact.deleted_at.is_(None))
     )).all()
 
     all_policies = {
@@ -222,6 +234,7 @@ async def execute_purge(db, plan: dict, limit: int | None = None) -> dict:
 
     deleted = 0
     failed = 0
+    already_gone = 0
     reclaimed = 0
     errors = []
 
@@ -273,17 +286,26 @@ async def execute_purge(db, plan: dict, limit: int | None = None) -> dict:
         artifact.is_deleted = True
         artifact.deleted_at = datetime.now(timezone.utc)
 
-        deleted += 1
-        reclaimed += item["size_bytes"]
+        # delete_file_from_storage answers ok=True both for "I removed it" and
+        # for "it was not there". Reconciling the row is right either way, but
+        # only the first case freed any space. Counting the second inflates
+        # reclaimed_bytes with bytes that were released by some earlier run,
+        # or never existed.
+        if msg.startswith("already absent"):
+            already_gone += 1
+        else:
+            deleted += 1
+            reclaimed += item["size_bytes"]
 
     await db.commit()
 
     logger.info(
-        "purge: deleted %d artifacts (%.1f GB reclaimed), %d failed",
-        deleted, reclaimed / 1e9, failed,
+        "purge: deleted %d artifacts (%.1f GB reclaimed), %d were already gone, %d failed",
+        deleted, reclaimed / 1e9, already_gone, failed,
     )
     return {
         "deleted": deleted,
+        "already_gone": already_gone,
         "failed": failed,
         "reclaimed_bytes": reclaimed,
         "errors": errors[:20],

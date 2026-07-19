@@ -97,6 +97,18 @@ def _build_connect_kwargs(server) -> dict:
     return kwargs
 
 
+def connectivity_is_testable(server) -> bool:
+    """Whether test_ssh_connection actually reaches out to the server.
+
+    For auth_type='api' it does not: it validates the shape of the host string
+    and returns True. Treating that True as proof of life meant a dead API
+    target was stamped last_seen on every health sweep and could never trip
+    server.offline. The check is not wrong, it is just answering a different
+    question than the caller was asking.
+    """
+    return getattr(server, "auth_type", "") != "api"
+
+
 async def test_ssh_connection(server) -> tuple[bool, str]:
     """Test SSH connectivity to a server.
 
@@ -130,7 +142,14 @@ async def test_ssh_connection(server) -> tuple[bool, str]:
             # do here. Real connectivity is verified by the provider client.
             if not (host.startswith("http://") or host.startswith("https://") or "." in host or ":" in host):
                 return False, f"API host {host!r} doesn't look like a URL/hostname"
-            return True, f"API-based server (host={host}) — provider client tests connectivity"
+            # True here means "the host string is well formed", NOT "the server
+            # answered". Callers must gate last_seen on connectivity_is_testable()
+            # so a dead API target does not get stamped as freshly online, which
+            # would make server.offline permanently unreachable for it.
+            return True, (
+                f"API-based server (host={host}), NOT probed: "
+                f"connectivity is verified by the provider client, not here"
+            )
 
         kwargs = _build_connect_kwargs(server)
         async with asyncssh.connect(**kwargs) as conn:

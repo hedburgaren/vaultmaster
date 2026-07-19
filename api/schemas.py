@@ -474,6 +474,10 @@ class DashboardOut(BaseModel):
     runs_24h: int
     runs_success_24h: int
     runs_failed_24h: int
+    # Subset of runs_failed_24h that nobody has acknowledged yet. Drives the
+    # topbar bell. runs_failed_24h itself must stay the honest total, so the
+    # dashboard cannot go green over a system that is still broken.
+    runs_failed_unacked_24h: int = 0
     success_rate: float
     next_runs: list[dict]
     active_runs: list[dict]

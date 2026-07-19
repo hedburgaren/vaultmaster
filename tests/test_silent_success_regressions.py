@@ -485,6 +485,117 @@ def test_purge_refuses_when_nothing_is_live():
     check(ok is True, "a pair with no artifacts at all is not an anomaly")
 
 
+def test_cve_report_separates_clean_scan_from_no_scan():
+    """A failed CVE scan must not render as an all-clear.
+
+    Before the fix _pip_audit returned [] on every failure path and this
+    formatter turned any empty list into "Python CVEs: none detected". The
+    weekly email therefore asserted the absence of vulnerabilities that
+    nobody had looked for.
+    """
+    from api.services.notifier import _format_event_message
+
+    clean = _format_event_message("security.report", {
+        "python_vulns": [], "python_scan_error": None,
+        "credential_expiry": {}, "mcp_orphans": [], "mcp_expired": [],
+    })
+    check("none detected" in clean,
+          "a scan that ran and found nothing still reports an all-clear")
+
+    broken = _format_event_message("security.report", {
+        "python_vulns": [], "python_scan_error": "pip-audit timed out after 180s",
+        "credential_expiry": {}, "mcp_orphans": [], "mcp_expired": [],
+    })
+    check("none detected" not in broken,
+          "a scan that did NOT run never claims none detected")
+    check("DID NOT RUN" in broken and "timed out" in broken,
+          "a failed scan names itself and the reason")
+    check("NOT an all-clear" in broken,
+          "the report says outright that it is not reassurance")
+
+
+def test_pip_audit_returns_error_channel():
+    """_pip_audit must have somewhere to put 'I could not run'."""
+    import inspect
+    from api.tasks.security_tasks import _pip_audit
+
+    sig = inspect.signature(_pip_audit)
+    check("tuple" in str(sig.return_annotation),
+          "_pip_audit returns (vulns, error), not a bare list")
+
+    src = inspect.getsource(_pip_audit)
+    check(src.count("return [], ") >= 4,
+          "every failure path carries an error string instead of a bare []")
+    check("return []\n" not in src,
+          "no failure path returns a bare empty list any more")
+
+
+def test_never_validated_jobs_have_a_message():
+    """A job that never validated must produce a message a human can read."""
+    from api.services.notifier import _format_event_message
+
+    msg = _format_event_message("validation.never_run", {
+        "count": 3, "jobs": "ARC Gruppen Odoo DB, NocoDB DB, Seafile Config",
+    })
+    check("ARC Gruppen Odoo DB" in msg, "the message names the affected jobs")
+    check(str(3) in msg, "the message carries the count")
+    check(msg != str({"count": 3, "jobs": "ARC Gruppen Odoo DB, NocoDB DB, Seafile Config"}),
+          "the event has a real formatter, not the str(data) fallback")
+
+
+def test_api_servers_are_not_treated_as_probed():
+    """auth_type=api validates a string; that is not a sighting.
+
+    Before the fix the health sweep stamped last_seen from that True, so a
+    dead API target stayed permanently online and server.offline could
+    never fire for it.
+    """
+    from api.services.ssh_client import connectivity_is_testable
+
+    class _Api:
+        auth_type = "api"
+
+    class _Ssh:
+        auth_type = "ssh_key"
+
+    class _NoAttr:
+        pass
+
+    check(connectivity_is_testable(_Ssh()) is True,
+          "an ssh server is genuinely probed")
+    check(connectivity_is_testable(_Api()) is False,
+          "an api server is NOT probed and must not stamp last_seen")
+    check(connectivity_is_testable(_NoAttr()) is True,
+          "a server without auth_type defaults to the probed path")
+
+
+async def test_purge_does_not_reclaim_bytes_twice():
+    """Space released once must not be reported as released again.
+
+    delete_file_from_storage answers ok=True both for 'I removed it' and for
+    'it was not there'. Counting the second inflated reclaimed_bytes on every
+    subsequent run, so the daily retention.purged notice reported the same
+    gigabytes forever.
+    """
+    import inspect
+    from api.services import purge
+
+    src = inspect.getsource(purge.execute_purge)
+    check("already absent" in src,
+          "execute_purge distinguishes an absent file from a deleted one")
+    check("already_gone" in src,
+          "absent files are counted separately from real deletions")
+
+    idx_absent = src.find('msg.startswith("already absent")')
+    idx_reclaim = src.find("reclaimed += item")
+    check(idx_absent != -1 and idx_reclaim != -1 and idx_absent < idx_reclaim,
+          "the absent-check gates the byte counter rather than following it")
+
+    plan_src = inspect.getsource(purge.plan_purge)
+    check("deleted_at.is_(None)" in plan_src,
+          "already-purged rows are excluded from planning entirely")
+
+
 async def main():
     print("test_purge_refuses_when_nothing_is_live")
     test_purge_refuses_when_nothing_is_live()
@@ -512,6 +623,16 @@ async def main():
     test_no_masked_restore_fallback()
     print("test_fuser_only_trusted_when_it_ran")
     test_fuser_only_trusted_when_it_ran()
+    print("test_cve_report_separates_clean_scan_from_no_scan")
+    test_cve_report_separates_clean_scan_from_no_scan()
+    print("test_pip_audit_returns_error_channel")
+    test_pip_audit_returns_error_channel()
+    print("test_never_validated_jobs_have_a_message")
+    test_never_validated_jobs_have_a_message()
+    print("test_api_servers_are_not_treated_as_probed")
+    test_api_servers_are_not_treated_as_probed()
+    print("test_purge_does_not_reclaim_bytes_twice")
+    await test_purge_does_not_reclaim_bytes_twice()
 
     print()
     if FAILURES:

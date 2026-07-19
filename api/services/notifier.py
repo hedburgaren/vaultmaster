@@ -403,6 +403,13 @@ def _format_event_message(event: str, data: dict) -> str:
     elif event == "validation.skipped":
         return (f"ℹ️ Restore-validation skipped\nJob: {data.get('job_name', 'N/A')}\n"
                 f"Reason: {data.get('error', 'no artifact')}")
+    elif event == "validation.never_run":
+        return (f"🚨 {data.get('count', '?')} job(s) have NEVER completed a "
+                f"restore-validation.\n"
+                f"Jobs: {data.get('jobs', 'N/A')}\n"
+                f"These backups have never been proven restorable. A job that "
+                f"only ever skips looks identical to a healthy one in every "
+                f"counter we publish.")
     elif event == "credential.expiring":
         return (f"⏳ Credential expiring soon\n"
                 f"Name: {data.get('name', 'N/A')}\n"
@@ -427,6 +434,7 @@ def _format_event_message(event: str, data: dict) -> str:
         ce = data.get("credential_expiry", {}) or {}
         orphans = data.get("mcp_orphans", []) or []
         mcp_exp = data.get("mcp_expired", []) or []
+        scan_error = data.get("python_scan_error")
         lines = ["🛡️ Weekly security scan"]
         if vulns:
             lines.append(f"⚠️  Python CVEs: {len(vulns)}")
@@ -435,6 +443,12 @@ def _format_event_message(event: str, data: dict) -> str:
                 lines.append(f"   · {v.get('package')} {v.get('version')} → {v.get('id')}  fix:{fix}")
             if len(vulns) > 5:
                 lines.append(f"   …and {len(vulns) - 5} more")
+        elif scan_error:
+            # An empty result used to render as "none detected" regardless of
+            # whether anything was scanned. A report that cannot tell those
+            # apart is worse than no report: it is read as reassurance.
+            lines.append(f"❓ Python CVEs: SCAN DID NOT RUN ({scan_error})")
+            lines.append("   · This is NOT an all-clear. Nothing was checked.")
         else:
             lines.append("✅ Python CVEs: none detected")
         lines.append(f"Credentials: {ce.get('expired', 0)} expired, "

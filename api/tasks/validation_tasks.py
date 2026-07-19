@@ -130,18 +130,46 @@ async def _scan_candidates() -> None:
         jobs = result.scalars().all()
 
         queued = 0
+        never_validated = []
         for j in jobs:
+            # The cooldown must be driven by the last run that actually
+            # validated something. This used to take the latest run of any
+            # status, so a "skipped" row (written whenever there was no
+            # artifact to check) consumed the whole 24h window and silenced
+            # the hourly scan until the next day. Observed in production:
+            # 210 skips in one week, and ARC Gruppen Odoo DB never once
+            # validated successfully while the scan kept reporting itself
+            # as having run.
             result = await db.execute(
                 select(BackupValidationRun)
                 .where(BackupValidationRun.job_id == j.id)
+                .where(BackupValidationRun.status.in_(("passed", "failed")))
                 .order_by(desc(BackupValidationRun.created_at))
                 .limit(1)
             )
-            last = result.scalar_one_or_none()
-            if last and last.created_at and last.created_at > cutoff:
+            last_real = result.scalar_one_or_none()
+            if last_real and last_real.created_at and last_real.created_at > cutoff:
                 continue
+            if last_real is None:
+                never_validated.append(j.name)
             validate_backup_job_task.delay(str(j.id), None, "scheduler")
             queued += 1
             logger.info(f"validation queued for job {j.name} ({j.id})")
 
         logger.info(f"validation scan: queued {queued} of {len(jobs)} validatable jobs")
+
+        if never_validated:
+            # A job that has never produced a passed or failed validation has
+            # never been proven restorable. That is not a detail to leave in
+            # a counter nobody reads.
+            logger.error(
+                "validation scan: %d job(s) have NEVER completed a validation "
+                "(no passed or failed run on record): %s",
+                len(never_validated), ", ".join(never_validated[:20]),
+            )
+            from api.services.notifier import notify_event
+            await notify_event(db, "validation.never_run", {
+                "count": len(never_validated),
+                "jobs": ", ".join(never_validated[:10]),
+            })
+            await db.commit()
