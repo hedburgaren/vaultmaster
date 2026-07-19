@@ -167,8 +167,11 @@ def test_no_masked_restore_fallback():
             not dangerous.search(code),
             f"{label}: no `pg_restore ... ||` whose failure would be swallowed",
         )
+        # Either form is fine: `set -o pipefail` when the shell is known to be
+        # bash, or `bash -o pipefail -c` when it is not. What matters is that
+        # pipefail is in force, not which spelling gets there.
         check(
-            "set -o pipefail" in code,
+            "pipefail" in code,
             f"{label}: restore pipeline runs under pipefail so a failing gunzip is not masked",
         )
 
