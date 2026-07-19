@@ -21,6 +21,104 @@ def run_rotation(policy_id: str, job_id: str | None = None):
     _run_async(_do_rotation(policy_id, job_id))
 
 
+@celery_app.task(name="api.tasks.rotation_tasks.enforce_retention")
+def enforce_retention():
+    """Scheduled retention enforcement: rotate every job, then reclaim space.
+
+    Added 2026-07-19. Before this, retention was never enforced by anything on
+    a schedule. Rotation only ran inline after a successful backup of that one
+    job, and nothing at all deleted files. Consequences, all of them observed
+    in production:
+
+      - A job that stopped running never rotated again. Its artifacts sat
+        forever, because the only trigger was its own next successful backup.
+      - A policy change was never applied to existing artifacts until each job
+        happened to run again.
+      - No file was ever deleted, so the archive grew without bound. The oldest
+        artifact on disk was 138 days old under a 90-day policy.
+
+    This task closes that loop: it evaluates every job against its current
+    policy regardless of whether the job still runs, then physically deletes
+    what the policy says should be gone. The guards live in
+    api.services.purge (safety floor, refuse-to-empty, recompute from policy
+    rather than trusting is_deleted).
+    """
+    return _run_async(_do_enforce_retention())
+
+
+async def _do_enforce_retention():
+    from sqlalchemy import select
+
+    from api.config import get_settings
+    from api.models.backup_job import BackupJob
+    from api.models.retention_policy import RetentionPolicy
+    from api.services.notifier import notify_event
+    from api.services.purge import execute_purge, plan_purge
+    from api.services.rotation import apply_rotation
+
+    settings = get_settings()
+
+    async with get_task_session() as db:
+        # Phase 1: refresh flags for every job and destination, including jobs
+        # that no longer run. Inline rotation only ever covers the job that
+        # just backed up.
+        jobs = (await db.execute(select(BackupJob))).scalars().all()
+        policies = {
+            str(p.id): p
+            for p in (await db.execute(select(RetentionPolicy))).scalars().all()
+        }
+
+        rotated = 0
+        for job in jobs:
+            overrides = job.retention_overrides or {}
+            for dest_id in (job.destination_ids or []):
+                dest_str = str(dest_id)
+                policy_id = overrides.get(dest_str) or (
+                    str(job.retention_id) if job.retention_id else None
+                )
+                policy = policies.get(str(policy_id)) if policy_id else None
+                if not policy:
+                    continue
+                await apply_rotation(db, policy, str(job.id), storage_id=dest_str)
+                rotated += 1
+        await db.commit()
+
+        # Phase 2: reclaim the space. Flags alone were the original bug.
+        if not getattr(settings, "purge_enabled", True):
+            logger.info(
+                "enforce_retention: rotation done (%d job/destination pairs), "
+                "purge disabled by config", rotated,
+            )
+            return {"rotated": rotated, "purge": "disabled"}
+
+        floor = int(getattr(settings, "purge_safety_floor", 3) or 3)
+        plan = await plan_purge(db, safety_floor=floor)
+
+        if plan["refused"]:
+            for r in plan["refused"]:
+                logger.warning("enforce_retention: refused %s (%s)", r["job"], r["reason"])
+
+        if not plan["to_delete"]:
+            logger.info("enforce_retention: rotation done (%d pairs), nothing to purge", rotated)
+            return {"rotated": rotated, "deleted": 0, "reclaimed_bytes": 0}
+
+        result = await execute_purge(db, plan)
+
+        if result["deleted"]:
+            await notify_event(db, "retention.purged", {
+                "deleted": result["deleted"],
+                "reclaimed_gb": round(result["reclaimed_bytes"] / 1e9, 1),
+                "failed": result["failed"],
+            })
+            await db.commit()
+
+        logger.info(
+            "enforce_retention: rotated %d pairs, deleted %d artifacts, reclaimed %.1f GB",
+            rotated, result["deleted"], result["reclaimed_bytes"] / 1e9,
+        )
+        return {"rotated": rotated, **result}
+
+
 async def _do_rotation(policy_id: str, job_id: str | None):
     import uuid
     from sqlalchemy import select

@@ -85,7 +85,12 @@ services:
       - /srv/archive/tmp/vaultmaster:/tmp/vaultmaster
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /root/.ssh:/root/.ssh:ro
-      - /root/.config/rclone:/root/.config/rclone:ro
+      # Must be writable: rclone persists refreshed OAuth tokens back into its
+      # config. Mounted :ro until 2026-07-19, which made every Drive operation
+      # exit non-zero with "Failed to save config after 10 tries" even when the
+      # operation itself succeeded. Deletes looked like failures, and an
+      # expiring refresh token would eventually have taken uploads down too.
+      - /root/.config/rclone:/root/.config/rclone
       # age private identity, read-only. Only the worker gets it: it is the
       # only service that decrypts (restore + hourly restore-validation).
       # api and beat deliberately do not mount it.

@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     age_public_key: str = ""
     age_identity_file: str = "/etc/vaultmaster/age-identity.key"
 
+    # Retention enforcement. Defaults to on: retention that only sets database
+    # flags and never deletes anything is not retention, which is precisely how
+    # the archive grew to 138 days of history under a 90-day policy. Set
+    # PURGE_ENABLED=false to pause reclamation while keeping rotation.
+    # purge_safety_floor is the number of newest artifacts per job+destination
+    # that are never deleted regardless of policy.
+    purge_enabled: bool = True
+    purge_safety_floor: int = 3
+
     # Credential vault — separate from JWT secret_key by design.
     # Format: "v1:<base64-Fernet-key>,v2:<base64-Fernet-key>"
     # The HIGHEST version number is used for new encryptions; all listed

@@ -68,5 +68,13 @@ celery_app.conf.update(
             "task": "api.tasks.storage_tasks.refresh_storage_usage",
             "schedule": 900.0,
         },
+        # Retention was not scheduled at all until 2026-07-19. Rotation ran
+        # only inline after a successful backup, so a job that stopped running
+        # never rotated again, and nothing ever deleted a file. The archive
+        # reached 138 days of history under a 90-day policy.
+        "enforce-retention": {
+            "task": "api.tasks.rotation_tasks.enforce_retention",
+            "schedule": 86400.0,  # daily: rotate every job, then reclaim space
+        },
     },
 )
