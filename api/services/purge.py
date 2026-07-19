@@ -28,6 +28,7 @@ first place.
 """
 
 import logging
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -45,6 +46,29 @@ logger = logging.getLogger(__name__)
 
 # Newest N artifacts per (job, destination) are never purged.
 DEFAULT_SAFETY_FLOOR = 3
+
+
+def select_floor(artifacts, safety_floor: int) -> list:
+    """Return the newest `safety_floor` artifacts that still exist.
+
+    The floor exists to guarantee a job never drops below N restorable copies,
+    whatever the policy says. Taking the newest N rows from the raw list (which
+    is what this did until an adversarial audit caught it) counts rows already
+    flagged is_deleted, whose files are gone. A job whose newest three rows are
+    deleted ghosts then has a floor made entirely of nothing, and its oldest
+    surviving backup becomes a deletion candidate.
+
+    That was not hypothetical: at the time this was written, ten job/destination
+    pairs had all three of their newest artifacts flagged deleted.
+
+    Note the direction of the trade. Using is_deleted here only ever makes the
+    floor reach FURTHER down the list and protect MORE real backups, which is
+    why it does not conflict with the rule that the delete decision itself is
+    recomputed from policy and never read from that flag.
+    """
+    live = [a for a in artifacts if not getattr(a, "is_deleted", False)]
+    live.sort(key=lambda a: a.created_at, reverse=True)
+    return live[:safety_floor]
 
 
 async def plan_purge(db, safety_floor: int = DEFAULT_SAFETY_FLOOR) -> dict:
@@ -104,20 +128,29 @@ async def plan_purge(db, safety_floor: int = DEFAULT_SAFETY_FLOOR) -> dict:
         # is_deleted, which is corrupt for 8305 historical rows.
         expired_ids = select_expired(artifacts, policy, now)
 
-        floor = artifacts[:safety_floor]
-        candidates = artifacts[safety_floor:]
+        floor = select_floor(artifacts, safety_floor)
+        floor_ids = {a.id for a in floor}
+        candidates = [a for a in artifacts if a.id not in floor_ids]
         kept_by_floor += len(floor)
 
         expired = [a for a in candidates if a.id in expired_ids]
         if not expired:
             continue
 
-        # Rule 3: refuse to leave a (job, destination) with nothing.
-        if len(expired) >= len(artifacts):
+        # Rule 3: refuse to leave a (job, destination) with no surviving copy.
+        #
+        # Both sides of this comparison must count the same thing. An earlier
+        # version compared len(expired), which includes already-deleted ghosts,
+        # against the live count, and so refused to purge jobs that were in no
+        # danger at all. Only live artifacts can be lost, so only live ones are
+        # counted here.
+        live_count = sum(1 for a in artifacts if not getattr(a, "is_deleted", False))
+        live_expired = [a for a in expired if not getattr(a, "is_deleted", False)]
+        if live_count and len(live_expired) >= live_count:
             refused.append({
                 "job": job_names[key],
                 "storage_id": key[1],
-                "reason": f"would delete all {len(artifacts)} artifacts",
+                "reason": f"would delete all {live_count} surviving artifact(s)",
             })
             continue
 
@@ -179,12 +212,35 @@ async def execute_purge(db, plan: dict, limit: int | None = None) -> dict:
             logger.warning("purge: %s", msg)
             continue
 
+        # Explicit UUID cast. plan_purge stores ids as str, and comparing a str
+        # against a UUID column silently matches nothing on some dialects.
+        # rotation.py already documents this as bug #13; it was reintroduced
+        # here and caught by an adversarial audit. The consequence was the exact
+        # defect this module is written to prevent: the file gets deleted, the
+        # row is never flagged, and the counters report the deletion anyway.
+        try:
+            artifact_uuid = uuid.UUID(str(item["artifact_id"]))
+        except (ValueError, TypeError, AttributeError):
+            failed += 1
+            errors.append(f"{item['filename']}: unparseable artifact id {item['artifact_id']!r}")
+            continue
+
         artifact = (await db.execute(
-            select(BackupArtifact).where(BackupArtifact.id == item["artifact_id"])
+            select(BackupArtifact).where(BackupArtifact.id == artifact_uuid)
         )).scalar_one_or_none()
-        if artifact:
-            artifact.is_deleted = True
-            artifact.deleted_at = datetime.now(timezone.utc)
+
+        if artifact is None:
+            # The file is gone but we cannot record that. Count it as a failure
+            # so the number never claims more than was actually reconciled.
+            failed += 1
+            errors.append(
+                f"{item['filename']}: file deleted but artifact row "
+                f"{item['artifact_id']} not found, flag NOT set"
+            )
+            continue
+
+        artifact.is_deleted = True
+        artifact.deleted_at = datetime.now(timezone.utc)
 
         deleted += 1
         reclaimed += item["size_bytes"]

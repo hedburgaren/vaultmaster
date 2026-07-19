@@ -189,7 +189,81 @@ def test_fuser_only_trusted_when_it_ran():
     check(f(None) is False, "no result at all -> NOT free")
 
 
+# ---------------------------------------------------------------------------
+# Defect (found by the adversarial audit, in code written the same day): the
+# purge safety floor took the newest N rows from the FULL artifact list,
+# including rows already flagged is_deleted whose files are gone. When the
+# newest rows are deleted ghosts, the floor is satisfied by nothing at all and
+# the oldest LIVE backup becomes a deletion candidate.
+#
+# Reachable in production at the time: ten job/destination pairs had all three
+# newest artifacts flagged deleted.
+# ---------------------------------------------------------------------------
+def test_safety_floor_counts_only_live_artifacts():
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    from api.services.purge import select_floor
+
+    now = datetime.now(timezone.utc)
+
+    class A:
+        def __init__(self, age_days, is_deleted):
+            self.id = uuid.uuid4()
+            self.created_at = now - timedelta(days=age_days)
+            self.is_deleted = is_deleted
+
+    # Three newest are ghosts, three older ones are live.
+    ghosts = [A(0, True), A(1, True), A(2, True)]
+    live = [A(3, False), A(4, False), A(5, False)]
+    artifacts = ghosts + live
+
+    floor = select_floor(artifacts, 3)
+    floor_ids = {a.id for a in floor}
+
+    check(len(floor) == 3, f"floor holds 3 artifacts, got {len(floor)}")
+    check(
+        all(not a.is_deleted for a in floor),
+        "floor contains only live artifacts, never already-deleted ghosts",
+    )
+    check(
+        floor_ids == {a.id for a in live},
+        "floor protects the three newest LIVE backups, not the ghosts above them",
+    )
+
+    # Fewer live artifacts than the floor: protect all of them.
+    only_two = [A(0, True), A(1, False), A(2, False)]
+    check(
+        len(select_floor(only_two, 3)) == 2,
+        "with fewer live artifacts than the floor, all live ones are protected",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Defect (same audit, same day, same module): the artifact lookup in
+# execute_purge compared a UUID column against a str. rotation.py already
+# documents this as "Bug #13": str equality silently returns no rows on some
+# dialects. Here the consequence is that the file gets deleted, the row is
+# never flagged, and the counters report the deletion anyway.
+# ---------------------------------------------------------------------------
+def test_purge_looks_up_artifacts_by_uuid():
+    import inspect
+
+    from api.services import purge
+
+    src = inspect.getsource(purge.execute_purge)
+    check(
+        "uuid.UUID(" in src or "_uuid.UUID(" in src,
+        "execute_purge casts the artifact id to UUID before comparing "
+        "(str == UUID silently matches nothing, see rotation.py bug #13)",
+    )
+
+
 async def main():
+    print("test_safety_floor_counts_only_live_artifacts")
+    test_safety_floor_counts_only_live_artifacts()
+    print("test_purge_looks_up_artifacts_by_uuid")
+    test_purge_looks_up_artifacts_by_uuid()
     print("test_custom_backup_returns_real_path")
     await test_custom_backup_returns_real_path()
     print("test_transfer_outcome_decisions")
