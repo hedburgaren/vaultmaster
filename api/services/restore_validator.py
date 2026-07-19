@@ -42,10 +42,24 @@ from api.services import age_crypto
 
 logger = logging.getLogger(__name__)
 
-POSTGRES_IMAGE = "postgres:16-alpine"
+# Must be >= the newest PostgreSQL among the source databases. pg_restore reads
+# older archive formats but not newer ones: a PG 17 pg_dump writes archive
+# version 1.16, which pg_restore 16 rejects outright with "unsupported version
+# (1.16) in file header". Sources on this host currently span 15.18 to 17.10.
+# Bump this when a source database is upgraded past it.
+POSTGRES_IMAGE = os.environ.get("VM_VALIDATE_PG_IMAGE", "postgres:17-alpine")
 TEMP_DB = "vmverify"
 TEMP_USER = "postgres"
 TEMP_PASSWORD = "vmverify-temp-password"
+
+# Work dirs must sit at a path that resolves identically on the host, because
+# validate_postgresql_artifact bind-mounts the work dir into a sibling postgres
+# container through the shared docker socket. `-v` is interpreted by the daemon
+# on the host, so a path that exists only inside this container mounts as an
+# empty directory. pg_restore then finds nothing, the `|| psql` fallback masks
+# the error, and the run reports success with 0 tables. /srv/archive is bind
+# mounted at the same path on both sides, which makes it safe to use here.
+SHARED_TMP = os.environ.get("VM_VALIDATE_TMP", "/srv/archive/tmp/vm-validate")
 
 
 async def _decrypt_if_needed(local_path: str, log) -> str:
@@ -141,7 +155,8 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
     # a stale container with the exact same name still exists from a
     # previously-killed validation (rare but observed in tests).
     container_name = f"vm-validate-{artifact.id}"
-    workdir = tempfile.mkdtemp(prefix="vm-validate-")
+    os.makedirs(SHARED_TMP, exist_ok=True)
+    workdir = tempfile.mkdtemp(prefix="vm-validate-", dir=SHARED_TMP)
     local_dump = os.path.join(workdir, artifact.filename or "dump.gz")
 
     try:
@@ -271,7 +286,8 @@ async def validate_files_artifact(job, artifact) -> dict:
     if not artifact:
         return {"status": "skipped", "error": "no artifact to validate", "logs": logs}
 
-    workdir = tempfile.mkdtemp(prefix="vm-validate-")
+    os.makedirs(SHARED_TMP, exist_ok=True)
+    workdir = tempfile.mkdtemp(prefix="vm-validate-", dir=SHARED_TMP)
     local_path = os.path.join(workdir, artifact.filename or "archive.tar.gz")
     try:
         log("info", f"Downloading {artifact.filename}")

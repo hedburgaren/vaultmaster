@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+# Pinned tool versions. Both land in the backup/restore critical path, so they
+# are bumped on purpose rather than drifting on rebuild.
+ARG AGE_VERSION=1.3.1
+ARG DOCKER_CLI_VERSION=27.5.1
+
 # Add PostgreSQL 16 apt repo + system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg2 lsb-release curl ca-certificates \
@@ -11,9 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     postgresql-client-16 \
     rclone \
-    && curl -sSL https://dl.filippo.io/age/latest?for=linux/amd64 -o /tmp/age.tar.gz \
+    # age is pinned. It used to fetch dl.filippo.io/age/latest, which made the
+    # binary in the encryption path float with whatever upstream published at
+    # build time. Bump deliberately, not by rebuilding.
+    && curl -fsSL https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-amd64.tar.gz -o /tmp/age.tar.gz \
     && tar -xzf /tmp/age.tar.gz -C /usr/local/bin --strip-components=1 \
     && rm /tmp/age.tar.gz \
+    # docker CLI (client only, no daemon). restore_validator shells out to
+    # `docker run` to restore dumps into a throwaway postgres container against
+    # the mounted socket. Without this binary every postgresql validation died
+    # with FileNotFoundError, which is part of why 0 validations had ever
+    # passed before 2026-07-19.
+    && curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /tmp docker/docker \
+    && mv /tmp/docker/docker /usr/local/bin/docker \
+    && rm -rf /tmp/docker /tmp/docker.tgz \
     && apt-get purge -y gnupg2 lsb-release curl \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*

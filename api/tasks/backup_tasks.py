@@ -230,6 +230,7 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                         if local_file:
                             ok, msg = await copy_file_to_storage(dest, local_file, sub_path)
                             if ok:
+                                # msg is the stored path now, not a sentence.
                                 stored_path = msg
                                 logger.info(f"[{run.id}] Transferred to {dest.name}: {msg}")
                             else:

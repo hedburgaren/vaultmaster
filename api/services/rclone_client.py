@@ -224,20 +224,45 @@ async def list_storage_directory(dest, path: str = "/") -> list[dict]:
 
 
 async def copy_file_to_storage(dest, local_path: str, remote_subpath: str) -> tuple[bool, str]:
-    """Copy a file to a storage destination."""
+    """Copy a file to a storage destination.
+
+    On success the second element is the STORED PATH, not a human message.
+    It used to be f"Copied to {target}", and the caller wrote that sentence
+    straight into BackupArtifact.remote_path. Every artifact ever recorded
+    therefore had a path of the form "Copied to /srv/archive/..." which
+    download_file_from_storage could not resolve, so restore and restore
+    validation could never locate a file. Callers that want a log line should
+    format one from the returned path.
+    """
     remote, flags = _build_backend(dest)
     target = f"{remote}/{remote_subpath}"
 
     if dest.backend == "local":
-        target_dir = os.path.dirname(f"{remote}/{remote_subpath}")
-        os.makedirs(target_dir, exist_ok=True)
-        shutil.copy2(local_path, f"{remote}/{remote_subpath}")
-        return True, f"Copied to {remote}/{remote_subpath}"
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(local_path, target)
+        return True, target
 
     exit_code, stdout, stderr = await _run_rclone(["copyto", local_path, target] + flags, timeout=3600)
     if exit_code == 0:
-        return True, f"Copied to {target}"
+        return True, target
     return False, f"Failed: {stderr}"
+
+
+# Legacy artifacts stored the copy_file_to_storage *message* as their path.
+_LEGACY_PATH_PREFIX = "Copied to "
+
+
+def normalize_stored_path(remote_path: str) -> str:
+    """Strip the legacy "Copied to " prefix from a stored artifact path.
+
+    Roughly 8300 artifacts predate the fix above and carry the prefix. Handling
+    it on read makes those backups locatable again instead of requiring a bulk
+    rewrite of historical rows.
+    """
+    p = (remote_path or "").strip()
+    if p.startswith(_LEGACY_PATH_PREFIX):
+        return p[len(_LEGACY_PATH_PREFIX):].strip()
+    return p
 
 
 async def download_file_from_storage(dest, remote_path: str, local_path: str) -> tuple[bool, str]:
@@ -248,6 +273,8 @@ async def download_file_from_storage(dest, remote_path: str, local_path: str) ->
     For local backends it's a filesystem path; for cloud backends it's a
     backend:bucket/path string that rclone understands.
     """
+    remote_path = normalize_stored_path(remote_path)
+
     if dest.backend == "local":
         if not os.path.isfile(remote_path):
             return False, f"local file not found: {remote_path}"
