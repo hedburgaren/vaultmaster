@@ -45,6 +45,37 @@ def summarise_transfers(results: list[tuple[str, bool]]) -> dict:
     }
 
 
+_UNVERIFIABLE_CHECKSUMS = {"", "pending", None}
+
+
+def checksum_verdict(stored: str | None, computed: str | None) -> dict:
+    """Compare a recorded checksum against a freshly computed one.
+
+    Four outcomes, deliberately distinct. Collapsing them into a boolean is how
+    "we could not check" ends up looking like "we checked and it was fine":
+
+      verified     stored and computed agree
+      corrupt      they disagree, the artifact is not what was written
+      unverifiable no checksum was ever recorded, so nothing can be compared
+      unreadable   the artifact could not be hashed now (gone, unreachable)
+
+    Only `verified` is a pass.
+    """
+    s = (stored or "").strip().lower()
+    c = (computed or "").strip().lower()
+
+    if s in _UNVERIFIABLE_CHECKSUMS or not s:
+        return {"ok": False, "status": "unverifiable",
+                "detail": f"no checksum was recorded for this artifact (stored={stored!r})"}
+    if not c:
+        return {"ok": False, "status": "unreadable",
+                "detail": "could not compute a checksum for the stored file"}
+    if s == c:
+        return {"ok": True, "status": "verified", "detail": "checksums match"}
+    return {"ok": False, "status": "corrupt",
+            "detail": f"stored {s[:16]}... does not match computed {c[:16]}..."}
+
+
 def transfer_allowed(dest, is_encrypted: bool) -> tuple[bool, str]:
     """Decide whether an artifact may be sent to a given destination.
 
@@ -758,9 +789,168 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
 
 @celery_app.task(name="api.tasks.backup_tasks.verify_artifact_checksum")
 def verify_artifact_checksum(artifact_id: str):
-    """Verify the checksum of a stored artifact."""
-    logger.info(f"Checksum verification queued for artifact {artifact_id}")
-    # TODO: Implement checksum verification
+    """Verify that a stored artifact still hashes to its recorded checksum.
+
+    Was a TODO stub that logged "queued" and returned. It is reachable from the
+    API (api/routers/artifacts.py), so the UI offered a verify action that
+    handed back a task id and checked nothing. Not merely unimplemented: a
+    feature that claimed an integrity check had happened.
+
+    Hashes the file where it lives rather than downloading it, so a 23 GB
+    archive costs a remote hash instead of a transfer.
+    """
+    return _run_async(_do_verify_checksum(artifact_id))
+
+
+async def _verify_remote_via_local_md5(db, artifact, dest, remote_path: str) -> dict:
+    """Verify an off-site copy against the local copy's MD5.
+
+    Returns the same verdict shape as checksum_verdict. See the caller for why
+    this indirection exists (Drive publishes MD5 only).
+    """
+    import json as _json
+    import shlex
+
+    from sqlalchemy import select
+
+    from api.models.backup_artifact import BackupArtifact
+    from api.models.storage_destination import StorageDestination
+    from api.services.rclone_client import _build_backend, _run_rclone, normalize_stored_path
+
+    remote, flags = _build_backend(dest)
+    target = remote_path if ":" in remote_path else f"{remote}/{remote_path}"
+    parent, _, fname = target.rpartition("/")
+
+    code, out, err = await _run_rclone(
+        ["lsjson", "--hash", "--files-only", parent] + flags, timeout=600
+    )
+    if code != 0:
+        return {"ok": False, "status": "unreadable",
+                "detail": f"could not list {parent}: {(err or '').strip()[-120:]}"}
+
+    remote_md5 = ""
+    for item in _json.loads(out or "[]"):
+        if item.get("Name") == fname:
+            remote_md5 = ((item.get("Hashes") or {}).get("md5") or "").lower()
+            break
+    if not remote_md5:
+        return {"ok": False, "status": "unreadable",
+                "detail": f"{fname} not found off-site, or it publishes no MD5"}
+
+    # Find the local sibling of this artifact: same filename, local destination.
+    local_dest = (await db.execute(
+        select(StorageDestination).where(StorageDestination.backend == "local")
+    )).scalars().first()
+    local_row = None
+    if local_dest:
+        local_row = (await db.execute(
+            select(BackupArtifact).where(
+                BackupArtifact.filename == artifact.filename,
+                BackupArtifact.storage_id == local_dest.id,
+                BackupArtifact.is_deleted == False,  # noqa: E712
+            )
+        )).scalars().first()
+
+    local_path = normalize_stored_path(local_row.remote_path or "") if local_row else ""
+    if not local_path or not os.path.isfile(local_path):
+        return {"ok": False, "status": "unverifiable-offsite",
+                "detail": ("off-site copy exists but there is no local copy to compare "
+                           "against, and Drive publishes only MD5. Verifying it would "
+                           "require downloading the whole artifact.")}
+
+    proc = await asyncio.create_subprocess_shell(
+        f"md5sum {shlex.quote(local_path)}",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    mout, _ = await proc.communicate()
+    local_md5 = (mout.decode(errors="replace").split() or [""])[0].lower()
+
+    if not local_md5:
+        return {"ok": False, "status": "unreadable",
+                "detail": f"could not compute MD5 of the local copy at {local_path}"}
+    if local_md5 == remote_md5:
+        return {"ok": True, "status": "verified",
+                "detail": "off-site MD5 matches the local copy byte for byte"}
+    return {"ok": False, "status": "corrupt",
+            "detail": f"off-site MD5 {remote_md5[:12]}... differs from local {local_md5[:12]}..."}
+
+
+async def _do_verify_checksum(artifact_id: str) -> dict:
+    import shlex
+
+    from sqlalchemy import select
+
+    from api.models.backup_artifact import BackupArtifact
+    from api.models.storage_destination import StorageDestination
+    from api.services.rclone_client import _build_backend, _run_rclone, normalize_stored_path
+
+    async with get_task_session() as db:
+        try:
+            art_uuid = uuid.UUID(str(artifact_id))
+        except (ValueError, TypeError):
+            return {"ok": False, "status": "error", "detail": f"bad artifact id {artifact_id!r}"}
+
+        artifact = (await db.execute(
+            select(BackupArtifact).where(BackupArtifact.id == art_uuid)
+        )).scalar_one_or_none()
+        if not artifact:
+            return {"ok": False, "status": "error", "detail": f"artifact {artifact_id} not found"}
+
+        dest = (await db.execute(
+            select(StorageDestination).where(StorageDestination.id == artifact.storage_id)
+        )).scalar_one_or_none()
+        if not dest:
+            return {"ok": False, "status": "error",
+                    "detail": f"storage destination {artifact.storage_id} not found"}
+
+        path = normalize_stored_path(artifact.remote_path or "")
+        computed = ""
+
+        if not path:
+            verdict = {"ok": False, "status": "unreadable",
+                       "detail": "artifact has no usable path"}
+        elif dest.backend == "local":
+            if not os.path.isfile(path):
+                verdict = {"ok": False, "status": "unreadable",
+                           "detail": f"file not present at {path}"}
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    f"sha256sum {shlex.quote(path)}",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                out, _err = await proc.communicate()
+                computed = (out.decode(errors="replace").split() or [""])[0]
+                verdict = checksum_verdict(artifact.checksum_sha256, computed)
+        else:
+            # Google Drive exposes only MD5, never SHA256, so the recorded
+            # SHA256 cannot be checked against it without downloading the whole
+            # artifact. For a 23 GB archive that is not a check anyone will run.
+            #
+            # Verify transitively instead: Drive's MD5 against the MD5 of the
+            # local copy of the same artifact. Combined with the local copy
+            # having been verified against its own SHA256, that establishes the
+            # off-site copy is byte-identical without moving a byte.
+            #
+            # No local copy means no cheap path, and that is reported as such
+            # rather than dressed up as a pass.
+            verdict = await _verify_remote_via_local_md5(db, artifact, dest, path)
+
+        log_at = logger.info if verdict["ok"] else logger.error
+        log_at(
+            "checksum %s for %s (%s): %s",
+            verdict["status"], artifact.filename, dest.name, verdict["detail"],
+        )
+
+        if verdict["status"] == "corrupt":
+            from api.services.notifier import notify_event
+            await notify_event(db, "artifact.corrupt", {
+                "filename": artifact.filename,
+                "destination": dest.name,
+                "detail": verdict["detail"],
+            })
+            await db.commit()
+
+        return {**verdict, "artifact": artifact.filename, "destination": dest.name}
 
 
 @celery_app.task(name="api.tasks.backup_tasks.check_scheduled_jobs")

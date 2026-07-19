@@ -372,7 +372,48 @@ def test_offsite_destinations_refuse_plaintext():
     )
 
 
+# ---------------------------------------------------------------------------
+# Defect: verify_artifact_checksum was a TODO stub that logged "queued" and
+# returned. It is exposed through the API (artifacts.py), so the UI offered a
+# "verify" action that returned a task id and did nothing at all. Not dead
+# code: a feature that actively claims to have checked something.
+#
+# 25 of 1740 artifacts also carry no checksum ('' or 'pending'), so for those
+# verification is impossible and must say so rather than pass.
+# ---------------------------------------------------------------------------
+def test_checksum_verdicts():
+    v = backup_tasks.checksum_verdict
+
+    good = v("abc123", "abc123")
+    check(good["ok"] is True, "matching checksums verify")
+    check(good["status"] == "verified", f"status is 'verified', got {good['status']!r}")
+
+    bad = v("abc123", "def456")
+    check(bad["ok"] is False, "differing checksums do NOT verify")
+    check(bad["status"] == "corrupt", f"mismatch is reported as corrupt, got {bad['status']!r}")
+
+    for missing in ("", "pending", None):
+        r = v(missing, "abc123")
+        check(
+            r["ok"] is False,
+            f"stored checksum {missing!r}: cannot verify, so not ok",
+        )
+        check(
+            r["status"] == "unverifiable",
+            f"stored checksum {missing!r} is 'unverifiable', not 'verified' "
+            f"(got {r['status']!r})",
+        )
+
+    r = v("abc123", "")
+    check(
+        r["ok"] is False and r["status"] == "unreadable",
+        "a checksum we could not compute is 'unreadable', never a pass",
+    )
+
+
 async def main():
+    print("test_checksum_verdicts")
+    test_checksum_verdicts()
     print("test_offsite_destinations_refuse_plaintext")
     test_offsite_destinations_refuse_plaintext()
     print("test_custom_backup_fails_when_script_produces_nothing")
