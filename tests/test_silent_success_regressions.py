@@ -302,7 +302,43 @@ def test_run_backup_withdraws_before_finally():
     )
 
 
+# ---------------------------------------------------------------------------
+# Defect: execute_custom_backup's size check picked the newest file in
+# output_dir without checking it belonged to THIS run. A script that silently
+# produced nothing therefore passed the check against a previous run's file and
+# reported success with a stale artifact.
+#
+# The marker check that would have caught it only ran for encrypted jobs, so
+# the nine unencrypted WordPress database jobs were exposed.
+# ---------------------------------------------------------------------------
+async def test_custom_backup_fails_when_script_produces_nothing():
+    job = _FakeJob({"command": "true", "output_dir": "/mnt/backup/test"})
+
+    orig = backup_executor.run_remote_command
+    # `find -newer marker` returns nothing: the script wrote no new file.
+    backup_executor.run_remote_command = _fake_remote({
+        "-newer": (0, "", ""),
+        "printf": (0, "1700000000.0 5242880 stale-from-yesterday.sql.gz\n", ""),
+    })
+    try:
+        res = await backup_executor.execute_custom_backup(_FakeServer(), job, "run-x")
+    finally:
+        backup_executor.run_remote_command = orig
+
+    check(
+        res.get("success") is False,
+        "a custom run that produced no new file FAILS instead of adopting a stale one",
+    )
+    check(
+        "no new file" in str(res.get("error", "")).lower()
+        or "produced no" in str(res.get("error", "")).lower(),
+        f"the error says the script produced nothing (got {str(res.get('error'))[:80]!r})",
+    )
+
+
 async def main():
+    print("test_custom_backup_fails_when_script_produces_nothing")
+    await test_custom_backup_fails_when_script_produces_nothing()
     print("test_preserved_source_is_withdrawn_from_cleanup")
     test_preserved_source_is_withdrawn_from_cleanup()
     print("test_run_backup_withdraws_before_finally")

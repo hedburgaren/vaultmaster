@@ -462,26 +462,36 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
 
         log("info", "Custom script completed")
 
-        encrypted_count = 0
-        if recipient and marker:
+        # Which files did THIS run produce? Established for every custom job,
+        # not only encrypted ones.
+        #
+        # The size check further down picks the newest file in output_dir, which
+        # says nothing about whether the current script wrote it. A script that
+        # silently produced nothing would pass that check against a previous
+        # run's file and report success with a stale artifact. The marker check
+        # used to run only for encrypted jobs, which left the nine unencrypted
+        # WordPress database jobs exposed to exactly that.
+        new_files: list[str] = []
+        if marker:
             output_dir_q = shlex.quote(_safe_path(output_dir, "output_dir"))
             marker_q = shlex.quote(marker)
-            # Files newer than the marker, excluding the marker and anything
-            # already encrypted.
             find_new = (
                 f"find {output_dir_q} -maxdepth 1 -type f -newer {marker_q} "
                 f"! -name '.vm_run_marker' ! -name '*.age' -print"
             )
             ec, out, err = await run_remote_command(server, find_new, timeout=120)
-            new_files = [f for f in (out or "").splitlines() if f.strip()]
+            new_files = [f.strip() for f in (out or "").splitlines() if f.strip()]
 
             if not new_files:
                 raise Exception(
-                    "Encryption requested but the script produced no new files in "
-                    f"{output_dir}. Refusing to report success: there is nothing "
-                    "to encrypt and probably nothing backed up."
+                    f"The script exited 0 but produced no new file in {output_dir}. "
+                    "Refusing to report success: the newest file there is from an "
+                    "earlier run, and adopting it would record a backup that did "
+                    "not happen."
                 )
 
+        encrypted_count = 0
+        if recipient and marker:
             for path in new_files:
                 src = shlex.quote(path.strip())
                 dst = shlex.quote(path.strip() + age_crypto.AGE_SUFFIX)

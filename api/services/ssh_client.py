@@ -49,6 +49,28 @@ def _build_connect_kwargs(server) -> dict:
     Handles ssh_key, ssh_password, and fallback auth types.
     """
     resolved = _resolve_host(server.host)
+
+    # known_hosts=None disables host-key verification. Accepted deliberately
+    # (Chrille, 2026-07-19): VaultMaster runs on hedburgaren and every SSH
+    # target is the host itself via loopback. Offsite traffic goes through
+    # rclone to Google Drive over TLS, not through this code path, so there is
+    # no network segment for anyone to sit on.
+    #
+    # That acceptance is conditional on the assumption, so the assumption is
+    # checked rather than assumed. The day someone adds a genuinely remote
+    # server, this stops being a considered trade-off and becomes an unguarded
+    # MITM surface, and nothing else in the system would say so.
+    is_loopback = _normalize_host(server.host) in LOCAL_HOSTS
+    if not is_loopback:
+        logger.warning(
+            "SSH host-key verification is DISABLED (known_hosts=None) for "
+            "non-loopback host %s. That setting was accepted on the assumption "
+            "that all SSH targets are local to hedburgaren. This host breaks "
+            "that assumption: traffic to it can be intercepted without "
+            "detection. Seed known_hosts and enable verification for it.",
+            server.host,
+        )
+
     kwargs: dict = {
         "host": resolved,
         "port": getattr(server, 'port', 22) or 22,
