@@ -502,6 +502,7 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
 
         size_bytes = 0
         latest_filename = "custom_backup"
+        produced_path = ""
         if output_dir:
             try:
                 output_dir_q = shlex.quote(_safe_path(output_dir, "output_dir"))
@@ -513,6 +514,13 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
                     if len(parts) == 3:
                         size_bytes = int(parts[1])
                         latest_filename = parts[2]
+                        # The caller transfers whatever remote_path points at.
+                        # Returning "" here (as this did until 2026-07-19) made
+                        # `if filename and remote_path and destinations:` in
+                        # _run_backup falsy, so the entire transfer was skipped
+                        # while the run still reported success. 11 databases and
+                        # 615 runs never left this directory.
+                        produced_path = f"{_safe_path(output_dir, 'output_dir')}/{latest_filename}"
                         log("info", f"Newest output: {latest_filename} ({size_bytes} bytes)")
                 if size_bytes < min_bytes:
                     raise Exception(
@@ -529,7 +537,7 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
         return {
             "success": True,
             "filename": latest_filename,
-            "remote_path": "",  # custom scripts manage their own paths
+            "remote_path": produced_path,
             "size_bytes": size_bytes,
             "checksum_sha256": "",
             # Verified by readback above before the plaintext was deleted.

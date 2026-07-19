@@ -161,9 +161,16 @@ async def _scan_orphans():
                 )
                 skipped_inuse_files += 1
                 continue
-            if fuser_rc == 0:
+            # `fuser -s` exits 0 for in-use and 1 for not-in-use. Every other
+            # code (127 missing binary, 126 permission denied, and so on) means
+            # the check did not work. Treating those as "not in use" silently
+            # disarmed this guard, so a host without fuser would delete backup
+            # archives while they were still being written.
+            from api.tasks.backup_tasks import file_is_free
+
+            if not file_is_free(fuser_rc):
                 logger.info(
-                    f"[cleanup] {full_path} is in use (fuser rc=0) — skipping"
+                    f"[cleanup] {full_path} not confirmed free (fuser rc={fuser_rc}), skipping"
                 )
                 skipped_inuse_files += 1
                 continue

@@ -13,6 +13,54 @@ from api.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+def summarise_transfers(results: list[tuple[str, bool]]) -> dict:
+    """Decide what a set of per-destination transfer outcomes actually means.
+
+    Extracted so the decision is testable on its own. Until 2026-07-19 it was
+    inline and wrong: a failed transfer was logged, the artifact row was created
+    anyway pointing at the SOURCE temp path, and the temp file was then deleted
+    unconditionally. The backup existed in neither place and the run said
+    'success'.
+
+    `safe_to_delete_source` is deliberately strict. The source copy may only go
+    once EVERY destination has its own copy. A partial success still needs the
+    source, because the destination that failed has to be retried from
+    somewhere. Keeping a temp file costs disk; deleting it too early costs the
+    backup.
+    """
+    if not results:
+        return {"any_ok": False, "all_ok": False, "safe_to_delete_source": False,
+                "ok_count": 0, "total": 0, "failed": []}
+
+    ok_count = sum(1 for _, ok in results if ok)
+    failed = [dest for dest, ok in results if not ok]
+    all_ok = ok_count == len(results)
+    return {
+        "any_ok": ok_count > 0,
+        "all_ok": all_ok,
+        "safe_to_delete_source": all_ok,
+        "ok_count": ok_count,
+        "total": len(results),
+        "failed": failed,
+    }
+
+
+def file_is_free(fuser_rc: int | None) -> bool:
+    """True only when `fuser` positively reported the file as unused.
+
+    `fuser -s` exits 0 when a file IS in use and 1 when it is not. Every other
+    exit code means the check itself did not work: 127 for a missing binary,
+    126 for permission denied, and so on. Treating those as "not in use" (which
+    is what the code did until 2026-07-19) silently disarms the guard protecting
+    in-flight backup files, so a host without `fuser` installed would delete
+    archives mid-write.
+
+    Anything other than a clean rc=1 is treated as unknown, and unknown means
+    do not delete.
+    """
+    return fuser_rc == 1
+
+
 def _run_async(coro):
     """Helper to run async code from sync Celery tasks."""
     loop = asyncio.new_event_loop()
@@ -208,6 +256,7 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             logger.warning(f"[{run.id}] SFTP download failed: {msg}")
 
                     # Copy to each storage destination
+                    transfer_results: list[tuple[str, bool]] = []
                     for dest_id in (job.destination_ids or []):
                         dest_result = await db.execute(
                             select(StorageDestination).where(StorageDestination.id == dest_id)
@@ -226,18 +275,31 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                         # Build sub-path: server_name/job_name/filename
                         sub_path = f"{server.name}/{job.name}/{filename}"
                         stored_path = ""
+                        transferred = False
 
                         if local_file:
                             ok, msg = await copy_file_to_storage(dest, local_file, sub_path)
                             if ok:
                                 # msg is the stored path now, not a sentence.
                                 stored_path = msg
+                                transferred = True
                                 logger.info(f"[{run.id}] Transferred to {dest.name}: {msg}")
                             else:
                                 logger.error(f"[{run.id}] Transfer to {dest.name} failed: {msg}")
                         else:
-                            logger.warning(f"[{run.id}] No local file available — recording artifact with remote_path only")
-                            stored_path = remote_path
+                            logger.error(
+                                f"[{run.id}] No local file available for {dest.name}; "
+                                f"nothing was transferred"
+                            )
+
+                        transfer_results.append((str(dest_id), transferred))
+
+                        # Only record an artifact for a destination that actually
+                        # received the file. Recording one for a failed transfer
+                        # (which is what happened until 2026-07-19) tells restore
+                        # a copy exists where none does.
+                        if not transferred:
+                            continue
 
                         artifact = BackupArtifact(
                             run_id=run.id,
@@ -263,10 +325,45 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                         except OSError:
                             pass
 
-                    # Cleanup: remove temp file from source server work_dir
-                    if remote_path:
-                        await delete_remote_file(server, remote_path)
-                        logger.info(f"[{run.id}] Cleaned up remote temp file: {remote_path}")
+                    # Cleanup: remove the source temp file ONLY once every
+                    # destination has its own copy.
+                    #
+                    # This used to be an unconditional delete. Combined with the
+                    # artifact row being written even for failed transfers, a
+                    # failing destination produced: no copy at the destination,
+                    # no copy at the source, an artifact claiming both, and a run
+                    # marked 'success'. Total silent data loss, reported green.
+                    summary = summarise_transfers(transfer_results)
+
+                    if summary["safe_to_delete_source"]:
+                        if remote_path:
+                            await delete_remote_file(server, remote_path)
+                            logger.info(f"[{run.id}] Cleaned up remote temp file: {remote_path}")
+                    else:
+                        logger.error(
+                            f"[{run.id}] KEEPING source file {remote_path}: only "
+                            f"{summary['ok_count']}/{summary['total']} destination(s) "
+                            f"received it. Failed: {summary['failed']}"
+                        )
+
+                    # A run where nothing reached storage is not a success. The
+                    # whole point of the job is the copy at the destination.
+                    if not summary["any_ok"]:
+                        raise Exception(
+                            f"Backup produced a file but no destination accepted it "
+                            f"(0/{summary['total']} transfers succeeded). The source "
+                            f"copy has been kept at {remote_path}."
+                        )
+                    if not summary["all_ok"]:
+                        # Local import: the module-level one above lives inside
+                        # the skip_transfer branch, which does not run here.
+                        from api.services.notifier import notify_event as _notify
+                        await _notify(db, "backup.partial_transfer", {
+                            "job_name": job.name,
+                            "ok": summary["ok_count"],
+                            "total": summary["total"],
+                            "failed_destinations": ", ".join(summary["failed"]),
+                        })
 
                 elif filename:
                     # No destinations configured — just record artifacts without transfer
@@ -565,10 +662,20 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
         if code != 0:
             return {"status": "failed", "error": f"scp to target failed: {(err or out)[:300]}", "logs": logs}
 
+        # Same masking hazard as restore_validator: a bare `pg_restore || psql`
+        # reports only the fallback's status, so a failed restore looks like a
+        # success. Each reader's outcome is captured explicitly instead, and
+        # ON_ERROR_STOP makes psql fail on the first error rather than plough on.
+        q = shlex.quote(remote_tmp)
         restore_cmd = (
-            f"gunzip -c {shlex.quote(remote_tmp)} | "
-            f"pg_restore --no-owner --no-acl -d {db_q} 2>&1 || "
-            f"gunzip -c {shlex.quote(remote_tmp)} | psql -d {db_q} 2>&1"
+            f"set -o pipefail; "
+            f"if gunzip -c {q} | pg_restore --no-owner --no-acl -d {db_q} 2>&1; then "
+            f"  echo 'VM_RESTORE_VIA=pg_restore'; "
+            f"elif gunzip -c {q} | psql -d {db_q} -v ON_ERROR_STOP=1 2>&1; then "
+            f"  echo 'VM_RESTORE_VIA=psql'; "
+            f"else "
+            f"  echo 'VM_RESTORE_VIA=none'; exit 1; "
+            f"fi"
         )
         exit_code, stdout, stderr = await run_remote_command(server, restore_cmd, timeout=7200)
         await run_remote_command(server, f"rm -f {shlex.quote(remote_tmp)}")

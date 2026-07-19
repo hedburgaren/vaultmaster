@@ -210,11 +210,26 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
 
         in_container = f"/dump/{os.path.basename(local_dump)}"
         if local_dump.endswith(".dump.gz") or local_dump.endswith(".gz"):
+            # A .gz here may hold either a pg_dump custom archive or plain SQL,
+            # so both readers are tried. The `||` must not swallow the first
+            # one's failure though: this used to be
+            #   pg_restore ... || psql ...
+            # whose exit status is the fallback's alone. Observed for real on
+            # 2026-07-19: an empty bind mount made pg_restore find nothing, psql
+            # succeeded doing nothing, and validation passed with 0 tables.
+            #
+            # Now each reader's status is captured explicitly and the command
+            # fails unless one of them genuinely succeeded.
+            q = shlex.quote(in_container)
             restore_cmd = (
-                f"gunzip -c {shlex.quote(in_container)} | "
-                f"pg_restore -U {TEMP_USER} -d {TEMP_DB} --no-owner --no-acl 2>&1 || "
-                f"gunzip -c {shlex.quote(in_container)} | "
-                f"psql -U {TEMP_USER} -d {TEMP_DB} 2>&1"
+                f"set -o pipefail; "
+                f"if gunzip -c {q} | pg_restore -U {TEMP_USER} -d {TEMP_DB} --no-owner --no-acl 2>&1; then "
+                f"  echo 'VM_RESTORE_VIA=pg_restore'; "
+                f"elif gunzip -c {q} | psql -U {TEMP_USER} -d {TEMP_DB} -v ON_ERROR_STOP=1 2>&1; then "
+                f"  echo 'VM_RESTORE_VIA=psql'; "
+                f"else "
+                f"  echo 'VM_RESTORE_VIA=none'; exit 1; "
+                f"fi"
             )
         elif local_dump.endswith(".dump"):
             restore_cmd = f"pg_restore -U {TEMP_USER} -d {TEMP_DB} --no-owner --no-acl {shlex.quote(in_container)} 2>&1"
