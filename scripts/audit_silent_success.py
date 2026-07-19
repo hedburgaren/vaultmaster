@@ -45,10 +45,16 @@ MODEL = "kimi"
 # Moonshot rejects anything other than 1 for this model family (HTTP 400).
 TEMPERATURE = 1
 
-# Kimi spends a large share of its budget on hidden reasoning tokens before it
-# emits anything. A 120-token cap produced 119 reasoning tokens and an empty
-# answer. Keep this generous or findings get truncated mid-sentence.
-MAX_TOKENS = 8000
+# Kimi reasons and answers out of the same budget, and it will happily reason
+# until it hits the cap and emit nothing at all. A 120-token cap produced 119
+# reasoning tokens and empty content. So did 8000 on a real audit chunk: all
+# seven chunks returned reasoning_tokens=7999 and no answer, which the first
+# version of this script cheerfully reported as "0 findings".
+#
+# That is the exact defect class this script exists to find, reproduced in the
+# tool itself. Hence both the larger budget and the starvation check in
+# call_kimi(): an empty answer must be a loud failure, never a clean result.
+MAX_TOKENS = 32000
 
 # Chunks are grouped by concern rather than by directory, so related code is
 # reviewed together. A bug like #3 is only visible when the producer
@@ -183,6 +189,23 @@ def call_kimi(key: str, content: str, attempt: int = 0) -> dict:
 
     text = (data["choices"][0]["message"].get("content") or "").strip()
     usage = data.get("usage", {})
+    reasoning = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+
+    # Reasoning starvation: the model thought until it hit the cap and never
+    # answered. Empty content here means "we learned nothing", NOT "the code is
+    # clean", and conflating those is how a silent failure becomes a green
+    # report. Escalate rather than return an empty finding list.
+    if not text:
+        if reasoning >= MAX_TOKENS - 50:
+            if attempt < 2:
+                return call_kimi(key, content, attempt + 1)
+            return {"_error": (
+                f"Reasoning starvation: {reasoning}/{MAX_TOKENS} tokens spent "
+                f"thinking, no answer emitted. Raise MAX_TOKENS or split this "
+                f"chunk. NOT a clean result."
+            )}
+        return {"_error": f"Empty response (reasoning={reasoning}), no answer emitted."}
+
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0]
     try:
@@ -244,8 +267,16 @@ def main() -> int:
     order = {"critical": 0, "high": 1, "medium": 2}
     all_findings.sort(key=lambda f: order.get(f.get("severity", "medium"), 3))
 
+    failed = [r for r in results if "_error" in r or "_unparsed" in r]
+
     print(f"\n{'='*70}")
-    print(f"{len(all_findings)} fynd totalt. Rapport: {out}")
+    if failed:
+        # Say this before the findings, not after. A partial audit read as a
+        # complete one is worse than no audit.
+        print(f"VARNING: {len(failed)} av {len(results)} chunkar gav INGET svar.")
+        print("Resultatet nedan ar ofullstandigt och sager ingenting om de chunkarna.")
+        print(f"{'='*70}")
+    print(f"{len(all_findings)} fynd fran {len(results) - len(failed)} lyckade chunkar. Rapport: {out}")
     print(f"{'='*70}\n")
     for f in all_findings:
         print(f"[{f.get('severity','?').upper()}] ({f.get('pattern','?')}) {f.get('location','?')}")
