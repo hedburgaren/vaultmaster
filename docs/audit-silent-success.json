@@ -3,54 +3,68 @@
     "findings": [
       {
         "severity": "critical",
-        "pattern": "G",
-        "location": "backup_executor.py:510-524 (execute_custom_backup size check)",
-        "claim": "The custom backup verifies that the script produced usable output by checking the newest file in output_dir against min_output_bytes.",
-        "reality": "The check only looks at size and mtime relative to other files in the directory; it never verifies the file is newer than the run marker. A stale file left from a previous run satisfies the check even if the current script produced nothing.",
-        "consequence": "A run is recorded as successful and a stale artifact is transferred, but the actual data the script was supposed to back up this run is not captured.",
+        "pattern": "B",
+        "location": "api/services/backup_executor.py:547-557 (execute_custom_backup, output_dir unset)",
+        "claim": "A custom script that exits 0 produced a verifiable backup.",
+        "reality": "When output_dir is unset (and encrypt=False), the function performs no output verification, leaves size_bytes=0/remote_path=''/checksum='', and still returns success=True.",
+        "consequence": "Run is recorded successful while no file path is returned; the caller skips transfer and the backup never leaves the source host, recreating the historical data-loss pattern noted in the file comments.",
+        "confidence": "high"
+      },
+      {
+        "severity": "critical",
+        "pattern": "D",
+        "location": "api/services/backup_executor.py:541-545 (execute_custom_backup size-check except)",
+        "claim": "Size/listing failures are surfaced as backup failures.",
+        "reality": "The inner try/except swallows any exception during the output_dir listing unless the literal substring 'min_output_bytes' appears in the message; it logs a warning and falls through to a success response carrying size_bytes=0 and remote_path=''.",
+        "consequence": "SSH errors, remote command failures, or malformed find output are reported as success; the produced backup is not transferred because remote_path is empty.",
+        "confidence": "medium"
+      },
+      {
+        "severity": "high",
+        "pattern": "B",
+        "location": "api/services/backup_executor.py:169-170, 262-263, 361-364 (sha256sum failures in pg/docker/files backups)",
+        "claim": "Successful backups include a SHA-256 checksum computed from the file on disk.",
+        "reality": "If sha256sum returns non-zero, the code assigns checksum_sha256='' and continues to return success=True.",
+        "consequence": "Backups are recorded successful with no integrity checksum; silent storage/transfer corruption cannot be detected.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "A",
+        "location": "api/services/backup_executor.py:552 (execute_custom_backup return)",
+        "claim": "Successful custom backups include a SHA-256 checksum.",
+        "reality": "checksum_sha256 is hardcoded to '' for every custom backup; no sha256sum is ever run.",
+        "consequence": "All custom backups report success without any integrity checksum; bit-rot or tampering cannot be detected.",
         "confidence": "high"
       },
       {
         "severity": "high",
         "pattern": "B",
-        "location": "backup_executor.py:503-547 (execute_custom_backup no output_dir path)",
-        "claim": "A successful custom backup produces a remote_path that the caller can transfer off-host.",
-        "reality": "When output_dir is unset and encrypt is false, produced_path remains '', no size or artifact check runs, and the function still returns success=True with remote_path=''.",
-        "consequence": "The caller's transfer is skipped because remote_path is empty, yet the run is reported successful, so no backup leaves the source host and the failure is hidden.",
-        "confidence": "high"
-      },
-      {
-        "severity": "high",
-        "pattern": "B",
-        "location": "backup_executor.py:116-118, 228-231, 320-322, 445-447 (age_crypto.preflight calls)",
-        "claim": "Backups that request encryption fail closed when encryption cannot be delivered.",
-        "reality": "The code only enters the encryption branch if preflight returns a truthy recipient. If preflight returns None/empty for an encrypt=true job without raising, the backup proceeds as plaintext and returns success with is_encrypted=False.",
-        "consequence": "Jobs configured as encrypted are stored as plaintext backups, and the successful run record does not reflect the missing encryption.",
+        "location": "api/services/backup_executor.py:116, 229, 320, 445 (age_crypto.preflight calls)",
+        "claim": "Encryption is gated before any work so a missing key/binary fails the run rather than leaving an unencrypted dump.",
+        "reality": "The shown code has no local guard that encrypt=True implies recipient is truthy; it relies entirely on preflight raising. If preflight returns falsy when encryption is requested but unavailable, all four backup types proceed as plaintext and report success.",
+        "consequence": "Jobs configured as encrypted produce plaintext backups that are still reported as successful; sensitive data is not protected as requested.",
         "confidence": "low"
       },
       {
         "severity": "medium",
-        "pattern": "F",
-        "location": "backup_executor.py:169-170, 262-263, 361-364 (sha256sum checks)",
-        "claim": "A successful built-in backup returns a SHA-256 checksum of the produced file.",
-        "reality": "If sha256sum exits non-zero, the code sets checksum_sha256='' and continues to return success=True (with only a warning in the files path).",
-        "consequence": "The run is reported successful but no integrity checksum is recorded, so future corruption or tampering cannot be detected.",
-        "confidence": "high"
+        "pattern": "G",
+        "location": "api/services/backup_executor.py:163-164, 256-257, 352-354, 503-504 (verify_encrypted calls)",
+        "claim": "Encryption is verified on disk before the run is considered successful or before plaintext is deleted.",
+        "reality": "Log messages and comments indicate verify_encrypted only checks for 'age magic bytes present'; a truncated or partially-written age file with a valid header passes.",
+        "consequence": "For custom backups the plaintext is deleted based on this check; a corrupt age artifact can be recorded as encrypted-success while the only good copy is destroyed.",
+        "confidence": "medium"
       }
     ],
     "clean": false,
-    "note": "Custom backup's output verification and remote_path handling are the most dangerous false-success paths; built-in checksum failures and the encryption guard also need review.",
+    "note": "The empty-checksum and empty-remote_path paths directly reproduce the 'success reported for work not performed' defect class across all four backup types.",
     "_usage": {
-      "completion_tokens": 11430,
-      "prompt_tokens": 8380,
-      "total_tokens": 19810,
+      "completion_tokens": 16992,
+      "prompt_tokens": 8627,
+      "total_tokens": 25619,
       "completion_tokens_details": {
-        "reasoning_tokens": 10873
-      },
-      "prompt_tokens_details": {
-        "cached_tokens": 768
-      },
-      "cached_tokens": 768
+        "reasoning_tokens": 16068
+      }
     },
     "_chunk": "backup-executor",
     "_files": [
@@ -61,63 +75,50 @@
     "findings": [
       {
         "severity": "critical",
-        "pattern": "G",
-        "location": "api/services/ssh_client.py:56 (_build_connect_kwargs)",
-        "claim": "SSH/SFTP connections authenticate and connect to the configured server.",
-        "reality": "known_hosts=None disables host-key verification, so asyncssh accepts any server identity and reports success even when connected to the wrong or a malicious host.",
-        "consequence": "Backups can be written to or restored from an attacker-controlled or misconfigured host; the real data is never backed up, and restores can return corrupted or empty data.",
+        "pattern": "H",
+        "location": "api/services/ssh_client.py:63-78",
+        "claim": "SSH host-key verification is disabled only for loopback targets; the code checks the loopback assumption and warns for remote hosts.",
+        "reality": "_build_connect_kwargs always passes known_hosts=None, and the is_loopback check only emits a logger.warning; non-loopback hosts still connect with no host-key verification and no hard failure.",
+        "consequence": "Backups, restores, SFTP transfers, and remote deletions to any non-loopback SSH target are vulnerable to MITM interception; an attacker can receive, modify, or drop the company's only copies while the UI/backend report a successful connection.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "D",
+        "location": "api/services/ssh_client.py:609-620",
+        "claim": "delete_remote_file reports success only after the remote file has been deleted.",
+        "reality": "It runs `rm -f <path>`, which exits 0 whether or not the path existed, and returns (True, \"Deleted ...\") for any zero exit status.",
+        "consequence": "Retention cleanup, temporary-file removal, and pre-restore cleanup are logged as successful even when files were never deleted, causing old backups or sensitive data to persist and potentially be restored.",
         "confidence": "high"
       },
       {
         "severity": "high",
         "pattern": "F",
-        "location": "api/services/ssh_client.py:350-448 (list_remote_docker)",
-        "claim": "Returns the full list of Docker containers and volumes, with error=None when no Python exception occurs.",
-        "reality": "docker ps, docker inspect, and docker volume ls use check=False; non-zero exits are ignored, and the function returns partial or empty lists with error=None.",
-        "consequence": "Servers with Docker workloads appear to have no containers or volumes, so Docker backups are not configured and all container/volume data is lost in a restore.",
+        "location": "api/services/ssh_client.py:124-133",
+        "claim": "test_ssh_connection validates that an API-based server is reachable.",
+        "reality": "For auth_type='api' it only checks that host starts with http/https or contains a dot/colon; it makes no network or API call before returning True.",
+        "consequence": "Unreachable, misconfigured, or non-existent API backup targets are shown as 'OK', so backups may be scheduled against dead targets and the failure is discovered only on restore day.",
         "confidence": "high"
       },
       {
-        "severity": "high",
-        "pattern": "G",
-        "location": "api/services/ssh_client.py:102-111 (test_ssh_connection)",
-        "claim": "Tests connectivity and returns True only if the server is reachable.",
-        "reality": "For auth_type='api' it only checks that server.host contains a dot/colon or starts with http://; it never opens a socket or makes an API call.",
-        "consequence": "API servers show as reachable even when the host is wrong or down; backup jobs proceed on false confidence and fail, or the misconfiguration is discovered only on restore day.",
-        "confidence": "high"
-      },
-      {
-        "severity": "medium",
-        "pattern": "G",
-        "location": "api/services/ssh_client.py:523-537 (delete_remote_file)",
-        "claim": "Deletes a remote file and reports success when the file is removed.",
-        "reality": "Uses rm -f, which exits 0 whether the file existed and was deleted or never existed at all.",
-        "consequence": "Callers believe cleanup succeeded (old backups, scratch files, or pre-encryption plaintext removed) when nothing was deleted, causing retention violations or leftover data.",
-        "confidence": "high"
-      },
-      {
-        "severity": "medium",
+        "severity": "low",
         "pattern": "D",
-        "location": "api/services/ssh_client.py:175-183 (run_remote_command, auth_type='local')",
-        "claim": "Returns the command's exit status so callers can detect failure.",
-        "reality": "Runs the command through /bin/sh without pipefail; a pipeline's exit status reflects only the last stage, masking failures in earlier stages.",
-        "consequence": "A local backup pipeline such as mysqldump | gzip can produce a truncated or zero-byte backup but report exit code 0, storing a corrupted backup as valid.",
-        "confidence": "medium"
+        "location": "api/services/ssh_client.py:181-271",
+        "claim": "run_remote_command returns the real exit status of the executed command.",
+        "reality": "Both the local branch (create_subprocess_shell) and the SSH branch (default remote shell) use /bin/sh semantics without `set -o pipefail`; for any command containing `|`, the returned status is that of the last pipeline stage only.",
+        "consequence": "If a caller passes a dump/compress pipeline (e.g. `mysqldump | gzip`), an early-stage failure is masked and the function can return 0 for an incomplete or zero-byte backup.",
+        "confidence": "low"
       }
     ],
     "clean": false,
-    "note": "Every SSH-backed path is missing host verification and several functions silently degrade partial failures into success.",
+    "note": "Three high-confidence false-success defects found; the disabled SSH host-key verification is the most severe, followed by the rm -f deletion lie and the API connectivity smoke-test that performs no actual probe.",
     "_usage": {
-      "completion_tokens": 14652,
-      "prompt_tokens": 8406,
-      "total_tokens": 23058,
+      "completion_tokens": 15347,
+      "prompt_tokens": 9609,
+      "total_tokens": 24956,
       "completion_tokens_details": {
-        "reasoning_tokens": 14040
-      },
-      "prompt_tokens_details": {
-        "cached_tokens": 768
-      },
-      "cached_tokens": 768
+        "reasoning_tokens": 14766
+      }
     },
     "_chunk": "ssh-transport",
     "_files": [
@@ -128,58 +129,40 @@
     "findings": [
       {
         "severity": "critical",
-        "pattern": "F",
-        "location": "api/tasks/backup_tasks.py:_run_backup:197,338-367,474-486",
-        "claim": "A run is recorded as success once the executor returns success; a partial transfer only emits a 'partial_transfer' notification and keeps the source temp file when not every destination succeeded.",
-        "reality": "run.status is set to 'success' at line 197 before transfers run and is never changed based on transfer outcomes. When only some destinations succeed, the code logs that it is keeping the source copy, but the finally block unconditionally deletes the same remote_path from temp_files_to_clean regardless of the safe_to_delete_source decision.",
-        "consequence": "Failed destinations have no backup copy and no source to retry from, while the run record and the run.success notification claim the backup succeeded; the partial failure is silent in the status field and unrecoverable because the only remaining copy is destroyed.",
-        "confidence": "high"
-      },
-      {
-        "severity": "critical",
         "pattern": "C",
-        "location": "api/tasks/backup_tasks.py:_run_backup:231,368-385",
-        "claim": "The elif filename branch handles the case where no destinations are configured by recording artifacts without transfer.",
-        "reality": "The branch is entered whenever filename is truthy but remote_path is falsy OR destination_ids is empty. When destinations are configured but remote_path is missing/empty, it still iterates over every destination and creates BackupArtifact rows with remote_path='', then commits the run as success without transferring anything.",
-        "consequence": "A backup run is reported as successful and the database claims artifacts exist at every destination, but no file was transferred and the source path is empty; the backup exists in neither place.",
+        "location": "api/tasks/backup_tasks.py:458-477 (elif filename branch inside _run_backup)",
+        "claim": "When no transfer occurs it records BackupArtifact rows and leaves the run marked success.",
+        "reality": "This branch runs whenever filename is present but remote_path is falsy or job.destination_ids is empty. It creates artifacts whose remote_path may be an empty string without ever copying a file to a destination, then commits the run as success. If destination_ids is empty and remote_path is truthy, the source temp file was already registered in temp_files_to_clean and is deleted in the finally block.",
+        "consequence": "The run is green while no durable copy exists: either the database points at a non-existent path or the only copy is destroyed. Restores fail and the backup is lost silently.",
         "confidence": "high"
       },
       {
         "severity": "high",
-        "pattern": "A",
-        "location": "api/tasks/backup_tasks.py:verify_artifact_checksum:700-704",
-        "claim": "The verify_artifact_checksum task verifies the checksum of a stored artifact.",
-        "reality": "The function only logs that verification was queued and contains a TODO comment; it performs no verification and returns None, which Celery records as a successful task execution.",
-        "consequence": "Any scheduled or triggered integrity checks silently succeed, giving false confidence that artifacts are valid and recoverable when corruption or truncation may have occurred.",
-        "confidence": "high"
-      },
-      {
-        "severity": "medium",
         "pattern": "G",
-        "location": "api/tasks/backup_tasks.py:_run_restore:670-691",
-        "claim": "Restore reports 'completed' only if pg_restore or psql actually applied data to the target database.",
-        "reality": "The elif fallback runs psql with -v ON_ERROR_STOP=1 on the decompressed stream. If that stream is empty, psql receives no commands and exits 0, so the branch succeeds and the function returns 'completed'. The code never checks that the target database actually received data.",
-        "consequence": "A restore can be reported as completed even though no data was loaded, leading to a false belief that a database has been recovered.",
+        "location": "api/tasks/backup_tasks.py:877-910 (_verify_remote_via_local_md5)",
+        "claim": "Verifies an off-site Drive copy by comparing its MD5 to the local copy of the same backup.",
+        "reality": "The local copy is selected only by matching filename against any local BackupArtifact. It does not filter by run_id, server, job, domain, db_name, or timestamp, so a different backup with the same filename can be used for comparison.",
+        "consequence": "A corrupt or unrelated off-site artifact can be reported as verified, letting a bad backup appear healthy. A restore may use a damaged copy while the UI shows a green integrity check.",
         "confidence": "medium"
       },
       {
         "severity": "medium",
-        "pattern": "F",
-        "location": "api/tasks/backup_tasks.py:_check_scheduled:790-791",
-        "claim": "check_scheduled_jobs evaluates all active jobs and triggers those that are due.",
-        "reality": "Per-job exceptions (invalid cron, trigger failure, etc.) are caught and logged, the loop continues, and the periodic task exits normally. Celery therefore records the scheduler task as successful even when one or more jobs were never evaluated or triggered.",
-        "consequence": "Scheduled backups can stop being triggered without the scheduler task itself failing; the missed schedules are only visible in logs and are not surfaced as a task failure.",
-        "confidence": "medium"
+        "pattern": "B",
+        "location": "api/tasks/backup_tasks.py:476-477 (else branch inside _run_backup success path)",
+        "claim": "A successful backup with no filename is reported as a successful run.",
+        "reality": "If the executor returns success=true but omits filename, the code logs a warning and continues. The run.status is already set to success, the loop records no artifact, and the code commits and notifies run.success.",
+        "consequence": "A backup job can be recorded as successful with no artifact and no verification that any durable output exists, masking a failed or empty backup.",
+        "confidence": "low"
       }
     ],
     "clean": false,
-    "note": "The two critical findings both produce run.success records with missing or destroyed backup data; the checksum stub and scheduler swallowing compound the false-confidence problem.",
+    "note": "The success-path branches in _run_backup can commit a green run without a durable copy, and the off-site checksum verification can pass by comparing the wrong file.",
     "_usage": {
-      "completion_tokens": 18165,
-      "prompt_tokens": 11349,
-      "total_tokens": 29514,
+      "completion_tokens": 16381,
+      "prompt_tokens": 15395,
+      "total_tokens": 31776,
       "completion_tokens_details": {
-        "reasoning_tokens": 17260
+        "reasoning_tokens": 15804
       },
       "prompt_tokens_details": {
         "cached_tokens": 768
@@ -195,58 +178,40 @@
     "findings": [
       {
         "severity": "high",
-        "pattern": "B",
-        "location": "api/tasks/rotation_tasks.py:79-81",
-        "claim": "enforce_retention evaluates every job/destination pair against its current policy.",
-        "reality": "If a job's policy id is missing or not found in the policies map, the loop executes `continue` before `apply_rotation` is called, but the task still returns a success dict.",
-        "consequence": "Backups for any job with a missing or deleted retention policy are never rotated; the daily task reports success, so the retention gap is invisible and the archive grows beyond policy.",
-        "confidence": "high"
-      },
-      {
-        "severity": "high",
         "pattern": "D",
-        "location": "api/tasks/rotation_tasks.py:18-21,134-158",
-        "claim": "run_rotation executes GFS rotation for the requested policy/job.",
-        "reality": "`_do_rotation` returns normally (and Celery records SUCCESS) when the policy is not found, the job_id is invalid, or the job has no runs; none of these paths raise or return failure.",
-        "consequence": "A rotation that never runs is recorded as successful; old backups are retained beyond the policy, wasting storage and eventually causing backup failures.",
+        "location": "api/tasks/rotation_tasks.py:run_rotation (18-22) / _do_rotation early returns (171-173, 187-188)",
+        "claim": "The Celery task reports SUCCESS when rotation for the requested policy/job is performed.",
+        "reality": "When the retention policy does not exist or the job_id is invalid, _do_rotation logs an error and returns None; run_rotation discards even that None and exits. Celery therefore records the task as SUCCESS with no exception, even though zero rotation work was done.",
+        "consequence": "A policy or job that should be pruned is silently skipped; its backups accumulate, storage fills up, and monitoring sees only successful rotation tasks.",
         "confidence": "high"
       },
       {
         "severity": "medium",
         "pattern": "A",
-        "location": "api/tasks/rotation_tasks.py:71-83",
-        "claim": "The returned `rotated` count tells how many job/destination pairs were actually rotated.",
-        "reality": "`rotated` is incremented once per destination after every `apply_rotation` call, regardless of whether the call changed any flags or deleted any artifacts.",
-        "consequence": "Operators/auditors see a reassuring number and believe retention is active everywhere, even for jobs/destinations where rotation was a no-op.",
+        "location": "api/tasks/rotation_tasks.py:88-90",
+        "claim": "The returned 'rotated' count tells the caller how many job/destination pairs were rotated.",
+        "reality": "rotated is incremented once for every pair before inspecting whether apply_rotation actually flagged or changed anything; it is a count of loop iterations, not successful rotations.",
+        "consequence": "Dashboards and operators believe retention was applied to every pair; pairs where rotation silently did nothing are indistinguishable from properly rotated pairs, hiding retention failures.",
         "confidence": "high"
       },
       {
         "severity": "medium",
-        "pattern": "F",
-        "location": "api/tasks/rotation_tasks.py:94",
-        "claim": "The configured `purge_safety_floor` controls how many backups are kept.",
-        "reality": "`int(getattr(settings, 'purge_safety_floor', 3) or 3)` silently replaces any falsy value (e.g. an explicit 0) with 3.",
-        "consequence": "A setting intended to allow more aggressive purging is ignored; more backups than intended are retained, silently undermining the retention policy.",
-        "confidence": "medium"
-      },
-      {
-        "severity": "low",
-        "pattern": "D",
-        "location": "api/tasks/rotation_tasks.py:105-113",
-        "claim": "The result of `execute_purge` is persisted and reported.",
-        "reality": "`await db.commit()` is only executed when `result['deleted']` is truthy; any database changes made by `execute_purge` when nothing is deleted are left uncommitted.",
-        "consequence": "Reported purge state may not match the database, causing retries, audit gaps, or retention leaks.",
+        "pattern": "B",
+        "location": "api/tasks/rotation_tasks.py:74-87",
+        "claim": "enforce_retention evaluates every job against its current policy.",
+        "reality": "If a BackupJob's destination_ids is empty, the inner for loop never executes. That job is not added to skipped, not logged, and receives no rotation or purge.",
+        "consequence": "Jobs with no destinations are excluded from retention forever and their artifacts grow without any signal.",
         "confidence": "low"
       }
     ],
     "clean": false,
-    "note": "Found five concrete success-without-work defects; the silent skip of missing policies in enforce_retention has the largest blast radius.",
+    "note": "Celery routing and beat schedules are internally consistent; the false-success defects are in the rotation task outcomes and metrics.",
     "_usage": {
-      "completion_tokens": 13975,
-      "prompt_tokens": 4290,
-      "total_tokens": 18265,
+      "completion_tokens": 16322,
+      "prompt_tokens": 4900,
+      "total_tokens": 21222,
       "completion_tokens_details": {
-        "reasoning_tokens": 13360
+        "reasoning_tokens": 15879
       },
       "prompt_tokens_details": {
         "cached_tokens": 768
@@ -263,58 +228,67 @@
     "findings": [
       {
         "severity": "critical",
-        "pattern": "C",
-        "location": "api/services/purge.py:execute_purge (lines 182-190)",
-        "claim": "After a remote file is deleted, the matching BackupArtifact row is updated to is_deleted=True.",
-        "reality": "The lookup uses BackupArtifact.id == item['artifact_id'] where the value is a string; on dialects where string/UUID equality silently returns no rows (the same defect class noted in rotation.py bug #13) scalar_one_or_none() returns None, the row is not updated, and deleted/reclaimed counters are still incremented unconditionally.",
-        "consequence": "The backup file is gone but the database still advertises it as restorable, so restore attempts fail; the same artifact is re-planned on every subsequent purge, inflating failure counts and reclaimed-bytes metrics.",
+        "pattern": "H",
+        "location": "api/services/purge.py:select_floor (51-71) and plan_purge (140-168)",
+        "claim": "The safety floor and 'never empty a job' guard guarantee a (job, destination) never loses all restorable copies.",
+        "reality": "select_floor only considers rows where is_deleted is False, and the guard only counts live rows. For a job whose newest backups are flagged deleted but files still exist (the 8305-row corruption this module is meant to fix), the floor is empty, live_count is 0, and the guard short-circuits, so purge deletes the actual surviving files.",
+        "consequence": "Total data loss for any (job, destination) whose only restorable copies are flagged deleted; the purge run still reports successful deletions.",
         "confidence": "high"
       },
       {
         "severity": "critical",
-        "pattern": "F",
-        "location": "api/services/purge.py:plan_purge (lines 99-122)",
-        "claim": "The newest safety_floor artifacts per (job, destination) are never purged, guaranteeing the job is never left without restorable backups.",
-        "reality": "The floor is taken from the full artifact list, including rows already flagged is_deleted=True. If the newest rows are deleted ghosts, the floor is satisfied by them and live older backups become deletion candidates.",
-        "consequence": "A job/destination can be purged down to only deleted ghosts while live backup files are removed; the UI still reports floor-protected artifacts, but none are actually restorable.",
+        "pattern": "A",
+        "location": "api/services/rotation.py:apply_rotation (103-172)",
+        "claim": "Applies GFS rotation to a single job/destination group.",
+        "reality": "When called without both job_id and storage_id, apply_rotation loads all non-deleted artifacts into one list and passes them to select_expired, which expects one group. The keep buckets are shared across jobs and destinations, so backups from different jobs compete and valid copies are marked deleted.",
+        "consequence": "Valid backups across multiple jobs/destinations can be flagged deleted and hidden from restore; subsequent purge may then physically remove them.",
         "confidence": "high"
       },
       {
         "severity": "high",
         "pattern": "A",
-        "location": "api/services/purge.py:plan_purge (lines 59-145)",
-        "claim": "delete_count and reclaim_bytes describe files that will be physically removed and bytes that will actually be freed.",
-        "reality": "The query has no is_deleted == False filter, so already-deleted artifacts are included in the plan and counted at their size_bytes even though their files may already be absent.",
-        "consequence": "Operators and dashboards believe retention is reclaiming storage while real disk/cloud usage stays high; quota exhaustion is hidden and repeated purge runs report cumulative reclaimed bytes that never match actual free space.",
+        "location": "api/services/purge.py:plan_purge (136-168) and execute_purge (201-247)",
+        "claim": "delete_count and reclaimed_bytes report files that will be or were physically removed.",
+        "reality": "plan_purge includes every expired row, including rows already flagged is_deleted=True, in to_delete and reclaim_bytes. execute_purge then re-sets is_deleted=True on those rows and increments deleted/reclaimed as if fresh deletion work occurred, even if the file was already gone.",
+        "consequence": "Dry-run and executed metrics show space reclaimed that was not reclaimed, masking runaway storage growth, while deletion counters are inflated with no-ops.",
         "confidence": "high"
       },
       {
-        "severity": "medium",
+        "severity": "high",
         "pattern": "A",
-        "location": "api/services/rotation.py:preview_rotation (lines 175-207)",
-        "claim": "Preview shows what rotation would delete for the supplied job_id.",
-        "reality": "The job_id parameter is never used; the query loads every active artifact in the database regardless of job.",
-        "consequence": "A policy change previewed for one job appears to affect backups from other jobs, so an operator may approve a deletion that unexpectedly removes expected backups elsewhere.",
+        "location": "api/services/rotation.py:preview_rotation (175-207)",
+        "claim": "Previews what rotation would do, optionally limited to a job.",
+        "reality": "The job_id parameter is never referenced, storage_id is not accepted, and the function queries all non-deleted artifacts globally, running select_expired on a mixed group.",
+        "consequence": "Policy previews do not match actual per-job rotation, so admins may approve policies that delete backups they expected to keep or keep backups they expected to delete.",
         "confidence": "high"
       },
       {
         "severity": "medium",
-        "pattern": "D",
-        "location": "api/services/rotation.py:apply_rotation (lines 122-124, 134-136)",
-        "claim": "Rotation is applied for the requested job and/or storage destination.",
-        "reality": "If job_id or storage_id is not a valid UUID, the function logs an error but returns {\"kept\":0,\"deleted\":0,\"artifacts_deleted\":[]} with no failure indicator and performs no rotation.",
-        "consequence": "Retention never runs for that job/destination, old backups accumulate, and the failure is invisible to calling code that treats the returned dict as a successful rotation.",
+        "pattern": "G",
+        "location": "api/services/purge.py:plan_purge (140-155)",
+        "claim": "Refuses to purge a batch that would delete every surviving artifact for a (job, destination).",
+        "reality": "With the default safety_floor > 0, select_floor removes the newest live artifacts from candidates, so live_expired is always strictly less than live_count. The condition len(live_expired) >= live_count can never be true; when live_count is 0 the guard short-circuits.",
+        "consequence": "The guard gives false confidence that misconfiguration is caught, but it provides no actual protection beyond the floor and none when all rows are flagged deleted.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "G",
+        "location": "api/services/purge.py:execute_purge (208-247)",
+        "claim": "A file is deleted before its row is flagged deleted.",
+        "reality": "The only verification is the boolean returned by delete_file_from_storage. If that helper reports success without removing the file (idempotent cloud API, transient error, or bug), the row is immediately flagged deleted with no follow-up check that the file is gone.",
+        "consequence": "Backup rows can report 'deleted' while files remain, or rows can be flagged deleted for files that were never removed, making restore/retention state inconsistent.",
         "confidence": "medium"
       }
     ],
     "clean": false,
-    "note": "Found concrete cases where purge and rotation report successful deletion, protection, or preview for work that was not performed or was performed on the wrong scope.",
+    "note": "The purge safety floor and never-empty guard can empty jobs whose surviving copies are flagged deleted, while rotation and its preview silently mix (job, destination) groups and purge inflates success metrics with already-deleted rows.",
     "_usage": {
-      "completion_tokens": 16853,
-      "prompt_tokens": 6028,
-      "total_tokens": 22881,
+      "completion_tokens": 16703,
+      "prompt_tokens": 6941,
+      "total_tokens": 23644,
       "completion_tokens_details": {
-        "reasoning_tokens": 16008
+        "reasoning_tokens": 15798
       },
       "prompt_tokens_details": {
         "cached_tokens": 768
@@ -331,45 +305,54 @@
     "findings": [
       {
         "severity": "critical",
-        "pattern": "D",
-        "location": "api/tasks/cleanup_tasks.py:58-63 (scan_orphan_temp_files)",
-        "claim": "The Celery task returns the result of the orphan scan, including counts of cleaned files, bytes freed, and skipped servers.",
-        "reality": "The task body calls `_run_async(_scan_orphans())` and discards the return value. The value stored as the Celery task result is therefore always `None`, no matter what `_scan_orphans` actually did or returned. If `_run_async` schedules the coroutine without awaiting it, the worker marks the task successful before cleanup executes.",
-        "consequence": "Monitoring sees a successful task with a `None` result and cannot verify that cleanup ran. If `_run_async` is fire-and-forget, orphaned temp files are never removed, the work_dir accumulates multi-TB dumps, future backups fail when disk is exhausted, and the data that needed those backups is lost.",
-        "confidence": "medium"
+        "pattern": "B",
+        "location": "api/tasks/cleanup_tasks.py:97-114 (_scan_orphans)",
+        "claim": "Cleanup catches worker SIGKILL, OOM, and host-reboot cases where the finally-block did not run.",
+        "reality": "It skips any server with a BackupRun in 'pending' or 'running'. After a SIGKILL/OOM/reboot the run row stays 'running', so the safety net skips the very orphans it exists to remove and still logs 'done'.",
+        "consequence": "Orphaned temp files from killed backups are never deleted; disk fills; subsequent backups fail or are corrupted, reproducing the 2026-05-02 incident.",
+        "confidence": "high"
       },
       {
-        "severity": "medium",
-        "pattern": "B",
-        "location": "api/tasks/cleanup_tasks.py:119-125",
-        "claim": "Each server work_dir is scanned for old temp files and candidates are evaluated.",
-        "reality": "When `run_remote_command` returns a non-zero exit code, the loop executes `continue` with no log line. Only exceptions are logged; non-zero exits are swallowed silently.",
-        "consequence": "Any server where `find` fails (missing binary, permission denied, path error, etc.) is skipped entirely and its orphaned temp files are not cleaned. The overall task still reports success, so the omission produces no alert and disk pressure grows unchecked.",
+        "severity": "high",
+        "pattern": "D",
+        "location": "api/tasks/cleanup_tasks.py:119",
+        "claim": "Lists temp files in work_dir so age/name filtering can happen client-side.",
+        "reality": "The command interpolates work_dir unquoted and uses GNU-only '-printf'; failures are redirected to /dev/null and swallowed. The function treats a failed listing as 'no files' and reports a successful cleanup run.",
+        "consequence": "Cleanup silently never executes on hosts with shell-sensitive work_dir paths or non-GNU find; orphaned archives accumulate until disk exhaustion breaks backups.",
         "confidence": "high"
       },
       {
         "severity": "medium",
         "pattern": "D",
-        "location": "api/tasks/cleanup_tasks.py:119",
-        "claim": "The `find` command searches the configured `work_dir`.",
-        "reality": "`work_dir` is interpolated directly into the shell command without `shlex.quote`. If the path contains spaces or shell metacharacters, `find` receives split or incorrect arguments.",
-        "consequence": "`find` may exit non-zero and be silently skipped (orphans persist), or it may enumerate/delete files outside the intended directory. The task reports success in either case, hiding the fact that the intended cleanup did not happen or that wrong files were touched.",
+        "location": "api/tasks/cleanup_tasks.py:62-63 (scan_orphan_temp_files)",
+        "claim": "The Celery task runs the orphan scan.",
+        "reality": "The synchronous task calls an imported _run_async helper and discards the result. If _run_async is async or merely schedules the coroutine, the task returns/acks before the scan completes.",
+        "consequence": "Cleanup may be reported as succeeded while it never ran, allowing orphaned files to grow until disk is full and backups fail.",
+        "confidence": "low"
+      },
+      {
+        "severity": "medium",
+        "pattern": "H",
+        "location": "api/tasks/cleanup_tasks.py:169-176 (_scan_orphans)",
+        "claim": "The fuser check confirms a file is not open before deletion.",
+        "reality": "The safety decision is delegated to an unshown file_is_free helper. The code shown cannot be verified to fail closed for missing/failing fuser (rc != 1).",
+        "consequence": "If file_is_free returns True for an uncertain exit code, live backup temp files can be deleted while being written, corrupting or aborting the backup.",
         "confidence": "low"
       }
     ],
     "clean": false,
-    "note": "Chunk contains at least one critical false-success path.",
+    "note": "The cleanup task reports success on multiple failure paths and its busy-run guard defeats the stated purpose of cleaning up after SIGKILL/OOM/reboot.",
     "_usage": {
-      "completion_tokens": 14104,
-      "prompt_tokens": 3298,
-      "total_tokens": 17402,
+      "completion_tokens": 11906,
+      "prompt_tokens": 3388,
+      "total_tokens": 15294,
       "completion_tokens_details": {
-        "reasoning_tokens": 13527
+        "reasoning_tokens": 11366
       },
       "prompt_tokens_details": {
-        "cached_tokens": 3298
+        "cached_tokens": 768
       },
-      "cached_tokens": 3298
+      "cached_tokens": 768
     },
     "_chunk": "cleanup",
     "_files": [
@@ -379,41 +362,50 @@
   {
     "findings": [
       {
-        "severity": "high",
-        "pattern": "B",
-        "location": "api/services/rclone_client.py:283-284,296-297",
-        "claim": "delete_file_from_storage reports success when the target is already absent, treating that as the desired end state.",
-        "reality": "The function returns (True, ...) immediately if a local path does not pass os.path.isfile() — including typos, directories, and permission-denied paths — and also returns True for any cloud error containing \"not found\" or \"does not exist\". The specified object is not deleted.",
-        "consequence": "Retention/rotation callers mark BackupArtifact rows as purged while the actual backup bytes remain in storage. Retention policy is silently not enforced, storage fills, and new backups eventually fail.",
+        "severity": "critical",
+        "pattern": "G",
+        "location": "api/services/rclone_client.py:307-311",
+        "claim": "After deletefile fails, the code lists the target and treats a failed or empty listing as proof the file is already gone, reporting deletion success.",
+        "reality": "_run_rclone(['lsf', target]) returns success on any non-zero exit or empty output. Authentication failures, network outages, buckets that are unreachable, permission denials, and timeouts all look identical to 'file absent', so a still-present file is reported as deleted.",
+        "consequence": "Retention/rotation marks artifacts purged in the database while they remain on storage. Destinations are not freed, they fill up, backups fail, and data that must be deleted (compliance or sensitive data) stays recoverable.",
         "confidence": "high"
       },
       {
-        "severity": "medium",
-        "pattern": "B",
-        "location": "api/services/rclone_client.py:91-93",
-        "claim": "_build_backend constructs an SFTP backend using the configured password.",
-        "reality": "If _obscure_password fails and returns None, the `if obscured:` guard silently skips appending --sftp-pass. The backend is built without the configured credential and rclone proceeds anyway.",
-        "consequence": "SFTP backups may authenticate via an unintended key/agent fallback or fail outright, with no signal that the configured password was never used. The caller reports whatever rclone returns as the real outcome.",
-        "confidence": "high"
+        "severity": "high",
+        "pattern": "D",
+        "location": "api/tasks/storage_tasks.py:25",
+        "claim": "refresh_storage_usage delegates to _run_async(_refresh) and the Celery task succeeds when the wrapper returns.",
+        "reality": "The return value of _run_async is discarded. If the helper schedules the coroutine without blocking/awaiting it to completion, the task will be marked successful before any usage is probed or persisted.",
+        "consequence": "Storage usage columns stay stale, capacity warnings never fire, storage fills, and subsequent backups fail.",
+        "confidence": "low"
       },
       {
         "severity": "medium",
         "pattern": "A",
-        "location": "api/tasks/storage_tasks.py:80-81",
-        "claim": "The task logs that it refreshed usage for all N active destinations.",
-        "reality": "The log counts every destination selected from the database, including those skipped due to exceptions, error-returning usage dicts, or missing used_bytes. The commit can happen with zero rows updated.",
-        "consequence": "Operators and monitoring see a successful refresh log when no usage data was actually updated, masking storage-probe failures and delaying response to full destinations.",
+        "location": "api/tasks/storage_tasks.py:81",
+        "claim": "The task logs 'refreshed usage for {len(destinations)} destinations' after commit.",
+        "reality": "len(destinations) is the number of destinations selected, not the number successfully updated. Destinations that raised errors were skipped but are still counted in the success message.",
+        "consequence": "Operators and dashboards believe all active destinations were refreshed; failing probes are masked and capacity thresholds may not be detected until a destination is full.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "B",
+        "location": "api/services/rclone_client.py:283-284",
+        "claim": "For local backends, if os.path.isfile(path) is False the file is already absent and deletion is successful.",
+        "reality": "os.path.isfile is False for missing files but also for directories, sockets, and other non-regular paths. A directory target is reported as already absent without being removed.",
+        "consequence": "A directory artifact or non-file path is logged as purged while still occupying storage, so retention is silently not enforced for that object.",
         "confidence": "high"
       }
     ],
     "clean": false,
-    "note": "The delete-file false-success guard is the most dangerous because it neutralizes retention; the other two are silent degradations of credentials and observability.",
+    "note": "The delete verification is the worst defect; the async dispatch and usage-refresh logging are additional false-success signals.",
     "_usage": {
-      "completion_tokens": 8385,
-      "prompt_tokens": 5759,
-      "total_tokens": 14144,
+      "completion_tokens": 22531,
+      "prompt_tokens": 6071,
+      "total_tokens": 28602,
       "completion_tokens_details": {
-        "reasoning_tokens": 7865
+        "reasoning_tokens": 21883
       },
       "prompt_tokens_details": {
         "cached_tokens": 768
@@ -431,30 +423,57 @@
       {
         "severity": "critical",
         "pattern": "B",
-        "location": "validation_tasks.py:54-56; restore_validator.py:346,386-388,369",
-        "claim": "Restic restore-validation checks the specific backup snapshot/artifact for the job.",
-        "reality": "For restic jobs _validate_job explicitly skips artifact lookup ('if restic: pass'), so run_validation always receives artifact=None. It computes snap_id=None and passes it to validate_restic_job, which accepts a snapshot_id parameter but never references it. The actual work is a repo-level 'restic check --read-data-subset=1%' with no snapshot selector.",
-        "consequence": "A restic job whose latest snapshot is missing, never created, or points to the wrong snapshot can still show validation 'passed'. On restore the needed snapshot is unavailable and the data is gone, with the validator having given false assurance.",
+        "location": "validation_tasks.py:133-142",
+        "claim": "Jobs without a validation in the last 24h are queued and actually validated",
+        "reality": "_scan_candidates only checks the timestamp of the latest BackupValidationRun, not its status or whether it validated anything. A job with no artifact produces a 'skipped' run that still updates last.created_at, so it is not re-queued for another 24h.",
+        "consequence": "Jobs that stop producing usable backups (the exact 2026-05-01 seafile failure mode) continue to look 'recently validated' while no restore test is performed; data loss is not detected until a manual check or until the 24h window lapses repeatedly.",
+        "confidence": "high"
+      },
+      {
+        "severity": "critical",
+        "pattern": "F",
+        "location": "restore_validator.py:346-376, restore_validator.py:387-388",
+        "claim": "validate_restic_job validates the restic backup snapshot for the job",
+        "reality": "The snapshot_id parameter is accepted but never referenced. The function runs `restic check --read-data-subset=1%` against the whole repository, not the snapshot. A missing or corrupt snapshot for this specific job passes as long as the rest of the repo is intact.",
+        "consequence": "A restic backup snapshot can be missing or unrestorable while the validation row reports 'passed'; the company discovers the backup cannot be restored only on the day it is needed.",
         "confidence": "high"
       },
       {
         "severity": "high",
-        "pattern": "F",
-        "location": "restore_validator.py:252-272",
-        "claim": "The PostgreSQL smoke query proves the restored database is actually usable/restorable.",
-        "reality": "The query only counts user tables (SELECT count(*) FROM pg_class WHERE relkind='r' ...) and passes if >0. It does not verify row counts, that all expected tables exist, or that data was actually loaded. A schema-only dump or a partial restore that created any table passes.",
-        "consequence": "Backups that restored schema but no rows, or only a subset of tables, are reported as restorable. A real restore would be missing data and the validation falsely claimed the backup was good.",
+        "pattern": "A",
+        "location": "validation_tasks.py:55-56, restore_validator.py:387",
+        "claim": "Restic validation is tied to a specific artifact/snapshot from the job",
+        "reality": "_validate_job explicitly skips artifact lookup for restic jobs (artifact is always None). run_validation then derives snapshot_id from artifact.checksum_sha256 (a metadata file hash, not a restic snapshot ID) and passes it to validate_restic_job, which ignores it.",
+        "consequence": "No specific restic snapshot is ever validated for any job; the recorded validation result falsely represents a general repo integrity check as a successful restore test of the job's backup.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "C",
+        "location": "restore_validator.py:83-90",
+        "claim": "The encrypted artifact is deleted only after a successful decryption to a usable file",
+        "reality": "os.remove(local_path) runs unconditionally immediately after decrypt_local_file returns, before the caller has verified the decrypted file. The log line then stats the decrypted file, but a non-empty yet truncated/corrupted decrypt would still pass that size check.",
+        "consequence": "If age decryption silently produces a truncated or corrupted file, the only local copy of the encrypted artifact in the validation workdir is destroyed and validation may report 'passed' on degraded data (e.g., partial gzip that still decompresses enough for pg_restore to create some tables).",
         "confidence": "medium"
+      },
+      {
+        "severity": "low",
+        "pattern": "D",
+        "location": "restore_validator.py:111",
+        "claim": "_run returns the subprocess exit status",
+        "reality": "`return proc.returncode or 0` converts a None returncode to 0. If a subprocess somehow terminates without asyncio setting returncode, callers see success.",
+        "consequence": "A rare subprocess state error would be reported as exit 0, causing docker/tar/pg_restore/restic checks to report success when the command did not actually complete successfully.",
+        "confidence": "low"
       }
     ],
     "clean": false,
-    "note": "Restic validation reports success without ever looking at the job's snapshot; PostgreSQL validation only proves some table exists, not that data was restored.",
+    "note": "The validation framework has critical false-success paths: skipped runs reset the freshness clock, and restic validation never checks a job-specific snapshot.",
     "_usage": {
-      "completion_tokens": 43950,
-      "prompt_tokens": 7980,
-      "total_tokens": 51930,
+      "completion_tokens": 12927,
+      "prompt_tokens": 8070,
+      "total_tokens": 20997,
       "completion_tokens_details": {
-        "reasoning_tokens": 43578
+        "reasoning_tokens": 12060
       },
       "prompt_tokens_details": {
         "cached_tokens": 768
@@ -470,59 +489,41 @@
   {
     "findings": [
       {
-        "severity": "critical",
-        "pattern": "D",
-        "location": "api/services/age_crypto.py:120-138 (wrap_pipeline)",
-        "claim": "bash -o pipefail ensures the whole pipeline fails if any stage fails, even when sudo wraps commands in dash/sh.",
-        "reality": "Only the outer bash pipeline has pipefail. If the supplied pipeline is a sudo-wrapped shell command (e.g. sudo sh -c 'pg_dump ... | gzip'), the inner dash pipeline still reports only the last stage's exit status. The outer bash sees only sudo's exit code, so a failing dump can still produce exit 0.",
-        "consequence": "A failing source stage can create a truncated or empty backup file that the run reports as successful; the corrupted artifact is then eligible for replication and will fail on restore.",
+        "severity": "high",
+        "pattern": "G",
+        "location": "api/services/age_crypto.py:350-365 (detect_is_encrypted)",
+        "claim": "The artifact row's is_encrypted flag is set from a readback of the file's actual bytes, not from configuration or intent.",
+        "reality": "It reads only the first 4 bytes (the 'age-' magic) and returns True if they match. A plaintext file, a truncated header, or any data beginning with those bytes is recorded as encrypted.",
+        "consequence": "Plaintext or non-age artifacts can be stamped is_encrypted=True, replicated off-site as if encrypted, and only discovered unrecoverable or non-compliant at restore time.",
         "confidence": "high"
       },
       {
         "severity": "high",
-        "pattern": "G",
-        "location": "api/services/age_crypto.py:150-168 (verify_encrypted)",
-        "claim": "Confirms on-disk bytes are actually age-encrypted.",
-        "reality": "It only checks that the first four bytes match the age magic header. A truncated age file, a header-only file, or any file whose content happens to start with 'age-' passes.",
-        "consequence": "Corrupt or truncated backups can be stamped is_encrypted=true and replicated as if they were valid encrypted artifacts; restore will fail when the file cannot be decrypted.",
-        "confidence": "high"
-      },
-      {
-        "severity": "high",
-        "pattern": "G",
-        "location": "api/services/age_crypto.py:106-117 (preflight)",
-        "claim": "Fails closed: raises EncryptionUnavailable when the job wants encryption we cannot deliver.",
-        "reality": "It validates the public recipient and that the age binary exists on the source host, but never checks identity_available() or that a private identity exists for restore.",
-        "consequence": "A backup can be encrypted with a public key for which no private identity is configured; the run reports a successful encrypted backup, but the data is unrecoverable when a restore is attempted.",
-        "confidence": "medium"
-      },
-      {
-        "severity": "medium",
         "pattern": "F",
-        "location": "api/services/credentials_crypto.py:203-218 (decrypt_dict_secrets)",
-        "claim": "Decrypts any enc:vN:-prefixed string values in a dict in place.",
-        "reality": "A broad except Exception: pass catches InvalidToken, corrupted tokens, and malformed prefixes, leaving the original encrypted string in the dict and returning it.",
-        "consequence": "The caller receives a dict it believes is decrypted; using ciphertext as a plaintext password causes authentication failures, and persisting the unchanged value after key rotation can render the credential permanently unreadable.",
+        "location": "api/services/age_crypto.py:246-297 (verify_encrypted)",
+        "claim": "Raises unless the artifact's bytes are actually age-encrypted.",
+        "reality": "It only checks that the file starts with the full age header line. A truncated or header-only file passes, and the docstring explicitly admits truncated archives would pass.",
+        "consequence": "Incomplete or corrupt encrypted backups are accepted as valid, stored, and replicated; they will be unrecoverable when a restore is attempted.",
         "confidence": "high"
       },
       {
         "severity": "medium",
         "pattern": "D",
-        "location": "api/services/age_crypto.py:141-148 (read_magic_hex)",
-        "claim": "Raises if reading magic bytes fails.",
-        "reality": "The command is 'head ... | od ... | tr ...' with no pipefail. The exit code is that of tr; if head/od fail (missing file, permissions) tr still exits 0, so the function returns an empty string instead of raising.",
-        "consequence": "detect_is_encrypted records is_encrypted=False when it could not read the file, and verify_encrypted raises a misleading 'unexpected magic' error rather than the real read failure, hiding the cause of verification failure.",
-        "confidence": "high"
+        "location": "api/services/credentials_crypto.py:203-218 (decrypt_dict_secrets)",
+        "claim": "Decrypts any enc:vN:-prefixed values in the dict in place.",
+        "reality": "The bare `except Exception: pass` swallows InvalidToken, malformed values, and all other failures, leaving the original encrypted string in the dict and returning normally.",
+        "consequence": "Callers believe secrets are decrypted; backup jobs may receive encrypted blobs as passwords or API tokens, fail authentication, and produce no backup while the config appears clean.",
+        "confidence": "medium"
       }
     ],
     "clean": false,
-    "note": "encryption.py is clean for this defect class; the age wrapper and credentials decryption paths have multiple ways to report success while work was not performed or not verified.",
+    "note": "The remaining shown crypto code either raises on failure or performs the work it reports; the three findings above are the only success-for-no-work defects visible in this chunk.",
     "_usage": {
-      "completion_tokens": 33644,
-      "prompt_tokens": 6887,
-      "total_tokens": 40531,
+      "completion_tokens": 11351,
+      "prompt_tokens": 8676,
+      "total_tokens": 20027,
       "completion_tokens_details": {
-        "reasoning_tokens": 32797
+        "reasoning_tokens": 10925
       },
       "prompt_tokens_details": {
         "cached_tokens": 768
@@ -540,40 +541,40 @@
     "findings": [
       {
         "severity": "critical",
-        "pattern": "D",
-        "location": "api/services/notifier.py:notify_event (lines 310-335)",
-        "claim": "notifies all matching channels for an event and records last_sent for the ones that succeeded",
-        "reality": "asyncio.gather(..., return_exceptions=True) and the broad except around db.commit() swallow every dispatch and commit failure; the function always returns None, so callers/Celery have no signal when every channel failed or the audit update could not be persisted.",
-        "consequence": "Alerts for run.failed, validation.failed, server.offline, storage.critical, backup.anomaly, etc. can be lost entirely while the calling task still appears to succeed; operators are not alerted and may only discover backup/restore failures on the day data is needed.",
+        "pattern": "A",
+        "location": "api/tasks/anomaly_tasks.py:_scan lines 98-113",
+        "claim": "The scan logs how many backup anomalies were fired/delivered.",
+        "reality": "It increments `anomalies` before calling `notify_event` and never inspects the returned `any_success`, `delivered`, or `failed`. `notify_event` can fail for every channel and the task still logs `X anomalies fired` and commits successfully.",
+        "consequence": "Backup corruption, silent failures, and size anomalies can go completely unreported while logs and the Celery task outcome claim alerting succeeded.",
         "confidence": "high"
       },
       {
         "severity": "critical",
-        "pattern": "A",
-        "location": "api/services/notifier.py:332",
-        "claim": "commits only the notification last_sent updates in a standalone block",
-        "reality": "await db.commit() is executed on the caller's shared session, persisting every pending change in that transaction — including any uncommitted state the caller has set (e.g., a backup run or validation record marked successful) before it has been finalized or verified.",
-        "consequence": "A backup run or validation result can become durable prematurely. If later logic detects an error and tries to roll back, the 'success' record is already committed, leading to restores being attempted from incomplete or corrupt artifacts.",
-        "confidence": "medium"
+        "pattern": "D",
+        "location": "api/services/notifier.py:_send_telegram lines 104-111",
+        "claim": "A Telegram notification was sent when the HTTP response is 200.",
+        "reality": "The Telegram Bot API returns HTTP 200 with `{\"ok\":false}` for many failures (bad token, unknown chat, rate limit, parse error). The code never parses the response or checks `ok`, so failed API calls return success.",
+        "consequence": "Alerts routed to Telegram are recorded as delivered while no message reaches operators; backup failures and anomalies can be silently ignored.",
+        "confidence": "high"
       },
       {
-        "severity": "high",
-        "pattern": "D",
-        "location": "api/services/notifier.py:252-253",
-        "claim": "returns True / 'Email sent' after server.send_message(msg)",
-        "reality": "smtplib.SMTP.send_message returns a dictionary of refused recipients; the code discards that value and returns success whether all, some, or no recipients were accepted.",
-        "consequence": "Email alerts for critical events may not be delivered, but the channel's last_sent is updated and the dispatch is logged as successful, hiding a broken alerting path.",
+        "severity": "medium",
+        "pattern": "B",
+        "location": "api/services/notifier.py:notify_event lines 367-379",
+        "claim": "The returned `committed` flag indicates the last_sent updates / caller transaction were persisted.",
+        "reality": "`committed` is initialised to `True` and only set `False` if the commit raises. When `any_success` is `False`, the `if any_success:` guard skips the commit entirely, yet `committed` stays `True`.",
+        "consequence": "Callers relying on `committed` can believe uncommitted caller state is safe; audit updates may vanish on rollback and correlated transaction work may be lost.",
         "confidence": "medium"
       }
     ],
     "clean": false,
-    "note": "Not clean: notifier can silently lose alerts, falsely acknowledge email delivery, and prematurely commit unverified caller state.",
+    "note": "The two highest-impact issues are the anomaly scanner reporting success without verifying delivery and the Telegram channel reporting success on API errors.",
     "_usage": {
-      "completion_tokens": 18593,
-      "prompt_tokens": 8025,
-      "total_tokens": 26618,
+      "completion_tokens": 13494,
+      "prompt_tokens": 8774,
+      "total_tokens": 22268,
       "completion_tokens_details": {
-        "reasoning_tokens": 18141
+        "reasoning_tokens": 13026
       },
       "prompt_tokens_details": {
         "cached_tokens": 768
@@ -584,6 +585,615 @@
     "_files": [
       "api/services/notifier.py",
       "api/tasks/anomaly_tasks.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "critical",
+        "pattern": "D",
+        "location": "api/database.py:26 in get_db",
+        "claim": "A successful HTTP response means the database transaction was committed.",
+        "reality": "`await session.commit()` is executed in the dependency cleanup phase after `yield session`. FastAPI sends the response to the client before running code after the yield, so commit failures occur after the 200 OK has already been returned.",
+        "consequence": "Every write endpoint (backup jobs, retention policies, storage configs, credentials) can return HTTP 200 while the transaction is rolled back. The UI and operators believe jobs and policies exist, but they were never persisted, so backups do not run and retention is not enforced — silent, total backup failure.",
+        "confidence": "high"
+      },
+      {
+        "severity": "critical",
+        "pattern": "G",
+        "location": "api/main.py:134-136 /api/health",
+        "claim": "The service reports its health status as 'ok'.",
+        "reality": "`/api/health` is a static response that never checks the database, Redis, storage backends, or any backup-related subsystem. It returns ok unconditionally.",
+        "consequence": "Load balancers, orchestrators, and monitoring think the backup control plane is healthy when it is not. If the database or storage is down, the service is not restarted or removed from rotation, backup scheduling and recording stop, and the outage is invisible until data is already lost.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "B",
+        "location": "api/main.py:28-36 in lifespan",
+        "claim": "Startup creates the required schema or detects that tables already exist from a peer worker race.",
+        "reality": "Any `Exception` whose message contains the substrings 'already exists' or 'UniqueViolationError' is logged as a warning and swallowed, regardless of whether it actually means the full schema is present. Other exceptions are re-raised, but the substring guard is broad and string-based.",
+        "consequence": "The API can start with an incomplete or corrupted schema if a real creation failure happens to mention those strings. Required tables for jobs, runs, or artifacts may be missing, causing backups to fail or data to be unrecorded while the service appears to have started successfully.",
+        "confidence": "medium"
+      }
+    ],
+    "clean": false,
+    "note": "The most severe issue is that every database write can report success before its commit is confirmed.",
+    "_usage": {
+      "completion_tokens": 8795,
+      "prompt_tokens": 4027,
+      "total_tokens": 12822,
+      "completion_tokens_details": {
+        "reasoning_tokens": 8236
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "core-app",
+    "_files": [
+      "api/main.py",
+      "api/config.py",
+      "api/database.py",
+      "api/rate_limiter.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "high",
+        "pattern": "C",
+        "location": "api/routers/users.py:create_user(), update_user(), delete_user()",
+        "claim": "POST /users, PUT /users/{id}, and DELETE /users/{id} persist user lifecycle changes and return HTTP success.",
+        "reality": "create_user/update_user call db.flush()/db.refresh() but never db.commit(); delete_user calls db.delete() but never commits. The visible code leaves the transaction uncommitted, so the mutations are rolled back when the session closes unless get_db commits on teardown.",
+        "consequence": "The API returns 201/200/204 while the database still contains the old state: deleted accounts stay active, demoted admins retain admin rights, and newly created users cannot log in.",
+        "confidence": "medium"
+      },
+      {
+        "severity": "high",
+        "pattern": "H",
+        "location": "api/routers/auth.py:login()",
+        "claim": "Login only succeeds for active users and issues a usable access token.",
+        "reality": "login selects the user by username, verifies password/TOTP, and immediately issues a token without ever checking user.is_active. A deactivated account passes authentication and receives a token.",
+        "consequence": "Account deactivation is ineffective at the login layer; a disabled user or attacker with stolen disabled credentials gets a success response and a token, confirming the credentials remain valid and enabling further API probing.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "B",
+        "location": "api/routers/auth.py:setup()",
+        "claim": "/auth/setup creates the first admin only when no users exist.",
+        "reality": "The guard reads the User count and then inserts the admin in separate, non-atomic steps. Concurrent setup requests can both observe count==0 and create distinct admin rows.",
+        "consequence": "Multiple initial admin accounts can be created, bypassing the single-setup invariant and potentially granting unauthorized full administrative access.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "D",
+        "location": "api/middleware/audit.py:dispatch()",
+        "claim": "Every mutating request under /api/v1/ is recorded in the audit log.",
+        "reality": "The middleware wraps log_action and db.commit() in a broad except Exception that logs a warning and returns the response. If audit writing fails, the failure is swallowed and no audit row is created.",
+        "consequence": "Security-relevant actions and authentication events can disappear from the audit trail while the request still appears to have completed normally, making incident response impossible.",
+        "confidence": "high"
+      }
+    ],
+    "clean": false,
+    "note": "The auth layer has multiple success-without-work paths: user-management mutations never commit in the visible code, login ignores the active flag, /auth/setup has a TOCTOU race, and the audit middleware silently drops failed writes.",
+    "_usage": {
+      "completion_tokens": 27101,
+      "prompt_tokens": 7959,
+      "total_tokens": 35060,
+      "completion_tokens_details": {
+        "reasoning_tokens": 26542
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "auth-and-access",
+    "_files": [
+      "api/auth.py",
+      "api/routers/auth.py",
+      "api/routers/users.py",
+      "api/middleware/audit.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "critical",
+        "pattern": "H",
+        "location": "api/mcp/auth.py:46-55 (get_mcp_client atomic UPDATE)",
+        "claim": "The dependency authenticates the MCP client, verifies it is active/unexpired, and atomically updates last_used_at/use_count before returning it to the endpoint.",
+        "reality": "The UPDATE statement's result is discarded. If the row was deleted between the SELECT and the UPDATE, zero rows are modified, yet the stale ORM object is still returned. If the row was only deactivated or expired, the UPDATE still succeeds but returns the now-stale active object. No recheck or rowcount verification occurs.",
+        "consequence": "A revoked, deleted, or expired MCP client can still retrieve plaintext credentials and invoke MCP tools because auth returns success for an authorization it did not actually enforce; audit counters can also be silently lost.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "H",
+        "location": "api/mcp/server.py:15-16,101,159 and api/routers/mcp_clients.py:63",
+        "claim": "Per-client rate limiting is enforced via the existing SlowAPI Limiter using the client UUID as the rate-key.",
+        "reality": "No SlowAPI limiter import, decorator, or dependency appears in the shown MCP routes. The rate_limit_per_minute field is stored on creation but is never read or applied anywhere in the shown code.",
+        "consequence": "A compromised or misused MCP client can brute-force search/get endpoints and exfiltrate plaintext credentials without throttling, while operators believe rate limiting is defending the API.",
+        "confidence": "low"
+      }
+    ],
+    "clean": false,
+    "note": "The most severe issue is the MCP auth dependency authorizing stale or deleted clients; the claimed per-client rate limiter is absent in the shown code.",
+    "_usage": {
+      "completion_tokens": 21567,
+      "prompt_tokens": 6081,
+      "total_tokens": 27648,
+      "completion_tokens_details": {
+        "reasoning_tokens": 21140
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "mcp-surface",
+    "_files": [
+      "api/mcp/server.py",
+      "api/mcp/auth.py",
+      "api/routers/mcp_clients.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "critical",
+        "pattern": "H",
+        "location": "api/routers/jobs.py:125-149 trigger_job",
+        "claim": "Custom-script backup jobs are locked to admin users (Bug #23).",
+        "reality": "Only create_job and update_job enforce the admin check; any authenticated user can POST /jobs/{id}/trigger and queue an existing custom job, which executes arbitrary shell on the target server.",
+        "consequence": "Non-admin users can run arbitrary commands on backup targets, exfiltrate or destroy data, and create unauthorized backups while the system reports 'queued' success.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "H",
+        "location": "api/routers/jobs.py:30-165 (list/get/create/update/delete/schedule-preview)",
+        "claim": "Backup job endpoints are protected by requiring a current user.",
+        "reality": "The endpoints only verify login; none filter queries by owner/tenant, and create_job never binds the new job to current_user. Any authenticated caller can operate on any job row.",
+        "consequence": "Users can view, modify, delete, or trigger another user's/environment's backup jobs, causing configuration loss, cancelled backups, or deletion of every backup job definition.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "H",
+        "location": "api/routers/runs.py:18-241 (list/get/log/cancel/acknowledge endpoints)",
+        "claim": "Backup run history and controls are protected by the router's current-user dependency.",
+        "reality": "The dependency only checks authentication; no endpoint filters by job/run ownership, so any authenticated user can act on any run.",
+        "consequence": "Users can read others' backup logs and statuses, cancel in-flight backups (aborting data protection), and acknowledge/hide failure alerts for runs they do not own.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "D",
+        "location": "api/routers/runs.py:157-210 cancel_run",
+        "claim": "Cancel flips DB status to 'cancelled' and revokes the Celery worker task so the backup actually stops.",
+        "reality": "If celery_app.control.revoke raises any exception, it is caught and logged but the endpoint still returns HTTP 200 with status 'cancelled'.",
+        "consequence": "The caller believes the backup is cancelled, but the worker may continue and later overwrite the run status to success/failed, so a 'cancelled' run can actually complete or modify data.",
+        "confidence": "medium"
+      },
+      {
+        "severity": "medium",
+        "pattern": "F",
+        "location": "api/routers/runs.py:50-154 stream_run_log",
+        "claim": "A non-existent run returns a proper 404 before streaming begins.",
+        "reality": "For a missing run the endpoint yields an SSE 'error' event but the HTTP response itself is 200, so the SSE stream is reported as successfully opened for a run that does not exist.",
+        "consequence": "Clients and automated consumers may treat the connection as valid and wait for log/status events that will never arrive, masking the fact that the run was never found.",
+        "confidence": "medium"
+      }
+    ],
+    "clean": false,
+    "note": "Most endpoints authenticate but do not authorize, and cancel/trigger paths report success for work that is not actually restricted or guaranteed.",
+    "_usage": {
+      "completion_tokens": 8449,
+      "prompt_tokens": 5795,
+      "total_tokens": 14244,
+      "completion_tokens_details": {
+        "reasoning_tokens": 7665
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "router-jobs-runs",
+    "_files": [
+      "api/routers/jobs.py",
+      "api/routers/runs.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "critical",
+        "pattern": "D",
+        "location": "api/routers/storage.py:create_storage, update_storage, delete_storage",
+        "claim": "Creating, updating, or deleting a storage destination persists the change and returns success (201/200/204).",
+        "reality": "The endpoints mutate the in-session object and may flush, but none call `await db.commit()`. When the SQLAlchemy async session closes without a commit, the transaction is rolled back and the change is not durable.",
+        "consequence": "Storage destinations appear created/updated/deleted but vanish on the next request. Backups can be sent to non-existent or stale destinations, credentials are not rotated, and a 'deleted' destination continues to receive backups, leading to silent backup loss or misrouting.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "H",
+        "location": "api/routers/storage.py:list_storage, get_storage, create_storage, update_storage, delete_storage, test_storage, storage_usage, browse_storage",
+        "claim": "Storage endpoints are authenticated and therefore scoped to the current user.",
+        "reality": "Every endpoint depends on `get_current_user` but never binds the resulting user to the query. There is no `owner_id`/`user_id` filter on list, get, update, delete, test, usage, or browse.",
+        "consequence": "Any authenticated user can list, read, modify, delete, or misuse any other user's storage destinations, including changing credentials or deleting the destination another user's backups rely on.",
+        "confidence": "medium"
+      },
+      {
+        "severity": "high",
+        "pattern": "H",
+        "location": "api/routers/artifacts.py:search_artifacts, get_artifact, restore_artifact, verify_artifact",
+        "claim": "Artifact endpoints are authenticated and scoped to the current user's backups.",
+        "reality": "The router requires `get_current_user`, but the endpoint functions never accept or filter by the user. Queries select artifacts by ID only, with no ownership predicate.",
+        "consequence": "Any authenticated user can discover, inspect, restore, or verify another user's backup artifacts, potentially restoring a competitor's or unrelated tenant's data into their own environment.",
+        "confidence": "medium"
+      }
+    ],
+    "clean": false,
+    "note": "The most severe issue is the missing db.commit() in storage mutations, which causes durable changes to be silently discarded while the API reports success.",
+    "_usage": {
+      "completion_tokens": 8034,
+      "prompt_tokens": 4551,
+      "total_tokens": 12585,
+      "completion_tokens_details": {
+        "reasoning_tokens": 7561
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "router-artifacts-storage",
+    "_files": [
+      "api/routers/artifacts.py",
+      "api/routers/storage.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "critical",
+        "pattern": "H",
+        "location": "api/routers/servers.py:33-212",
+        "claim": "Server resources are protected so each user can only access their own servers",
+        "reality": "The router depends on get_current_user but no endpoint accepts the current user; every query selects/updates/deletes Server rows by ID alone with no ownership filter",
+        "consequence": "Any authenticated user can list, read, modify, delete, browse files, list databases, and prune Docker volumes on any other user's server. An attacker can wipe another tenant's backup targets and receive 200/204 success responses.",
+        "confidence": "high"
+      },
+      {
+        "severity": "critical",
+        "pattern": "H",
+        "location": "api/routers/retention.py:15-83",
+        "claim": "Retention policies are scoped to the authenticated user",
+        "reality": "No endpoint receives current_user; all retention policy queries and mutations operate on rows by raw ID only",
+        "consequence": "Any authenticated user can read, modify, or delete another user's retention policy. A deleted or altered policy silently breaks rotation for the victim's backups, causing either unbounded storage growth or premature deletion of restore points, while the API reports success.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "D",
+        "location": "api/routers/servers.py:184 and api/routers/retention.py:72",
+        "claim": "DELETE returns 204 No Content only after the row is actually removed from the database",
+        "reality": "Both delete endpoints call await db.delete() but return immediately without flush() or commit(); whether the row is persisted depends on unshown get_db behavior",
+        "consequence": "If the session is not auto-committed, the server or retention policy remains in the database but the caller believes it was deleted. Backup jobs keep referencing 'deleted' configuration and the admin only discovers the row still exists when a restore fails or an old policy unexpectedly runs.",
+        "confidence": "low"
+      }
+    ],
+    "clean": false,
+    "note": "Both routers lack authorization/ownership filtering on every endpoint; delete endpoints additionally do not guarantee persistence.",
+    "_usage": {
+      "completion_tokens": 6723,
+      "prompt_tokens": 4662,
+      "total_tokens": 11385,
+      "completion_tokens_details": {
+        "reasoning_tokens": 6220
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "router-servers-retention",
+    "_files": [
+      "api/routers/servers.py",
+      "api/routers/retention.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "critical",
+        "pattern": "H",
+        "location": "api/routers/notifications.py:13-110",
+        "claim": "Notification channel endpoints are protected by authentication and only the owning user can manage their channels.",
+        "reality": "The router enforces login but no endpoint extracts the current user or filters by owner_id; any authenticated user can list, get, update, delete, or test any other user's notification channel.",
+        "consequence": "An attacker or ordinary user can delete or reconfigure backup-failure alert channels (e.g., redirect webhooks, disable triggers), so the company receives no warning when backups fail and only discovers the loss on restore day.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "F",
+        "location": "api/services/oauth_storage.py:47-61",
+        "claim": "OAuth flow state containing client_secret and refresh_token is encrypted at rest in Redis.",
+        "reality": "_serialize_flow catches every exception during encryption, logs a warning, and returns the raw JSON plaintext; the callers store it and continue the flow as if it were encrypted.",
+        "consequence": "If the encryption layer fails (missing key, bad config, etc.), client_secret and cloud-storage refresh tokens are written to Redis in plaintext and will be exposed by a Redis RDB backup, replica, or memory dump while the system believes they are protected.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "G",
+        "location": "api/routers/notifications.py:77-100",
+        "claim": "The SPOF guard refuses to delete the last active channel listening for critical events (run.failed/validation.failed/server.offline/storage.critical).",
+        "reality": "The guard only checks whether any other active channel covers ANY critical trigger, not whether all critical triggers covered by the channel being deleted remain covered after deletion.",
+        "consequence": "The only channel listening for run.failed can be deleted as long as some other channel listens for storage.critical; backup-run failure alerts are silently lost, so failures go undetected until restore day.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "F",
+        "location": "api/routers/notifications.py:28 and :63",
+        "claim": "Notification channel secrets are encrypted before persistence.",
+        "reality": "Both create and update use `encrypt_dict_secrets(...) or {}`; if the helper returns None or an empty dict on failure, the code stores an empty config and returns 201/200 as if encryption succeeded.",
+        "consequence": "A silent encryption failure would overwrite the channel's real encrypted secrets with an empty config, breaking all backup notifications from that channel without raising an error.",
+        "confidence": "low"
+      }
+    ],
+    "clean": false,
+    "note": "api/routers/credentials.py appears clean in this chunk; all findings are in notifications.py and oauth_storage.py.",
+    "_usage": {
+      "completion_tokens": 11413,
+      "prompt_tokens": 8368,
+      "total_tokens": 19781,
+      "completion_tokens_details": {
+        "reasoning_tokens": 10749
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "router-secrets",
+    "_files": [
+      "api/routers/credentials.py",
+      "api/routers/notifications.py",
+      "api/services/oauth_storage.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "high",
+        "pattern": "A",
+        "location": "api/routers/validations.py:87-88",
+        "claim": "trigger_validation queues a validation of the type requested in body.check_type",
+        "reality": "validate_backup_job_task.delay(...) is called with a hardcoded 'manual' third argument; body.check_type is never passed to the worker, yet the response echoes body.check_type back to the caller",
+        "consequence": "Operator requests a full (or other) validation and is told it was queued, but a manual/default validation actually runs; backup corruption or restorability failures are not detected and the operator is falsely reassured",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "H",
+        "location": "api/routers/metrics.py:16-19",
+        "claim": "/metrics is an internal operational endpoint returning backup infrastructure telemetry",
+        "reality": "The APIRouter and endpoint have no Depends(get_current_user) or any other auth; the endpoint is world-readable",
+        "consequence": "Unauthenticated attackers obtain server names, storage backends/capacity/usage, job/run counts, success/failure rates, artifact counts, and user counts, enabling targeted attacks and reconnaissance that is never audited",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "A",
+        "location": "api/routers/dashboard.py:59",
+        "claim": "runs_failed_24h reports the number of failed backup runs in the last 24 hours",
+        "reality": "The value is sum(status == 'failed' and acknowledged_at is None), so acknowledged failures are excluded from the field",
+        "consequence": "Dashboard and API consumers see fewer failures than actually occurred; acknowledged failures vanish from the headline count, masking recurring backup problems and giving a false healthy signal",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "F",
+        "location": "api/routers/metrics.py:51",
+        "claim": "vaultmaster_runs_active reports the number of currently running backups",
+        "reality": "The count is computed from runs_24h, which is filtered to BackupRun.created_at >= last_24h; any backup still running after 24 hours is omitted",
+        "consequence": "Long-running or stuck backups are invisible to Prometheus alerts; operators falsely believe no backups are hung and miss backups that may never complete",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "A",
+        "location": "api/routers/validations.py:88",
+        "claim": "Returns queued: True after successfully enqueueing the validation task",
+        "reality": "queued: True is returned unconditionally after .delay(); there is no check that the task name is registered, the queue is bound, or a worker consumes it",
+        "consequence": "Under Celery misconfiguration the API reports success while the validation message is dropped or never processed, leaving backups unvalidated and the operator unaware",
+        "confidence": "medium"
+      }
+    ],
+    "clean": false,
+    "note": "No file in this chunk is clean; every file contains concrete silent misreporting of state or work performed.",
+    "_usage": {
+      "completion_tokens": 9424,
+      "prompt_tokens": 7315,
+      "total_tokens": 16739,
+      "completion_tokens_details": {
+        "reasoning_tokens": 8831
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "router-observability",
+    "_files": [
+      "api/routers/dashboard.py",
+      "api/routers/metrics.py",
+      "api/routers/audit.py",
+      "api/routers/validations.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "critical",
+        "pattern": "H",
+        "location": "api/routers/webhooks.py:17 and CRUD/dispatcher code (lines 57-151)",
+        "claim": "Requiring get_current_user on the router protects each user's webhooks",
+        "reality": "Only login is verified; every endpoint and the dispatcher query or send to the entire Webhook table with no user/tenant/ownership filter",
+        "consequence": "Any authenticated user can list, modify, delete, or create webhooks that receive every user's backup events; an attacker can delete or redirect backup-failure alerts, hiding backup outages until a restore fails",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "B",
+        "location": "api/routers/system_settings.py:25-38",
+        "claim": "PUT /settings/system updates the provided system settings",
+        "reality": "Keys not present in DEFAULTS are silently skipped, then the endpoint returns 200 with current settings as if the update succeeded",
+        "consequence": "Operators believe configuration changes (e.g., work_dir or future backup-path settings) were saved when they were discarded; backups can run with stale/default paths and fail or write to the wrong location",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "C",
+        "location": "api/routers/webhooks.py:131-151",
+        "claim": "dispatch_webhook_event records last_triggered, last_status_code, and failure_count for each delivery attempt",
+        "reality": "The function mutates in-memory ORM objects but never calls db.flush() or db.commit(); persistence depends on the caller committing the same session",
+        "consequence": "Webhook failure counts and delivery metadata may never be saved, causing the system to under-report failures and delay detection of broken backup alerting",
+        "confidence": "low"
+      }
+    ],
+    "clean": false,
+    "note": "The concrete data-loss defects are missing resource-level authorization on webhooks and silently ignored settings updates; dispatcher metadata persistence is an additional low-confidence risk.",
+    "_usage": {
+      "completion_tokens": 6569,
+      "prompt_tokens": 3274,
+      "total_tokens": 9843,
+      "completion_tokens_details": {
+        "reasoning_tokens": 6094
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "router-misc",
+    "_files": [
+      "api/routers/webhooks.py",
+      "api/routers/system_settings.py"
+    ]
+  },
+  {
+    "findings": [],
+    "clean": true,
+    "note": "This chunk contains only declarative schemas and ORM models; no logic that reports success for undone work is present, and the secret-mask serializers actually invoke the helper they delegate to.",
+    "_usage": {
+      "completion_tokens": 2873,
+      "prompt_tokens": 8560,
+      "total_tokens": 11433,
+      "completion_tokens_details": {
+        "reasoning_tokens": 2820
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "schemas-and-models",
+    "_files": [
+      "api/schemas.py",
+      "api/models/backup_artifact.py",
+      "api/models/backup_job.py",
+      "api/models/backup_run.py",
+      "api/models/retention_policy.py",
+      "api/models/storage_destination.py"
+    ]
+  },
+  {
+    "findings": [
+      {
+        "severity": "critical",
+        "pattern": "G",
+        "location": "api/services/restic_executor.py:130-162 (execute_restic_backup)",
+        "claim": "A successful return means restic created a snapshot containing the requested paths.",
+        "reality": "When no snapshot_id is parsed from the summary line, the code logs a warning and still returns {\"success\": True} with filename=\"restic-empty\", checksum_sha256=\"\", and remote_path pointing only at the repo.",
+        "consequence": "Backup runs that produced no restorable snapshot are recorded as successful; the company will believe it has a backup and only find out during a failed restore.",
+        "confidence": "high"
+      },
+      {
+        "severity": "high",
+        "pattern": "D",
+        "location": "api/services/restic_executor.py:148-154 (execute_restic_backup)",
+        "claim": "A successful backup result indicates the configured retention policy was enforced.",
+        "reality": "A non-zero exit from `restic forget --prune` is only logged as a warning; the function returns success: True anyway.",
+        "consequence": "Old snapshots are not pruned per policy, repo size/cost grow, and operators are told the full backup+retention job succeeded.",
+        "confidence": "high"
+      },
+      {
+        "severity": "medium",
+        "pattern": "F",
+        "location": "api/tasks/security_tasks.py:103-147 (_pip_audit / run_security_scan)",
+        "claim": "security.report's python_vulns field reflects the result of a pip-audit scan.",
+        "reality": "Missing binary, timeout, empty/invalid output, and an unchecked subprocess exit code all yield []; run_security_scan reports 0 Python vulnerabilities regardless of whether pip-audit actually ran or succeeded.",
+        "consequence": "Real CVEs in installed packages are silently dropped from the security report, producing a false 'no Python vulnerabilities' assurance.",
+        "confidence": "high"
+      }
+    ],
+    "clean": false,
+    "note": "credential_tasks.py is clean; restic_executor and security_tasks both report success for work they did not perform.",
+    "_usage": {
+      "completion_tokens": 6918,
+      "prompt_tokens": 5749,
+      "total_tokens": 12667,
+      "completion_tokens_details": {
+        "reasoning_tokens": 6521
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "remaining-tasks",
+    "_files": [
+      "api/tasks/credential_tasks.py",
+      "api/tasks/security_tasks.py",
+      "api/services/restic_executor.py"
+    ]
+  },
+  {
+    "findings": [],
+    "clean": true,
+    "note": "These are pure SQLAlchemy model/schema definitions with no executable guards, verification, outcome reporting, or side effects; no instance of 'reports success for work not performed' is present in the shown code.",
+    "_usage": {
+      "completion_tokens": 2581,
+      "prompt_tokens": 5588,
+      "total_tokens": 8169,
+      "completion_tokens_details": {
+        "reasoning_tokens": 2515
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 768
+      },
+      "cached_tokens": 768
+    },
+    "_chunk": "remaining-models",
+    "_files": [
+      "api/models/user.py",
+      "api/models/credential.py",
+      "api/models/server.py",
+      "api/models/mcp_client.py",
+      "api/models/notification_channel.py",
+      "api/models/webhook.py",
+      "api/models/audit_log.py",
+      "api/models/backup_validation_run.py",
+      "api/models/system_settings.py"
     ]
   }
 ]
