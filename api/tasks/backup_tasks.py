@@ -389,6 +389,77 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                         logger.warning(f"[{run.id}] finally: cleanup of {path} failed: {cleanup_err}")
 
 
+@celery_app.task(name="api.tasks.backup_tasks.reap_stale_runs")
+def reap_stale_runs():
+    """Fail runs that have been 'running' far longer than any job could take.
+
+    Added 2026-07-19 after two runs were orphaned by a worker recreation during
+    their upload phase. A run whose worker dies keeps status='running' forever,
+    and check_scheduled_jobs skips a job while a previous run is still in
+    progress. So the job silently stops backing up: no failure, no alert, just
+    absence. `Home: Chrille` (tagged critical) went unbacked-up for 8 hours
+    that way, and PlastShop Odoo DB with it.
+
+    Silence is the dangerous part. A stuck run must become a visible failure,
+    because a failed backup gets noticed and a missing one does not.
+
+    Time-based rather than heartbeat-based on purpose: a heartbeat needs the
+    worker to be alive to report, which is exactly what is not true here. The
+    threshold is deliberately generous (default 6h) since the longest real run
+    is a 23 GB archive plus its upload.
+    """
+    return _run_async(_do_reap_stale_runs())
+
+
+async def _do_reap_stale_runs():
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from api.models.backup_job import BackupJob
+    from api.models.backup_run import BackupRun
+    from api.services.notifier import notify_event
+
+    settings = get_settings()
+    hours = int(getattr(settings, "stale_run_hours", 6) or 6)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    async with get_task_session() as db:
+        stale = (await db.execute(
+            select(BackupRun, BackupJob)
+            .join(BackupJob, BackupJob.id == BackupRun.job_id)
+            .where(BackupRun.status == "running", BackupRun.started_at < cutoff)
+        )).all()
+
+        if not stale:
+            return {"reaped": 0}
+
+        names = []
+        for run, job in stale:
+            age = datetime.now(timezone.utc) - run.started_at
+            run.status = "failed"
+            run.finished_at = datetime.now(timezone.utc)
+            run.error_message = (
+                f"Abandoned: still 'running' after {age.total_seconds() / 3600:.1f}h "
+                f"(threshold {hours}h). The worker executing it most likely died "
+                f"mid-run. Marked failed so the schedule is released."
+            )
+            names.append(job.name)
+            logger.warning(
+                "reap_stale_runs: %s run %s abandoned after %.1fh, marked failed",
+                job.name, run.id, age.total_seconds() / 3600,
+            )
+
+        await db.commit()
+        await notify_event(db, "run.abandoned", {
+            "count": len(stale),
+            "jobs": ", ".join(sorted(set(names))),
+            "threshold_hours": hours,
+        })
+        await db.commit()
+        return {"reaped": len(stale), "jobs": names}
+
+
 @celery_app.task(name="api.tasks.backup_tasks.run_restore_task")
 def run_restore_task(artifact_id: str, target_server_id: str | None = None, target_db_name: str | None = None):
     """Restore a backup artifact into an explicitly named target database.

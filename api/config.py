@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     purge_enabled: bool = True
     purge_safety_floor: int = 3
 
+    # A run still 'running' after this many hours is treated as abandoned and
+    # marked failed, releasing its job's schedule. Generous by design: the
+    # longest legitimate run is a 23 GB archive plus upload.
+    stale_run_hours: int = 6
+
     # Credential vault — separate from JWT secret_key by design.
     # Format: "v1:<base64-Fernet-key>,v2:<base64-Fernet-key>"
     # The HIGHEST version number is used for new encryptions; all listed

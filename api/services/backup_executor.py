@@ -401,22 +401,36 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
     if not script:
         return {"success": False, "error": "No command or script configured", "logs": []}
 
-    # Custom scripts own their output path, so we cannot pipe them through age.
-    # Fail closed rather than produce plaintext and call it encrypted, which is
-    # exactly the failure mode this whole change exists to remove.
-    if bool(getattr(job, "encrypt", False)):
+    encrypt = bool(getattr(job, "encrypt", False))
+    output_dir = config.get("output_dir")
+
+    # Custom scripts own their output path, so they cannot be piped through age
+    # the way the built-in types are. Encryption therefore happens after the
+    # script, over the files it produced in output_dir.
+    #
+    # This is weaker than the in-pipe path and the difference matters: the
+    # script writes plaintext to disk first, and only then is it encrypted and
+    # the plaintext removed. There is a window where the dump exists in the
+    # clear on the source host. In-pipe encryption has no such window.
+    #
+    # It is still the right trade. The first version of this guard simply
+    # refused, which was correct about never lying but left Seafile MariaDB and
+    # Dify Postgres DB with no backup at all for six hours. A transient local
+    # plaintext window is a far smaller risk than no backup, and vastly smaller
+    # than the plaintext-replicated-to-Google-Drive situation this all started
+    # from. Jobs that need the stronger guarantee should encrypt inside their
+    # own script and set encrypt=false.
+    if encrypt and not output_dir:
         msg = (
-            "Job requests encryption, but custom-script jobs write their own "
-            "output and cannot be encrypted in-pipe by VaultMaster. Either "
-            "encrypt inside the script (pipe through `age -r <recipient>`) and "
-            "turn encrypt off on the job, or switch the job to a built-in "
-            "backup type."
+            "Job requests encryption but has no output_dir set. Custom-script "
+            "jobs are encrypted after the fact over the files in output_dir, so "
+            "without it VaultMaster cannot find what to encrypt. Set output_dir, "
+            "or encrypt inside the script and set encrypt=false."
         )
         return {"success": False, "error": msg, "logs": [
             {"ts": datetime.now(timezone.utc).isoformat(), "level": "error", "msg": msg}
         ]}
 
-    output_dir = config.get("output_dir")
     min_bytes = int(config.get("min_output_bytes", 1024))  # default: ≥1 KB
 
     logs = []
@@ -426,6 +440,19 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
         logs.append(entry)
 
     try:
+        # Gate before running anything, so a missing key or binary fails the run
+        # rather than leaving an unencrypted dump behind.
+        recipient = await age_crypto.preflight(server, run_remote_command, encrypt)
+        if recipient:
+            log("info", "Encryption enabled (post-script, over output_dir)")
+
+        # Anything already in output_dir predates this run; only encrypt what the
+        # script itself produces. Without this marker a re-run would re-encrypt
+        # (and thus double-encrypt) files left by an earlier run.
+        marker = f"{_safe_path(output_dir, 'output_dir')}/.vm_run_marker" if output_dir else None
+        if marker:
+            await run_remote_command(server, f"touch {shlex.quote(marker)}")
+
         log("info", f"Running custom script")
         exit_code, stdout, stderr = await run_remote_command(server, script, timeout=7200)
 
@@ -434,6 +461,44 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
             raise Exception(f"Script failed: {stderr}")
 
         log("info", "Custom script completed")
+
+        encrypted_count = 0
+        if recipient and marker:
+            output_dir_q = shlex.quote(_safe_path(output_dir, "output_dir"))
+            marker_q = shlex.quote(marker)
+            # Files newer than the marker, excluding the marker and anything
+            # already encrypted.
+            find_new = (
+                f"find {output_dir_q} -maxdepth 1 -type f -newer {marker_q} "
+                f"! -name '.vm_run_marker' ! -name '*.age' -print"
+            )
+            ec, out, err = await run_remote_command(server, find_new, timeout=120)
+            new_files = [f for f in (out or "").splitlines() if f.strip()]
+
+            if not new_files:
+                raise Exception(
+                    "Encryption requested but the script produced no new files in "
+                    f"{output_dir}. Refusing to report success: there is nothing "
+                    "to encrypt and probably nothing backed up."
+                )
+
+            for path in new_files:
+                src = shlex.quote(path.strip())
+                dst = shlex.quote(path.strip() + age_crypto.AGE_SUFFIX)
+                cmd = age_crypto.wrap_pipeline(f"cat {src}", recipient, path.strip() + age_crypto.AGE_SUFFIX)
+                ec, _o, e2 = await run_remote_command(server, cmd, timeout=3600)
+                if ec != 0:
+                    raise Exception(f"age encryption failed for {path}: {(e2 or '')[:200]}")
+
+                # Verify before destroying the plaintext, never after.
+                await age_crypto.verify_encrypted(server, run_remote_command, path.strip() + age_crypto.AGE_SUFFIX)
+                await run_remote_command(server, f"rm -f {src}")
+                encrypted_count += 1
+
+            log("info", f"Encrypted {encrypted_count} output file(s), plaintext removed")
+
+        if marker:
+            await run_remote_command(server, f"rm -f {shlex.quote(marker)}")
 
         size_bytes = 0
         latest_filename = "custom_backup"
@@ -467,6 +532,8 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
             "remote_path": "",  # custom scripts manage their own paths
             "size_bytes": size_bytes,
             "checksum_sha256": "",
+            # Verified by readback above before the plaintext was deleted.
+            "is_encrypted": bool(recipient),
             "logs": logs,
             "stdout": stdout,
         }

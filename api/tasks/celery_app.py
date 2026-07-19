@@ -76,5 +76,11 @@ celery_app.conf.update(
             "task": "api.tasks.rotation_tasks.enforce_retention",
             "schedule": 86400.0,  # daily: rotate every job, then reclaim space
         },
+        # A run orphaned by a dying worker stays 'running' forever and silently
+        # blocks its job's schedule. Turn that silence into a visible failure.
+        "reap-stale-runs": {
+            "task": "api.tasks.backup_tasks.reap_stale_runs",
+            "schedule": 900.0,  # every 15 min
+        },
     },
 )
