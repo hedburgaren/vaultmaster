@@ -45,6 +45,32 @@ def summarise_transfers(results: list[tuple[str, bool]]) -> dict:
     }
 
 
+def transfer_allowed(dest, is_encrypted: bool) -> tuple[bool, str]:
+    """Decide whether an artifact may be sent to a given destination.
+
+    Policy (Chrille, 2026-07-19): nothing unencrypted may sit on Google Drive.
+
+    Enforced here rather than left to per-job configuration, because a rule
+    that lives only in an `encrypt` column on 47 job rows holds only until
+    somebody adds job 48. This is the boundary every artifact crosses on its
+    way off this machine, so it is the one place the invariant can actually be
+    guaranteed.
+
+    The local archive is exempt: it sits on our own disk under our own access
+    control, and refusing plaintext there would leave a job with no copy at all
+    rather than a less-protected one. Off-box is where the exposure is.
+    """
+    if getattr(dest, "backend", "local") == "local":
+        return True, ""
+    if is_encrypted:
+        return True, ""
+    return False, (
+        f"Refusing to send an UNENCRYPTED artifact to off-site destination "
+        f"'{getattr(dest, 'name', '?')}'. Policy: nothing unencrypted leaves this "
+        f"host. Set encrypt=true on the job."
+    )
+
+
 def withdraw_from_cleanup(entries: list, server, path: str) -> list:
     """Remove one (server, path) pair from the guaranteed-cleanup list.
 
@@ -294,6 +320,14 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                         sub_path = f"{server.name}/{job.name}/{filename}"
                         stored_path = ""
                         transferred = False
+
+                        may_send, refusal = transfer_allowed(
+                            dest, bool(result_data.get("is_encrypted", False))
+                        )
+                        if not may_send:
+                            logger.error(f"[{run.id}] {refusal}")
+                            transfer_results.append((str(dest_id), False))
+                            continue
 
                         if local_file:
                             ok, msg = await copy_file_to_storage(dest, local_file, sub_path)

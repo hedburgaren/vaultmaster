@@ -336,7 +336,45 @@ async def test_custom_backup_fails_when_script_produces_nothing():
     )
 
 
+# ---------------------------------------------------------------------------
+# Policy, made structural (Chrille, 2026-07-19): "Ingenting ska ligga
+# okrypterat pa G Drive."
+#
+# Expressed only as encrypt=true on 47 job rows, that survives exactly until
+# somebody adds job 48. Offsite destinations therefore refuse plaintext at the
+# transfer boundary, so the invariant holds regardless of per-job config.
+# ---------------------------------------------------------------------------
+def test_offsite_destinations_refuse_plaintext():
+    allowed = backup_tasks.transfer_allowed
+
+    class D:
+        def __init__(self, backend, name):
+            self.backend = backend
+            self.name = name
+
+    gdrive = D("gdrive", "Google Drive")
+    local = D("local", "hedburgaren")
+
+    ok, _ = allowed(gdrive, is_encrypted=True)
+    check(ok is True, "encrypted artifact may go offsite")
+
+    ok, reason = allowed(gdrive, is_encrypted=False)
+    check(ok is False, "PLAINTEXT artifact is refused for an offsite destination")
+    check(
+        "encrypt" in reason.lower(),
+        f"the refusal explains why (got {reason[:60]!r})",
+    )
+
+    ok, _ = allowed(local, is_encrypted=False)
+    check(
+        ok is True,
+        "plaintext is still allowed to the local archive, which is on our own disk",
+    )
+
+
 async def main():
+    print("test_offsite_destinations_refuse_plaintext")
+    test_offsite_destinations_refuse_plaintext()
     print("test_custom_backup_fails_when_script_produces_nothing")
     await test_custom_backup_fails_when_script_produces_nothing()
     print("test_preserved_source_is_withdrawn_from_cleanup")
