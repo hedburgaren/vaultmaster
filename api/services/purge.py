@@ -57,19 +57,36 @@ async def plan_purge(db, safety_floor: int = DEFAULT_SAFETY_FLOOR) -> dict:
     now = datetime.now(timezone.utc)
 
     rows = (await db.execute(
-        select(BackupArtifact, BackupJob, RetentionPolicy)
+        select(BackupArtifact, BackupJob)
         .join(BackupRun, BackupRun.id == BackupArtifact.run_id)
         .join(BackupJob, BackupJob.id == BackupRun.job_id)
-        .join(RetentionPolicy, RetentionPolicy.id == BackupJob.retention_id)
     )).all()
 
-    # Group by (job, destination): retention is per destination, since each
-    # destination holds its own independent copy.
+    all_policies = {
+        str(p.id): p
+        for p in (await db.execute(select(RetentionPolicy))).scalars().all()
+    }
+
+    # Group by (job, destination). Retention is resolved per destination, not
+    # per job: BackupJob.retention_overrides is a {dest_id: policy_id} map that
+    # lets a cheap, roomy local disk keep more history than a metered cloud
+    # quota. Ignoring it here would clean the cloud copy on the local disk's
+    # generous schedule, which is the destination that cannot afford it.
     grouped: dict[tuple, list] = defaultdict(list)
     policies: dict[tuple, RetentionPolicy] = {}
     job_names: dict[tuple, str] = {}
-    for artifact, job, policy in rows:
-        key = (str(job.id), str(artifact.storage_id))
+    for artifact, job in rows:
+        dest_str = str(artifact.storage_id)
+        key = (str(job.id), dest_str)
+
+        overrides = job.retention_overrides or {}
+        policy_id = overrides.get(dest_str) or (str(job.retention_id) if job.retention_id else None)
+        policy = all_policies.get(str(policy_id)) if policy_id else None
+        if not policy:
+            # No resolvable policy means no retention instruction. Keeping the
+            # artifact is the only safe reading.
+            continue
+
         grouped[key].append(artifact)
         policies[key] = policy
         job_names[key] = job.name
