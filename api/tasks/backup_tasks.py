@@ -268,7 +268,30 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
             if rp and not result_data.get("skip_transfer"):
                 temp_files_to_clean.append((server, rp))
 
-            if result_data["success"]:
+            # An operator may have cancelled while we were working. The cancel
+            # endpoint flips the row to 'cancelled' and revokes with SIGTERM,
+            # but the revoke is best-effort: broker down, or a legacy run with
+            # no celery_task_id, and this process never hears about it. The
+            # write below then said 'success' over the operator's 'cancelled',
+            # so the API's answer was true for 30 seconds and then silently
+            # unmade. Re-read before writing: the row is the contract.
+            await db.refresh(run)
+            was_cancelled = run.status == "cancelled"
+            if was_cancelled:
+                logger.warning(
+                    "[%s] run was cancelled by operator while executing; "
+                    "keeping status=cancelled (work result: success=%s)",
+                    run.id, result_data.get("success"),
+                )
+                run.finished_at = datetime.now(timezone.utc)
+                run.error_message = (
+                    "Cancelled by operator during execution. The revoke did not "
+                    "reach the worker, so the backup itself ran to completion; "
+                    "any artifact produced was discarded with the temp files."
+                )
+                run.log_lines = result_data.get("logs", [])
+                await db.commit()
+            elif result_data["success"]:
                 run.status = "success"
                 run.size_bytes = result_data.get("size_bytes", 0)
                 run.log_lines = result_data.get("logs", [])
@@ -1001,7 +1024,16 @@ async def _verify_remote_via_local_md5(db, artifact, dest, remote_path: str) -> 
         return {"ok": False, "status": "unreadable",
                 "detail": f"{fname} not found off-site, or it publishes no MD5"}
 
-    # Find the local sibling of this artifact: same filename, local destination.
+    # Find the local sibling of this artifact. The sibling is defined by
+    # run_id: the same backup run wrote both copies, so only a row from the
+    # same run holds the same bytes by construction. Matching on filename
+    # alone (the previous behaviour) picks an arbitrary same-named file, and
+    # custom jobs whose script always writes db.sql.gz, or two servers with
+    # the same database name, then produce false corrupt-verdicts against a
+    # file that was never this artifact's twin. A false alarm on artifact
+    # integrity is expensive: it sends someone hunting a corruption that
+    # does not exist, and teaches them to dismiss the verdict that one day
+    # will be real.
     local_dest = (await db.execute(
         select(StorageDestination).where(StorageDestination.backend == "local")
     )).scalars().first()
@@ -1009,7 +1041,7 @@ async def _verify_remote_via_local_md5(db, artifact, dest, remote_path: str) -> 
     if local_dest:
         local_row = (await db.execute(
             select(BackupArtifact).where(
-                BackupArtifact.filename == artifact.filename,
+                BackupArtifact.run_id == artifact.run_id,
                 BackupArtifact.storage_id == local_dest.id,
                 BackupArtifact.is_deleted == False,  # noqa: E712
             )

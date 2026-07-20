@@ -64,6 +64,15 @@ async def login(request: Request, body: LoginRequest, db: AsyncSession = Depends
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
+    # get_current_user filters on is_active, so a token minted here for a
+    # deactivated account was unusable, but login still answered 200 with a
+    # token: a green "you are in" over an access that does not exist. The
+    # operator who deactivated the account gets to believe it worked, and the
+    # deactivated user gets a token that fails only on first use, pointing
+    # everywhere except at the deactivation. Same verdict at both doors.
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
     if user.totp_enabled:
         if not body.totp_code:
             raise HTTPException(
