@@ -5,6 +5,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.auth import get_current_user
 from api.database import get_db
 from api.models.server import Server
 from api.models.backup_job import BackupJob
@@ -13,7 +14,12 @@ from api.models.storage_destination import StorageDestination
 from api.models.backup_artifact import BackupArtifact
 from api.models.user import User
 
-router = APIRouter(tags=["metrics"])
+# Auth like every other router. This was the only unauthenticated endpoint
+# besides /api/health, and nginx proxies /api/ straight through, so disk
+# sizes, usage percentages and the offsite backend were readable by anyone
+# who found the hostname. Verified live 2026-07-20 before the fix: HTTP 200
+# without credentials. /api/health stays open, that is its job.
+router = APIRouter(tags=["metrics"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/metrics", response_class=PlainTextResponse)

@@ -64,6 +64,20 @@ async def lifespan(app: FastAPI):
             logger.warning("create_all race vs. peer worker, all %d tables present, continuing", len(expected))
         else:
             raise
+
+    # A model column without its migration passes create_all (which ignores
+    # columns on existing tables), passes startup, passes the health check,
+    # and then breaks every query touching that table. Happened 2026-07-19
+    # with backup_artifact.purged_at. Refuse to start instead.
+    from api.services.schema_guard import assert_schema_matches
+    n_tables = await assert_schema_matches()
+    # print, not logger: module loggers are not routed through uvicorn's
+    # config, so the confirmation was invisible and the guard's execution
+    # could not be distinguished from its absence.
+    import sys as _sys
+    print(f"schema guard (api): {n_tables} tables match their models",
+          file=_sys.stderr, flush=True)
+
     logger.info("VaultMaster API started")
     yield
     # Shutdown

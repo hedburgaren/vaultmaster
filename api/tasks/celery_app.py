@@ -84,3 +84,41 @@ celery_app.conf.update(
         },
     },
 )
+
+
+# Schema guard at worker boot. The 2026-07-19 purged_at incident detonated in
+# the WORKER, not the API: a mapped column with no matching migration broke
+# retention, purge and validation at the first query, while the API's health
+# check stayed green. A worker that cannot work must refuse to start, loudly,
+# so the container crash-loops where docker ps shows it, instead of accepting
+# tasks and failing them one by one.
+from celery.signals import beat_init, celeryd_init
+
+
+def _assert_schema_or_die(entrypoint: str) -> None:
+    import asyncio
+    import sys
+
+    from api.services.schema_guard import assert_schema_matches
+
+    loop = asyncio.new_event_loop()
+    try:
+        n = loop.run_until_complete(assert_schema_matches())
+    finally:
+        loop.close()
+    # stderr, not the logger: celeryd_init fires before celery configures
+    # logging, so a logger call here vanishes and the guard becomes
+    # unobservable. A check whose execution cannot be seen cannot be told
+    # apart from a check that does not run.
+    print(f"schema guard ({entrypoint}): {n} tables match their models",
+          file=sys.stderr, flush=True)
+
+
+@celeryd_init.connect
+def _schema_guard_worker(**kwargs):
+    _assert_schema_or_die("worker")
+
+
+@beat_init.connect
+def _schema_guard_beat(**kwargs):
+    _assert_schema_or_die("beat")

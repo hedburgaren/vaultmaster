@@ -632,9 +632,10 @@ async def _do_reap_stale_runs():
             .where(BackupRun.status == "running", BackupRun.started_at < cutoff)
         )).all()
 
-        if not stale:
-            return {"reaped": 0}
-
+        # No early return here. The validation sweep below must run even when
+        # zero backup runs are stale, and today's real case was exactly that:
+        # one stuck validation, no stuck backups. An early return would have
+        # made the new sweep dead code on the most common path.
         names = []
         for run, job in stale:
             age = datetime.now(timezone.utc) - run.started_at
@@ -651,14 +652,43 @@ async def _do_reap_stale_runs():
                 job.name, run.id, age.total_seconds() / 3600,
             )
 
-        await db.commit()
-        await notify_event(db, "run.abandoned", {
-            "count": len(stale),
-            "jobs": ", ".join(sorted(set(names))),
-            "threshold_hours": hours,
-        })
-        await db.commit()
-        return {"reaped": len(stale), "jobs": names}
+        if stale:
+            await db.commit()
+            await notify_event(db, "run.abandoned", {
+                "count": len(stale),
+                "jobs": ", ".join(sorted(set(names))),
+                "threshold_hours": hours,
+            })
+            await db.commit()
+
+        # Validation runs get orphaned the same way and had no reaper at all:
+        # a worker restart on 2026-07-20 left one stuck in 'running' with
+        # nothing ever coming back for it. The scheduling gate only looks at
+        # passed/failed so a stuck row does not block validation any more, but
+        # a row that claims to be running while nothing runs is still a false
+        # report, and the UI repeats it. Validations finish in minutes, so a
+        # 2h threshold is generous.
+        from api.models.backup_validation_run import BackupValidationRun
+
+        v_cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+        stale_validations = (await db.execute(
+            select(BackupValidationRun)
+            .where(BackupValidationRun.status == "running",
+                   BackupValidationRun.created_at < v_cutoff)
+        )).scalars().all()
+        for v in stale_validations:
+            v.status = "failed"
+            v.finished_at = datetime.now(timezone.utc)
+            v.error_message = (
+                "Abandoned: still 'running' after 2h. The worker executing it "
+                "most likely died mid-validation."
+            )
+            logger.warning("reap_stale_runs: validation %s abandoned, marked failed", v.id)
+        if stale_validations:
+            await db.commit()
+
+        return {"reaped": len(stale), "jobs": names,
+                "reaped_validations": len(stale_validations)}
 
 
 @celery_app.task(name="api.tasks.backup_tasks.run_restore_task")
