@@ -578,7 +578,7 @@ async def test_purge_does_not_reclaim_bytes_twice():
     gigabytes forever.
     """
     import inspect
-    from api.services import purge
+    from api.services import purge, rotation
 
     src = inspect.getsource(purge.execute_purge)
     check("already absent" in src,
@@ -591,9 +591,29 @@ async def test_purge_does_not_reclaim_bytes_twice():
     check(idx_absent != -1 and idx_reclaim != -1 and idx_absent < idx_reclaim,
           "the absent-check gates the byte counter rather than following it")
 
+    # plan_purge must NOT filter on is_deleted or deleted_at. apply_rotation
+    # sets both at flag time, so filtering would make purge skip whatever
+    # rotation just flagged and retention would stop deleting files again.
     plan_src = inspect.getsource(purge.plan_purge)
-    check("deleted_at.is_(None)" in plan_src,
-          "already-purged rows are excluded from planning entirely")
+    check("deleted_at.is_(None)" not in plan_src,
+          "plan_purge does NOT filter on deleted_at, which rotation also sets")
+    check("BackupArtifact.is_deleted ==" not in plan_src,
+          "plan_purge does NOT filter on is_deleted either")
+
+    # No code may reference purged_at until migration 0006 has run. Mapping a
+    # column that does not exist puts it in every SELECT against the table and
+    # breaks backups, rotation and purge at once.
+    from api.models import backup_artifact as artifact_model
+    model_src = inspect.getsource(artifact_model)
+    maps_purged_at = "purged_at: Mapped" in model_src
+    # Real references only. Prose mentioning the column is fine and expected,
+    # since the reason it is not wired yet is worth writing down.
+    uses_purged_at = (
+        "BackupArtifact.purged_at" in plan_src
+        or "artifact.purged_at" in inspect.getsource(purge.execute_purge)
+    )
+    check(maps_purged_at == uses_purged_at,
+          "purged_at is either mapped AND used, or neither, never half-wired")
 
 
 async def main():

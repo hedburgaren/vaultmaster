@@ -47,9 +47,17 @@ def _redis() -> redis.Redis:
 def _serialize_flow(flow: dict) -> str:
     """Encrypt the flow dict with the master-key crypto for Redis storage.
 
-    Falls back to plaintext JSON only if the crypto layer can't be loaded
-    (e.g. missing env in dev) — in that case the caller logs a warning and
-    OAuth still works, which preserves the old behavior we're hardening.
+    This used to fall back to plaintext JSON whenever the crypto layer raised,
+    logging a warning and carrying on. The flow dict holds `client_secret` on
+    the way in and `refresh_token` on the way back, so a missing or malformed
+    CREDENTIALS_MASTER_KEYS wrote long-lived Google credentials into Redis in
+    the clear, and the only trace was one warning line in a log nobody reads.
+
+    Note the asymmetry that made it easy to miss: the same broken key config
+    produces a hard 500 in the credentials and notifications routers. Only this
+    path degraded quietly, which is the one place it mattered most.
+
+    Failing here costs an OAuth handshake. Not failing costs the secret.
     """
     raw = json.dumps(flow)
     try:
@@ -57,8 +65,13 @@ def _serialize_flow(flow: dict) -> str:
         token, ver = get_crypto().encrypt(raw)
         return f"{_FLOW_ENC_PREFIX}{ver}:{token.decode('ascii')}"
     except Exception as exc:
-        logger.warning("oauth_storage: encrypt unavailable (%s) — storing flow plaintext", exc)
-        return raw
+        logger.error(
+            "oauth_storage: cannot encrypt OAuth flow (%s). Refusing to store "
+            "client_secret and refresh_token in plaintext. Fix "
+            "CREDENTIALS_MASTER_KEYS before reconnecting the storage backend.",
+            exc,
+        )
+        raise
 
 
 def _deserialize_flow(stored: str) -> dict:

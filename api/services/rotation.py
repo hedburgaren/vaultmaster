@@ -121,26 +121,30 @@ async def apply_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str 
             job_uuid = _uuid.UUID(str(job_id))
         except (ValueError, AttributeError, TypeError) as exc:
             logger.error(f"apply_rotation: invalid job_id {job_id!r}: {exc}")
-            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": [],
+                    "status": "error", "reason": f"invalid job_id {job_id!r}"}
         run_ids_result = await db.execute(select(BackupRun.id).where(BackupRun.job_id == job_uuid))
         run_ids = list(run_ids_result.scalars().all())
         if not run_ids:
-            # No runs for this job → nothing to rotate. Avoid `IN ()` SQL error.
-            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+            # No runs for this job, nothing to rotate. Avoid `IN ()` SQL error.
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": [],
+                    "status": "noop", "reason": "no runs for job"}
         query = query.where(BackupArtifact.run_id.in_(run_ids))
     if storage_id:
         try:
             storage_uuid = _uuid.UUID(str(storage_id))
         except (ValueError, AttributeError, TypeError) as exc:
             logger.error(f"apply_rotation: invalid storage_id {storage_id!r}: {exc}")
-            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": [],
+                    "status": "error", "reason": f"invalid storage_id {storage_id!r}"}
         query = query.where(BackupArtifact.storage_id == storage_uuid)
 
     result = await db.execute(query.order_by(BackupArtifact.created_at.desc()))
     artifacts = result.scalars().all()
 
     if not artifacts:
-        return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+        return {"kept": 0, "deleted": 0, "artifacts_deleted": [],
+                "status": "noop", "reason": "no artifacts in scope"}
 
     now = datetime.now(timezone.utc)
 
@@ -172,9 +176,55 @@ async def apply_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str 
     return {"kept": len(keep_ids), "deleted": len(deleted), "artifacts_deleted": deleted}
 
 
-async def preview_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str | None = None) -> dict:
-    """Preview what rotation would do without actually deleting."""
+async def preview_rotation(
+    db: AsyncSession,
+    policy: RetentionPolicy,
+    job_id: str | None = None,
+    storage_id: str | None = None,
+) -> dict:
+    """Preview what rotation would do without actually deleting.
+
+    job_id used to be accepted and then never referenced, so the preview ran
+    select_expired over every artifact in the archive regardless of what the
+    caller asked about. The retention router passes job_id in good faith, so
+    "what would this policy do to this job" was answered with a number for the
+    whole system.
+
+    It was also wrong in kind, not just in scope. select_expired documents that
+    its input should be a single (job, destination) group, because GFS buckets
+    keep N per period. Pooling every destination together pits two copies of
+    the same run against each other and reports one of them as expiring, which
+    apply_rotation would never do: it is called once per destination.
+    """
+    import uuid as _uuid
+
     query = select(BackupArtifact).where(BackupArtifact.is_deleted == False)
+    if job_id:
+        from api.models.backup_run import BackupRun
+        try:
+            job_uuid = _uuid.UUID(str(job_id))
+        except (ValueError, AttributeError, TypeError) as exc:
+            logger.error(f"preview_rotation: invalid job_id {job_id!r}: {exc}")
+            return {"total_artifacts": 0, "would_keep": 0, "would_delete": 0,
+                    "artifacts_to_delete": [], "status": "error",
+                    "reason": f"invalid job_id {job_id!r}"}
+        run_ids = list((await db.execute(
+            select(BackupRun.id).where(BackupRun.job_id == job_uuid)
+        )).scalars().all())
+        if not run_ids:
+            return {"total_artifacts": 0, "would_keep": 0, "would_delete": 0,
+                    "artifacts_to_delete": [], "status": "noop",
+                    "reason": "no runs for job"}
+        query = query.where(BackupArtifact.run_id.in_(run_ids))
+    if storage_id:
+        try:
+            query = query.where(BackupArtifact.storage_id == _uuid.UUID(str(storage_id)))
+        except (ValueError, AttributeError, TypeError) as exc:
+            logger.error(f"preview_rotation: invalid storage_id {storage_id!r}: {exc}")
+            return {"total_artifacts": 0, "would_keep": 0, "would_delete": 0,
+                    "artifacts_to_delete": [], "status": "error",
+                    "reason": f"invalid storage_id {storage_id!r}"}
+
     result = await db.execute(query.order_by(BackupArtifact.created_at.desc()))
     artifacts = result.scalars().all()
 

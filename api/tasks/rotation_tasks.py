@@ -17,8 +17,15 @@ def _run_async(coro):
 
 @celery_app.task(name="api.tasks.rotation_tasks.run_rotation")
 def run_rotation(policy_id: str, job_id: str | None = None):
-    """Run GFS rotation for a specific retention policy."""
-    _run_async(_do_rotation(policy_id, job_id))
+    """Run GFS rotation for a specific retention policy.
+
+    Returns the result rather than discarding it. Without the return, Celery
+    recorded state=SUCCESS with result=None for every one of _do_rotation's
+    early exits (missing policy, unparseable job_id, no runs), so a rotation
+    that did nothing at all was indistinguishable in Flower and in the task
+    result backend from one that rotated the whole archive.
+    """
+    return _run_async(_do_rotation(policy_id, job_id))
 
 
 @celery_app.task(name="api.tasks.rotation_tasks.enforce_retention")
@@ -71,6 +78,7 @@ async def _do_enforce_retention():
         rotated = 0
         newly_flagged = 0
         skipped: list[str] = []
+        failed_pairs: list[str] = []
         for job in jobs:
             overrides = job.retention_overrides or {}
             for dest_id in (job.destination_ids or []):
@@ -86,9 +94,21 @@ async def _do_enforce_retention():
                     skipped.append(f"{job.name}/{dest_str}")
                     continue
                 res = await apply_rotation(db, policy, str(job.id), storage_id=dest_str)
+                if res.get("status") == "error":
+                    # apply_rotation returns the same zeroed dict for a genuine
+                    # no-op and for an unparseable id, so counting the call
+                    # rather than the outcome reported failed pairs as rotated.
+                    failed_pairs.append(f"{job.name}/{dest_str}: {res.get('reason')}")
+                    continue
                 rotated += 1
                 newly_flagged += res.get("deleted", 0)
         await db.commit()
+
+        if failed_pairs:
+            logger.error(
+                "enforce_retention: %d job/destination pair(s) FAILED to rotate: %s",
+                len(failed_pairs), "; ".join(failed_pairs[:20]),
+            )
 
         if skipped:
             # Loud on purpose: this is a retention hole, not a detail.
@@ -177,7 +197,7 @@ async def _do_rotation(policy_id: str, job_id: str | None):
         policy = result.scalar_one_or_none()
         if not policy:
             logger.error(f"Retention policy {policy_id} not found")
-            return
+            return {"status": "error", "reason": f"policy {policy_id} not found"}
 
         # Bug #14: iterate per storage destination so two artifacts from the
         # SAME run that landed in different buckets aren't pitted against
@@ -192,14 +212,14 @@ async def _do_rotation(policy_id: str, job_id: str | None):
                 job_uuid = uuid.UUID(str(job_id))
             except (ValueError, TypeError):
                 logger.error(f"_do_rotation: invalid job_id {job_id!r}")
-                return
+                return {"status": "error", "reason": f"invalid job_id {job_id!r}"}
             run_ids_result = await db.execute(
                 select(BackupRun.id).where(BackupRun.job_id == job_uuid)
             )
             run_ids = list(run_ids_result.scalars().all())
             if not run_ids:
                 logger.info(f"Rotation: no runs for job {job_id}, nothing to do")
-                return
+                return {"status": "noop", "reason": f"no runs for job {job_id}"}
             storage_query = storage_query.where(BackupArtifact.run_id.in_(run_ids))
 
         storage_ids_result = await db.execute(storage_query)

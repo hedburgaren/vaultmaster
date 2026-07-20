@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -252,6 +253,50 @@ async def copy_file_to_storage(dest, local_path: str, remote_subpath: str) -> tu
 _LEGACY_PATH_PREFIX = "Copied to "
 
 
+def local_absence_confirmed(path: str) -> tuple[bool, str]:
+    """Is a local file provably gone, as opposed to merely unreachable?
+
+    The remote branch of delete_file_from_storage already refuses to read a
+    failed probe as proof of absence ("Unknown is not absent"). The local
+    branch used a bare os.path.isfile, which returns False for a whole family
+    of conditions that are not absence:
+
+      - the parent directory is missing because a mount is not mounted
+      - EACCES on a component of the path
+      - ENOTDIR, ESTALE on an NFS handle, EIO on a failing disk
+
+    That mattered because purge treats "absent" as success: it flags the row
+    is_deleted and moves on. A local destination pointing at an unmounted
+    volume would therefore have every one of its artifacts marked deleted in a
+    single run, and when the volume came back the files would still be sitting
+    there, now invisible to restore. Silent, and the worst possible direction.
+
+    Absence is only confirmed when the file is not there AND the directory that
+    would contain it is present. An unmounted mountpoint fails the second test,
+    because the nested job directories live on the volume, not on the stub.
+    """
+    if os.path.lexists(path):
+        return False, f"file still present: {path}"
+
+    parent = os.path.dirname(path) or "."
+    try:
+        st = os.stat(parent)
+    except FileNotFoundError:
+        return False, (
+            f"parent directory {parent} does not exist, so a missing file "
+            f"proves nothing (unmounted volume?)"
+        )
+    except OSError as e:
+        return False, f"parent directory {parent} unreadable ({e.strerror})"
+
+    if not stat.S_ISDIR(st.st_mode):
+        return False, f"parent path {parent} is not a directory"
+    if not os.access(parent, os.R_OK | os.X_OK):
+        return False, f"parent directory {parent} is not readable, cannot confirm absence"
+
+    return True, f"confirmed absent, parent {parent} is reachable"
+
+
 def probe_says_absent(exit_code: int | None, listing: str | None) -> bool:
     """True only when an existence probe RAN and found nothing.
 
@@ -293,11 +338,18 @@ async def delete_file_from_storage(dest, remote_path: str) -> tuple[bool, str]:
         return False, "empty remote_path"
 
     if dest.backend == "local":
-        if not os.path.isfile(path):
-            return True, f"already absent: {path}"
         try:
             os.remove(path)
             return True, f"deleted {path}"
+        except FileNotFoundError:
+            # Delete first, ask questions second. os.remove is the only call
+            # that can distinguish these cases without a race, and reaching
+            # FileNotFoundError still does not prove the file is gone: it also
+            # fires when the directory holding it is unreachable.
+            gone, why = local_absence_confirmed(path)
+            if gone:
+                return True, f"already absent: {path}"
+            return False, f"delete failed and absence could not be confirmed: {why}"
         except OSError as e:
             return False, f"delete failed: {e}"
 

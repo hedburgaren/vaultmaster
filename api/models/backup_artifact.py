@@ -26,6 +26,15 @@ class BackupArtifact(Base):
     server_name: Mapped[str | None] = mapped_column(String(255))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Set by rotation at FLAG time, before any file is touched. Says nothing
+    # about whether the file still exists.
+    #
+    # A purged_at column belongs here, set only by execute_purge once storage
+    # confirms the file is gone, so plan_purge can stop reconsidering rows that
+    # have nothing left to delete. Migration 0006 adds it. The column is NOT
+    # mapped until that migration has run: mapping it first made SQLAlchemy
+    # emit it in every SELECT against this table and broke backups, rotation
+    # and purge at once.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

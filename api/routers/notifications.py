@@ -42,13 +42,65 @@ async def get_channel(channel_id: uuid.UUID, db: AsyncSession = Depends(get_db))
     return channel
 
 
+CRITICAL_TRIGGERS = {
+    "run.failed", "validation.failed", "server.offline", "storage.critical",
+}
+
+
+async def _triggers_going_dark(db, channel_id, surviving_triggers: set[str]) -> set[str]:
+    """Which critical triggers would end up with no active listener.
+
+    `surviving_triggers` is what this channel would still cover after the
+    change, empty for a delete or a deactivation. Everything else active in
+    the system counts as a peer.
+    """
+    peers = (await db.execute(
+        select(NotificationChannel).where(
+            NotificationChannel.is_active == True,
+            NotificationChannel.id != channel_id,
+        )
+    )).scalars().all()
+    covered = {t for p in peers for t in (p.triggers or []) if t in CRITICAL_TRIGGERS}
+    covered |= {t for t in surviving_triggers if t in CRITICAL_TRIGGERS}
+    return CRITICAL_TRIGGERS - covered
+
+
 @router.put("/{channel_id}", response_model=NotificationChannelOut)
-async def update_channel(channel_id: uuid.UUID, body: NotificationChannelUpdate, db: AsyncSession = Depends(get_db)):
+async def update_channel(
+    channel_id: uuid.UUID,
+    body: NotificationChannelUpdate,
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(NotificationChannel).where(NotificationChannel.id == channel_id))
     channel = result.scalar_one_or_none()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    for key, value in body.model_dump(exclude_unset=True).items():
+
+    # The delete endpoint has refused to remove the last listener for a
+    # critical event since 2026-05-01. Update had no such check, so the same
+    # outcome was reachable by setting is_active=false or triggers=[]. A guard
+    # that only covers one of two doors is not a guard, and this one read as
+    # though the case were handled.
+    fields = body.model_dump(exclude_unset=True)
+    if not force:
+        will_be_active = fields.get("is_active", channel.is_active)
+        will_have = set(fields.get("triggers", channel.triggers) or []) if will_be_active else set()
+        going_dark = await _triggers_going_dark(db, channel_id, will_have)
+        currently_covered = {t for t in (channel.triggers or []) if t in CRITICAL_TRIGGERS}
+        losing = going_dark & currently_covered
+        if losing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This change would leave no active channel listening for: "
+                    + ", ".join(sorted(losing))
+                    + ". Add another active channel for those triggers first, "
+                      "or pass ?force=true."
+                ),
+            )
+
+    for key, value in fields.items():
         if key == "config" and value is not None:
             # Re-encrypt any plaintext secrets the caller submitted; passthrough
             # for already-`enc:vN:` values is idempotent.
@@ -77,26 +129,26 @@ async def delete_channel(channel_id: uuid.UUID, force: bool = False, db: AsyncSe
     # SPOF guard: refuse to delete the last active channel listening for
     # critical events. Without it, future failures would land silently
     # — exactly what bit us on 2026-05-01.
-    CRITICAL = {"run.failed", "validation.failed", "server.offline", "storage.critical"}
+    CRITICAL = CRITICAL_TRIGGERS
     if (channel.is_active and not force
             and channel.triggers and any(t in CRITICAL for t in channel.triggers)):
-        from sqlalchemy import func
-        result = await db.execute(
-            select(NotificationChannel).where(
-                NotificationChannel.is_active == True,
-                NotificationChannel.id != channel_id,
-            )
-        )
-        peers = result.scalars().all()
-        peer_covers_crit = any(
-            any(t in CRITICAL for t in (p.triggers or [])) for p in peers
-        )
-        if not peer_covers_crit:
+        # Per trigger, not "any peer covers any critical trigger". The old
+        # form passed as long as the survivors covered SOMETHING critical, so
+        # deleting the only channel listening for run.failed was allowed
+        # whenever some other channel happened to listen for storage.critical.
+        # The guard reported itself satisfied while the most important alarm in
+        # the system went dark.
+        going_dark = await _triggers_going_dark(db, channel_id, set())
+        losing = going_dark & {t for t in channel.triggers if t in CRITICAL}
+        if losing:
             raise HTTPException(
                 status_code=400,
-                detail="This is the last active channel listening for critical events "
-                       "(run.failed/validation.failed/server.offline/storage.critical). "
-                       "Add another active channel for those triggers first, or pass ?force=true.",
+                detail=(
+                    "This is the last active channel listening for: "
+                    + ", ".join(sorted(losing))
+                    + ". Add another active channel for those triggers first, "
+                      "or pass ?force=true."
+                ),
             )
     await db.delete(channel)
 

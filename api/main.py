@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import inspect
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.config import get_settings
@@ -31,7 +32,36 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         msg = str(exc)
         if "already exists" in msg or "UniqueViolationError" in msg:
-            logger.warning("create_all race vs. peer worker — tables already exist, continuing")
+            # DDL is transactional in Postgres, so engine.begin() rolled back
+            # everything create_all had built in THIS transaction, not just the
+            # object that collided. In the peer-worker race that is harmless
+            # because the winner committed the full schema. It is not harmless
+            # when the collision comes from a leftover index or type from a
+            # removed model: then nothing was created, the exception is
+            # swallowed, and the API logs "started" over an incomplete schema.
+            #
+            # So verify rather than assume. The tables either exist or they do
+            # not, and that is a cheap question to ask.
+            logger.warning("create_all raised %r, verifying the schema is actually present", msg[:200])
+            try:
+                async with engine.begin() as conn:
+                    present = set(await conn.run_sync(
+                        lambda sync_conn: inspect(sync_conn).get_table_names()
+                    ))
+            except Exception as probe_exc:
+                logger.critical("could not verify schema after create_all raced: %s", probe_exc)
+                raise
+            expected = set(Base.metadata.tables.keys())
+            missing = expected - present
+            if missing:
+                logger.critical(
+                    "create_all did not complete and %d table(s) are MISSING: %s. "
+                    "Refusing to start: an API serving an incomplete schema fails "
+                    "in ways that look like data loss.",
+                    len(missing), ", ".join(sorted(missing)),
+                )
+                raise RuntimeError(f"incomplete schema, missing tables: {sorted(missing)}")
+            logger.warning("create_all race vs. peer worker, all %d tables present, continuing", len(expected))
         else:
             raise
     logger.info("VaultMaster API started")

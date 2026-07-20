@@ -103,6 +103,7 @@ async def _scan_orphans():
     bytes_freed = 0
     skipped_busy_servers = 0
     skipped_inuse_files = 0
+    failed_listings: list[str] = []
     cutoff_age = _get_orphan_age_seconds()
 
     for server in servers:
@@ -116,13 +117,33 @@ async def _scan_orphans():
         # `find` lists files in work_dir, prints "<mtime_epoch> <size> <path>"
         # so we can filter by age + name client-side and never depend on
         # find's mtime-arithmetic semantics across BSD/GNU.
-        list_cmd = f"find {work_dir} -maxdepth 1 -type f -printf '%T@ %s %f\\n' 2>/dev/null"
+        # work_dir comes from a SystemSetting row, so it is operator-editable
+        # via the UI. Unquoted it broke on any path containing a space, and
+        # 2>/dev/null then hid the reason. Quote it and keep stderr.
+        list_cmd = (
+            f"find {_shlex.quote(work_dir)} -maxdepth 1 -type f "
+            f"-printf '%T@ %s %f\\n'"
+        )
         try:
             exit_code, stdout, stderr = await run_remote_command(server, list_cmd, timeout=30)
         except Exception as e:
             logger.warning(f"[cleanup] list failed on {server.name}: {e}")
+            failed_listings.append(f"{server.name}: {e}")
             continue
-        if exit_code != 0 or not stdout:
+        if exit_code != 0:
+            # A failed listing is not an empty directory. Treating it as one
+            # made every unreadable or non-GNU-find host report "0 files,
+            # 0 bytes cleaned" as though the work had been done.
+            logger.error(
+                "[cleanup] listing FAILED on %s (exit %s): %s. Not treating this "
+                "as an empty work_dir.",
+                server.name, exit_code, (stderr or "").strip()[:200],
+            )
+            failed_listings.append(
+                f"{server.name}: find exit {exit_code} {(stderr or '').strip()[:100]}"
+            )
+            continue
+        if not stdout:
             continue
 
         now_ts = datetime.now(timezone.utc).timestamp()
@@ -183,13 +204,23 @@ async def _scan_orphans():
             else:
                 logger.warning(f"[cleanup] failed to remove {full_path}: {msg}")
 
+    if failed_listings:
+        logger.error(
+            "[cleanup] %d server(s) could not be listed at all, their work_dir "
+            "was NOT inspected: %s",
+            len(failed_listings), "; ".join(failed_listings[:10]),
+        )
+
     logger.info(
-        f"[cleanup] done — {cleaned} files, {bytes_freed} bytes; "
-        f"skipped_busy_servers={skipped_busy_servers}, skipped_inuse_files={skipped_inuse_files}"
+        f"[cleanup] done, {cleaned} files, {bytes_freed} bytes; "
+        f"skipped_busy_servers={skipped_busy_servers}, "
+        f"skipped_inuse_files={skipped_inuse_files}, "
+        f"failed_listings={len(failed_listings)}"
     )
     return {
         "cleaned": cleaned,
         "bytes_freed": bytes_freed,
         "skipped_busy_servers": skipped_busy_servers,
         "skipped_inuse_files": skipped_inuse_files,
+        "failed_listings": failed_listings,
     }

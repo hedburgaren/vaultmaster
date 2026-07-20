@@ -160,16 +160,18 @@ async def _scan_candidates() -> None:
 
         if never_validated:
             # A job that has never produced a passed or failed validation has
-            # never been proven restorable. That is not a detail to leave in
-            # a counter nobody reads.
+            # never been proven restorable.
+            #
+            # Deliberately a log line and NOT a notification. This is a standing
+            # condition, not an event: it stays true until somebody fixes it, so
+            # notifying on it would repeat the same message every hour for the
+            # same jobs. That is how the backup.anomaly scan turned into 23
+            # Discord messages an hour and trained everyone to ignore the
+            # channel, which costs more than the missing alert ever would.
+            #
+            # Standing conditions belong on the dashboard or in a digest.
             logger.error(
                 "validation scan: %d job(s) have NEVER completed a validation "
                 "(no passed or failed run on record): %s",
                 len(never_validated), ", ".join(never_validated[:20]),
             )
-            from api.services.notifier import notify_event
-            await notify_event(db, "validation.never_run", {
-                "count": len(never_validated),
-                "jobs": ", ".join(never_validated[:10]),
-            })
-            await db.commit()
