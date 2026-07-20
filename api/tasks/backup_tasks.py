@@ -687,8 +687,92 @@ async def _do_reap_stale_runs():
         if stale_validations:
             await db.commit()
 
+        # The rows above are bookkeeping. These are the actual leftovers: the
+        # validator's cleanup lives in a finally block, and a worker killed
+        # mid-validation never runs finally. Observed 2026-07-20: one temp
+        # postgres container 27h old, another 2h, and 22 GB of decrypted dump
+        # sitting in the shared tmp dir. Nothing swept any of it.
+        from api.services.restore_validator import SHARED_TMP, _run
+
+        reaped_containers = 0
+        sweep_errors = 0
+        code, out, err = await _run(
+            ["docker", "ps", "-a", "--filter", "name=vm-validate-",
+             "--format", "{{.Names}}"], timeout=30)
+        if code != 0:
+            # A failed listing is not "no containers".
+            logger.error("reap: could not list vm-validate containers: %s",
+                         (err or "").strip()[:200])
+            sweep_errors += 1
+        else:
+            for name in [n.strip() for n in (out or "").splitlines() if n.strip()]:
+                c2, created_raw, err2 = await _run(
+                    ["docker", "inspect", "-f", "{{.Created}}", name], timeout=15)
+                if c2 != 0:
+                    logger.error("reap: could not inspect %s: %s", name,
+                                 (err2 or "").strip()[:120])
+                    sweep_errors += 1
+                    continue
+                try:
+                    created = datetime.fromisoformat(
+                        created_raw.strip().split(".")[0]
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    logger.error("reap: unparseable Created %r for %s",
+                                 created_raw.strip()[:40], name)
+                    sweep_errors += 1
+                    continue
+                if datetime.now(timezone.utc) - created < timedelta(hours=2):
+                    continue
+                c3, _, err3 = await _run(["docker", "rm", "-f", name], timeout=30)
+                if c3 == 0:
+                    reaped_containers += 1
+                    logger.warning("reap: removed orphaned validation container %s "
+                                   "(created %s)", name, created_raw.strip()[:19])
+                else:
+                    logger.error("reap: failed to remove %s: %s", name,
+                                 (err3 or "").strip()[:120])
+                    sweep_errors += 1
+
+        # Workdirs under the shared tmp. Same 2h threshold; a live validation
+        # is minutes old. Sized before removal so the log states what was
+        # actually reclaimed, not what we hoped.
+        import shutil
+
+        reaped_dirs = 0
+        reclaimed_tmp_bytes = 0
+        try:
+            entries = list(os.scandir(SHARED_TMP))
+        except OSError as exc:
+            logger.error("reap: cannot scan %s: %s", SHARED_TMP, exc)
+            entries = []
+            sweep_errors += 1
+        for entry in entries:
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                age = datetime.now(timezone.utc).timestamp() - entry.stat().st_mtime
+                if age < 7200:
+                    continue
+                dir_size = sum(
+                    f.stat().st_size for f in os.scandir(entry.path)
+                    if f.is_file(follow_symlinks=False)
+                )
+                shutil.rmtree(entry.path)
+                reaped_dirs += 1
+                reclaimed_tmp_bytes += dir_size
+                logger.warning("reap: removed stale validation workdir %s (%.1f GB)",
+                               entry.name, dir_size / 1e9)
+            except OSError as exc:
+                logger.error("reap: failed to remove workdir %s: %s", entry.name, exc)
+                sweep_errors += 1
+
         return {"reaped": len(stale), "jobs": names,
-                "reaped_validations": len(stale_validations)}
+                "reaped_validations": len(stale_validations),
+                "reaped_containers": reaped_containers,
+                "reaped_workdirs": reaped_dirs,
+                "reclaimed_tmp_bytes": reclaimed_tmp_bytes,
+                "sweep_errors": sweep_errors}
 
 
 @celery_app.task(name="api.tasks.backup_tasks.run_restore_task")
