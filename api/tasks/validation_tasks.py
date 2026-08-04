@@ -1,10 +1,10 @@
 """Celery tasks for backup-restore validation.
 
 Two entry points:
-  validate_backup_job_task(job_id, artifact_id?)  — manual or post-backup trigger
-  scan_validation_candidates()                    — beat-scheduled, finds jobs
-                                                     that haven't been validated
-                                                     in the last 24h and queues them
+  validate_backup_job_task(job_id, artifact_id?)  manual or post-backup trigger
+  scan_validation_candidates()                    beat-scheduled, finds jobs
+                                                  whose last validation is older
+                                                  than the cooldown, queues them
 """
 
 import asyncio
@@ -17,6 +17,32 @@ from api.tasks.backup_tasks import _run_async, get_task_session
 
 logger = logging.getLogger(__name__)
 
+# How often the beat scan runs, and how stale a job's last real validation must
+# be before the scan re-queues it. Kept as named values because the correctness
+# of the second depends entirely on the first.
+#
+# The cooldown is 23 hours rather than 24 on purpose. A job validated at
+# 23:47:23 was not eligible again until 23:47:23 the next day, and the 23:47:00
+# tick missed it by twenty-three seconds. So it fired at the 00:47 tick
+# instead, and one tick later again the day after: the whole schedule walked
+# forward about an hour per day. Real example, one job across eight days:
+# 14:40, 15:40, 16:40, 17:40, 18:40, 19:40, 20:40, 21:47.
+#
+# An hour of slack absorbs the miss without letting a job come round twice in
+# one day. The permitted range is narrow in both directions and is asserted by
+# test_validation_schedule_does_not_drift:
+#
+#   too low  (<= 24 - 2*SCAN)  a job is eligible at the previous tick, so the
+#                              schedule drifts earlier instead of later
+#   too high (>  24 - SCAN)    the tick can miss the boundary again, which is
+#                              the original bug
+#
+# This holds while a queued validation starts within one scan interval of the
+# tick that queued it. A long enough worker backlog would reintroduce drift,
+# more slowly; that would be a queue problem, not a scheduling one.
+SCAN_INTERVAL_HOURS = 1
+VALIDATION_COOLDOWN_HOURS = 23
+
 
 @celery_app.task(name="api.tasks.validation_tasks.validate_backup_job_task")
 def validate_backup_job_task(job_id: str, artifact_id: str | None = None, triggered_by: str = "scheduler"):
@@ -27,9 +53,10 @@ def validate_backup_job_task(job_id: str, artifact_id: str | None = None, trigge
 
 @celery_app.task(name="api.tasks.validation_tasks.scan_validation_candidates")
 def scan_validation_candidates():
-    """Find every active job whose backup_type is validatable and that
-    hasn't been validated in the last 24 hours; queue a validation task
-    for each."""
+    """Find every active job whose backup_type is validatable and whose last
+    real validation is older than VALIDATION_COOLDOWN_HOURS; queue a
+    validation task for each. The effect is one validation per job per day,
+    on a stable hour."""
     _run_async(_scan_candidates())
 
 
@@ -120,7 +147,7 @@ async def _scan_candidates() -> None:
 
     async with get_task_session() as db:
         validatable_types = ("postgresql", "files", "docker_volumes", "restic")
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=VALIDATION_COOLDOWN_HOURS)
 
         result = await db.execute(
             select(BackupJob)

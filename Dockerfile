@@ -48,6 +48,14 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY api/ ./api/
 COPY migrations/ ./migrations/
 COPY alembic.ini .
+# The suites are run inside this image (DEPLOY.md: `docker compose exec -T api
+# python -m tests.X`). Until 2026-08-04 they were not in it and not mounted
+# either: /app/tests was a hand-copied snapshot in the container's writable
+# layer, with an older nested copy at /app/tests/tests. New test files were
+# invisible there, and a `docker compose up` would have silently taken the
+# suites away entirely. Copied here so the image is self-contained, and
+# bind-mounted in compose so the running container tracks the tree.
+COPY tests/ ./tests/
 
 EXPOSE 8000
 
