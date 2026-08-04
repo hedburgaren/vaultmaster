@@ -112,6 +112,44 @@ async def _run(cmd: list[str], timeout: int = 600) -> tuple[int, str, str]:
     return proc.returncode or 0, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
 
 
+async def _wait_for_postgres(container_name: str, log, attempts: int = 60, delay: float = 1.0) -> bool:
+    """Wait until the REAL server is up and TEMP_DB is usable on it.
+
+    Deliberately not pg_isready. The postgres image entrypoint runs initdb,
+    then starts a TEMPORARY server listening on the unix socket only
+    (listen_addresses='') to create POSTGRES_DB and run the init scripts,
+    then stops it and starts the real one. pg_isready answers 0 against that
+    temporary server, so a gate built on it opens early and releases the
+    restore into the window where the temporary server is on its way out.
+    That was one cause wearing three faces, all seen in production between
+    2026-07-19 and 2026-08-04:
+
+        FATAL:  database "vmverify" does not exist    DB not created yet
+        FATAL:  the database system is shutting down  temp server stopping
+        No such file or directory (on the socket)     temp server gone
+
+    Retrying pg_isready cannot fix this. It reports that *a* server accepts
+    connections, never that the target database exists on the *real* one.
+
+    TCP is the discriminator: the temporary server does not listen on it at
+    all, so a row coming back over TCP proves both facts at once. The result
+    row is checked rather than just the exit code, because exit-0-with-no-
+    output is precisely what pg_isready returns.
+    """
+    for _ in range(attempts):
+        code, out, _err = await _run([
+            "docker", "exec",
+            "-e", f"PGPASSWORD={TEMP_PASSWORD}",
+            container_name,
+            "psql", "-h", "127.0.0.1", "-U", TEMP_USER, "-d", TEMP_DB,
+            "-tAc", "SELECT 1",
+        ], timeout=15)
+        if code == 0 and (out or "").strip() == "1":
+            return True
+        await asyncio.sleep(delay)
+    return False
+
+
 async def _download_artifact_to_temp(artifact, dest_path: str) -> tuple[bool, str]:
     """Download an artifact from its storage_destination to a local file.
 
@@ -205,16 +243,8 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
             log("error", f"docker run failed (exit {code}): {stderr.strip()[:300]}")
             return {"status": "failed", "error": f"could not start temp container: {stderr.strip()[:200]}", "logs": logs}
 
-        for attempt in range(30):
-            code, _, _ = await _run([
-                "docker", "exec", container_name,
-                "pg_isready", "-U", TEMP_USER, "-d", TEMP_DB,
-            ], timeout=10)
-            if code == 0:
-                break
-            await asyncio.sleep(1)
-        else:
-            log("error", "postgres did not become ready within 30s")
+        if not await _wait_for_postgres(container_name, log):
+            log("error", "postgres did not become ready: no TCP query answered within the wait budget")
             return {"status": "failed", "error": "postgres did not become ready", "logs": logs}
 
         log("info", "postgres ready, restoring dump")
