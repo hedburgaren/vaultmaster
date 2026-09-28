@@ -591,29 +591,104 @@ async def test_purge_does_not_reclaim_bytes_twice():
     check(idx_absent != -1 and idx_reclaim != -1 and idx_absent < idx_reclaim,
           "the absent-check gates the byte counter rather than following it")
 
-    # plan_purge must NOT filter on is_deleted or deleted_at. apply_rotation
-    # sets both at flag time, so filtering would make purge skip whatever
-    # rotation just flagged and retention would stop deleting files again.
+    # plan_purge filters on purged_at and ONLY purged_at. apply_rotation sets
+    # is_deleted and deleted_at at flag time, so filtering on either would
+    # make purge skip whatever rotation just flagged, and retention would
+    # stop deleting files again. That regression was written, caught, and is
+    # pinned here.
     plan_src = inspect.getsource(purge.plan_purge)
+    check("purged_at.is_(None)" in plan_src,
+          "plan_purge skips rows storage already confirmed gone")
     check("deleted_at.is_(None)" not in plan_src,
           "plan_purge does NOT filter on deleted_at, which rotation also sets")
     check("BackupArtifact.is_deleted ==" not in plan_src,
           "plan_purge does NOT filter on is_deleted either")
 
-    # No code may reference purged_at until migration 0006 has run. Mapping a
-    # column that does not exist puts it in every SELECT against the table and
-    # breaks backups, rotation and purge at once.
+    # purged_at semantics: stamped by execute_purge alone. If rotation ever
+    # touches it the distinction collapses and purge starts skipping files
+    # that still exist on disk.
+    check("artifact.purged_at" in src,
+          "execute_purge stamps purged_at once storage confirms the file gone")
+    rot_src = inspect.getsource(rotation.apply_rotation)
+    check("purged_at" not in rot_src,
+          "rotation never touches purged_at")
+
+    # And the column must actually exist wherever the model is loaded: the
+    # half-wired state (mapped but not migrated) broke every query against
+    # the table. The schema guard enforces this at boot; assert it agrees.
     from api.models import backup_artifact as artifact_model
     model_src = inspect.getsource(artifact_model)
-    maps_purged_at = "purged_at: Mapped" in model_src
-    # Real references only. Prose mentioning the column is fine and expected,
-    # since the reason it is not wired yet is worth writing down.
-    uses_purged_at = (
-        "BackupArtifact.purged_at" in plan_src
-        or "artifact.purged_at" in inspect.getsource(purge.execute_purge)
-    )
-    check(maps_purged_at == uses_purged_at,
-          "purged_at is either mapped AND used, or neither, never half-wired")
+    check("purged_at: Mapped" in model_src,
+          "purged_at is mapped on the model")
+
+
+async def test_remote_absence_is_read_from_the_parent_listing():
+    """An already-deleted remote file must be confirmed absent, not unknown.
+
+    The probe used to be `rclone lsf <file>`. On a file that is gone rclone
+    answers exit 3, "directory not found", and by the rule pinned in
+    test_absence_requires_a_successful_probe a failed probe proves nothing.
+    Net effect: no already-deleted file could ever be confirmed, the row
+    stayed unpurged and was retried on every run (3 887 rows a day by
+    2026-09-28). The probe now lists the parent directory, which succeeds
+    whenever the directory is reachable, and absence is the file missing
+    from that listing.
+    """
+    from api.services import rclone_client
+
+    class Dest:
+        backend = "gdrive"
+        config = {}
+
+    def scripted(parent_result):
+        async def fake_run(args, timeout=60):
+            if args[0] == "deletefile":
+                return 1, "", "Failed to deletefile: object not found"
+            check(args[0] == "lsf" and "--files-only" in args,
+                  "the probe lists a directory with --files-only")
+            check(args[1] == ":drive:/hedburgaren/Job",
+                  f"the probe lists the PARENT, not the file: {args[1]}")
+            return parent_result
+        return fake_run
+
+    orig_run, orig_build = rclone_client._run_rclone, rclone_client._build_backend
+    rclone_client._build_backend = lambda dest: (":drive:", [])
+    try:
+        # Parent reachable, file not in it: absent.
+        rclone_client._run_rclone = scripted((0, "other.age\n", ""))
+        ok, msg = await rclone_client.delete_file_from_storage(
+            Dest(), ":drive:/hedburgaren/Job/file.age")
+        check(ok is True and msg.startswith("already absent"),
+              f"file missing from a successful parent listing -> absent: {msg}")
+
+        # Parent reachable and empty: still a real answer, absent.
+        rclone_client._run_rclone = scripted((0, "", ""))
+        ok, msg = await rclone_client.delete_file_from_storage(
+            Dest(), ":drive:/hedburgaren/Job/file.age")
+        check(ok is True, f"empty parent listing -> absent: {msg}")
+
+        # Parent reachable, file still there: not absent, and not deleted.
+        rclone_client._run_rclone = scripted((0, "file.age\nother.age\n", ""))
+        ok, msg = await rclone_client.delete_file_from_storage(
+            Dest(), ":drive:/hedburgaren/Job/file.age")
+        check(ok is False and "still present" in msg,
+              f"file present in the parent listing -> failure: {msg}")
+
+        # Parent listing failed: unknown, must not count as absent.
+        rclone_client._run_rclone = scripted((3, "", "directory not found"))
+        ok, msg = await rclone_client.delete_file_from_storage(
+            Dest(), ":drive:/hedburgaren/Job/file.age")
+        check(ok is False and "could not be confirmed" in msg,
+              f"failed parent listing -> unknown: {msg}")
+    finally:
+        rclone_client._run_rclone, rclone_client._build_backend = orig_run, orig_build
+
+    check(rclone_client.listing_says_absent("a.age\nb.age\n", "c.age") is True,
+          "name not in listing -> absent")
+    check(rclone_client.listing_says_absent("a.age\nb.age\n", "a.age") is False,
+          "name in listing -> present")
+    check(rclone_client.listing_says_absent("", "a.age") is True,
+          "empty successful listing -> absent")
 
 
 async def main():
@@ -653,6 +728,8 @@ async def main():
     test_api_servers_are_not_treated_as_probed()
     print("test_purge_does_not_reclaim_bytes_twice")
     await test_purge_does_not_reclaim_bytes_twice()
+    print("test_remote_absence_is_read_from_the_parent_listing")
+    await test_remote_absence_is_read_from_the_parent_listing()
 
     print()
     if FAILURES:

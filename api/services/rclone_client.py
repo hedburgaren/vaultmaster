@@ -310,6 +310,17 @@ def probe_says_absent(exit_code: int | None, listing: str | None) -> bool:
     return exit_code == 0 and not (listing or "").strip()
 
 
+def listing_says_absent(listing: str | None, name: str) -> bool:
+    """True when a SUCCESSFUL listing of the parent directory lacks `name`.
+
+    The caller has already established that the listing ran (exit 0). This
+    only answers whether the file is in it. An empty listing is a real answer
+    here: the directory exists and holds nothing, so the file is gone.
+    """
+    entries = {line.strip().rstrip("/") for line in (listing or "").splitlines() if line.strip()}
+    return name not in entries
+
+
 def normalize_stored_path(remote_path: str) -> str:
     """Strip the legacy "Copied to " prefix from a stored artifact path.
 
@@ -375,16 +386,29 @@ async def delete_file_from_storage(dest, remote_path: str) -> tuple[bool, str]:
     # The row would then be flagged while the file sat there consuming quota,
     # invisible to the system. Swapping a bad inference from stderr for a bad
     # inference from a failed probe is not an improvement.
+    #
+    # The probe lists the PARENT directory, not the file. `rclone lsf <file>`
+    # on a path that no longer exists exits 3 ("directory not found"), which
+    # is exactly the case purge needs to recognise, and by the rule above a
+    # failed probe proves nothing. So every already-deleted file came back as
+    # "could not be confirmed", its row stayed unpurged, and the same 3 887
+    # deletes were retried daily (measured 2026-09-28: 5 646 warnings in 48 h,
+    # all legacy rows whose files left GDrive months ago). Listing the parent
+    # mirrors local_absence_confirmed: the directory that would hold the file
+    # is reachable, and the file is not in it.
+    parent, _, name = target.rpartition("/")
+    if not name or not parent.rstrip(":"):
+        return False, f"delete failed and the path has no parent to probe: {target}"
     check_code, check_out, check_err = await _run_rclone(
-        ["lsf", target] + flags, timeout=120
+        ["lsf", parent, "--files-only"] + flags, timeout=120
     )
-    if probe_says_absent(check_code, check_out):
-        return True, f"already absent: {target}"
     if check_code != 0:
         return False, (
             f"delete failed and existence could not be confirmed either "
-            f"(lsf exit {check_code}): {(check_err or stderr or '').strip()[:160]}"
+            f"(lsf of parent exit {check_code}): {(check_err or stderr or '').strip()[:160]}"
         )
+    if listing_says_absent(check_out, name):
+        return True, f"already absent: {target}"
 
     return False, f"delete failed, file still present: {stderr.strip()[:200]}"
 
