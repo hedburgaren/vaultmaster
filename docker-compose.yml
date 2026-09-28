@@ -11,6 +11,8 @@ services:
       - "127.0.0.1:8100:8000"
     env_file:
       - .env
+    environment:
+      TZ: Europe/Stockholm
     volumes:
       - ./api:/app/api
       - ./migrations:/app/migrations
@@ -42,6 +44,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-vaultmaster}
       POSTGRES_USER: ${POSTGRES_USER:-vaultmaster}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      TZ: Europe/Stockholm
     volumes:
       - pgdata:/var/lib/postgresql/data
       - /srv/archive/wal/vaultmaster:/var/lib/postgresql/wal-archive
@@ -60,6 +63,8 @@ services:
     container_name: vaultmaster-redis
     restart: unless-stopped
     command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    environment:
+      TZ: Europe/Stockholm
     volumes:
       - redisdata:/data
     ports:
@@ -81,6 +86,8 @@ services:
     command: celery -A api.tasks.celery_app worker -l info -c 1 -Q backup,rotation,notification,validation
     env_file:
       - .env
+    environment:
+      TZ: Europe/Stockholm
     volumes:
       - ./api:/app/api
       - /mnt/backup:/mnt/backup
@@ -117,6 +124,8 @@ services:
     command: celery -A api.tasks.celery_app beat -l info --schedule /tmp/celerybeat-schedule
     env_file:
       - .env
+    environment:
+      TZ: Europe/Stockholm
     volumes:
       - ./api:/app/api
     depends_on:

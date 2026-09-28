@@ -112,27 +112,24 @@ async def plan_purge(db, safety_floor: int = DEFAULT_SAFETY_FLOOR) -> dict:
     """
     now = datetime.now(timezone.utc)
 
-    # Every artifact, including flagged ones, and deliberately so.
+    # purged_at, and deliberately NOT is_deleted or deleted_at.
     #
-    # apply_rotation sets BOTH is_deleted and deleted_at at flag time, before
-    # any file is touched (rotation.py, "artifact.deleted_at = now"). Filtering
-    # on either was tried and reverted: it made phase 2 of enforce_retention
-    # skip exactly what phase 1 had just flagged, so retention went back to
-    # marking rows while the disk filled up, which is the original defect this
-    # module exists to close.
+    # apply_rotation sets both of those at FLAG time, before any file is
+    # touched (rotation.py, "artifact.deleted_at = now"). Filtering on either
+    # was tried and reverted: it made phase 2 of enforce_retention skip
+    # exactly what phase 1 had just flagged, so retention went back to marking
+    # rows while the disk filled up, the original defect this module exists to
+    # close.
     #
-    # The cost is that already-purged rows are re-planned on every run: 6255
-    # items and 6255 delete calls a day, most of them for files that are long
-    # gone. That is handled where the truth is actually known, in execute_purge,
-    # which counts "already absent" separately from real deletions.
-    #
-    # Migration 0006 adds a purged_at column, written only by execute_purge
-    # after storage confirms the file is gone, which lets this filter be
-    # written safely. Wire it up once that migration has run, not before.
+    # purged_at is written only by execute_purge, only after storage confirmed
+    # the file is gone (migration 0006). Rows from before the migration carry
+    # NULL, so the first run re-checks the whole backlog once, stamps what it
+    # confirms gone, and every later run sees only fresh expirations.
     rows = (await db.execute(
         select(BackupArtifact, BackupJob)
         .join(BackupRun, BackupRun.id == BackupArtifact.run_id)
         .join(BackupJob, BackupJob.id == BackupRun.job_id)
+        .where(BackupArtifact.purged_at.is_(None))
     )).all()
 
     all_policies = {
@@ -288,8 +285,13 @@ async def execute_purge(db, plan: dict, limit: int | None = None) -> dict:
             )
             continue
 
+        now_ts = datetime.now(timezone.utc)
         artifact.is_deleted = True
-        artifact.deleted_at = artifact.deleted_at or datetime.now(timezone.utc)
+        artifact.deleted_at = artifact.deleted_at or now_ts
+        # Storage just confirmed the file is gone, whether we removed it or it
+        # was already absent. That single fact is what purged_at records, and
+        # it is what lets plan_purge drop this row from every future plan.
+        artifact.purged_at = now_ts
 
         # delete_file_from_storage answers ok=True both for "I removed it" and
         # for "it was not there". Reconciling the row is right either way, but
