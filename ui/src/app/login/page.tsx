@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { login, getSetupStatus } from '@/lib/api';
+import { login, getSetupStatus, TotpRequiredError } from '@/lib/api';
 import { Lock } from 'lucide-react';
 import { useT } from '@/lib/i18n';
 
@@ -10,6 +10,8 @@ export default function LoginPage() {
   const t = useT();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  const [needsTotp, setNeedsTotp] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
@@ -25,10 +27,14 @@ export default function LoginPage() {
     setLoading(true);
     setError('');
     try {
-      await login(username, password);
+      await login(username, password, needsTotp ? totpCode : undefined);
       router.push('/dashboard');
     } catch (err: any) {
-      setError(err.message || t('login.failed'));
+      if (err instanceof TotpRequiredError) {
+        setNeedsTotp(true);
+      } else {
+        setError(err.message || t('login.failed'));
+      }
     }
     setLoading(false);
   };
@@ -56,6 +62,13 @@ export default function LoginPage() {
             <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">{t('login.password')}</label>
             <input type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full bg-vm-surface2 border border-vm-border rounded px-4 py-3 text-vm-text font-mono text-sm outline-none focus:border-vm-accent transition-colors" />
           </div>
+          {needsTotp && (
+            <div className="mb-6">
+              <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">{t('login.totp_code')}</label>
+              <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, ''))} className="w-full bg-vm-surface2 border border-vm-border rounded px-4 py-3 text-vm-text font-mono text-sm tracking-[6px] outline-none focus:border-vm-accent transition-colors" autoFocus />
+              <div className="mt-2 font-mono text-[11px] text-vm-text-dim">{t('login.totp_hint')}</div>
+            </div>
+          )}
           <button type="submit" disabled={loading} className="w-full py-3 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-[3px] uppercase hover:bg-[#33ddff] transition-all glow disabled:opacity-50">
             {loading ? t('login.loading') : t('login.submit')}
           </button>

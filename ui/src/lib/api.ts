@@ -33,15 +33,25 @@ async function apiFetch(path: string, options: RequestInit = {}) {
 }
 
 // Auth
-export async function login(username: string, password: string) {
-  const res = await apiFetch('/v1/auth/login', {
+// Plain fetch, not apiFetch: a 401 here is an answer (wrong password, or a
+// TOTP code is needed), not an expired session to redirect away from.
+export class TotpRequiredError extends Error {}
+
+export async function login(username: string, password: string, totpCode?: string) {
+  const res = await fetch(`${API_BASE}/v1/auth/login`, {
     method: 'POST',
-    body: JSON.stringify({ username, password }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, ...(totpCode ? { totp_code: totpCode } : {}) }),
   });
-  if (res.access_token) {
-    localStorage.setItem('vm_token', res.access_token);
+  const body = await res.json().catch(() => ({ detail: res.statusText }));
+  if (!res.ok) {
+    if (body.detail === 'TOTP code required') throw new TotpRequiredError(body.detail);
+    throw new Error(body.detail || res.statusText);
   }
-  return res;
+  if (body.access_token) {
+    localStorage.setItem('vm_token', body.access_token);
+  }
+  return body;
 }
 
 export function logout() {
@@ -141,6 +151,11 @@ export const changePassword = (currentPassword: string, newPassword: string) =>
   apiFetch('/v1/auth/change-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) });
 export const generateApiKey = () => apiFetch('/v1/auth/api-key', { method: 'POST' });
 export const revokeApiKey = () => apiFetch('/v1/auth/api-key', { method: 'DELETE' });
+export const totpSetup = () => apiFetch('/v1/auth/totp/setup', { method: 'POST' });
+export const totpVerify = (totpCode: string) =>
+  apiFetch('/v1/auth/totp/verify', { method: 'POST', body: JSON.stringify({ totp_code: totpCode }) });
+export const totpDisable = (password: string, totpCode: string) =>
+  apiFetch('/v1/auth/totp/disable', { method: 'POST', body: JSON.stringify({ password, totp_code: totpCode }) });
 
 // Audit
 export const getAuditLogs = (params?: string) => apiFetch(`/v1/audit${params ? '?' + params : ''}`);

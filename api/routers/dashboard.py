@@ -105,7 +105,10 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         .join(Server, BackupRun.server_id == Server.id)
         .where(BackupRun.status == "failed", BackupRun.acknowledged_at.is_(None))
         .order_by(BackupRun.created_at.desc())
-        .limit(5)
+        # Was 5: with a backlog of unacknowledged failures every dismissal
+        # pulled the next old one into view, so the panel looked like it
+        # could not be emptied (task 157, 34 old failures). The panel scrolls.
+        .limit(100)
     )
     recent_errors = []
     for r, j, s in error_result.all():

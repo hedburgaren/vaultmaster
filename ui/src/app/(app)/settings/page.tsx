@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import {
   getRetentionPolicies, createRetentionPolicy, deleteRetentionPolicy, previewRotation,
   getProfile, changePassword, generateApiKey, revokeApiKey,
+  totpSetup, totpVerify, totpDisable,
   getSSHKeys, generateSSHKey,
   getSystemSettings, updateSystemSettings,
 } from '@/lib/api';
@@ -84,6 +85,34 @@ export default function SettingsPage() {
       loadProfile();
       setTimeout(() => setApiKeyMsg(''), 3000);
     }
+  };
+
+  const [totpEnroll, setTotpEnroll] = useState<{ secret: string; qr_png_base64: string } | null>(null);
+  const [totpForm, setTotpForm] = useState({ code: '', password: '' });
+  const [totpMsg, setTotpMsg] = useState('');
+
+  const handleTotpStart = async () => {
+    setTotpMsg('');
+    try { setTotpEnroll(await totpSetup()); } catch (e: any) { setTotpMsg(e.message); }
+  };
+
+  const handleTotpVerify = async () => {
+    try {
+      await totpVerify(totpForm.code);
+      setTotpEnroll(null);
+      setTotpForm({ code: '', password: '' });
+      setTotpMsg(t('settings.totp_enabled_msg'));
+      loadProfile();
+    } catch (e: any) { setTotpMsg(e.message); }
+  };
+
+  const handleTotpDisable = async () => {
+    try {
+      await totpDisable(totpForm.password, totpForm.code);
+      setTotpForm({ code: '', password: '' });
+      setTotpMsg(t('settings.totp_disabled_msg'));
+      loadProfile();
+    } catch (e: any) { setTotpMsg(e.message); }
   };
 
   const handleGenerateSSHKey = async () => {
@@ -191,6 +220,51 @@ export default function SettingsPage() {
               </div>
             )}
             {apiKeyMsg && !apiKey && <div className="mt-2 font-mono text-xs text-vm-accent">{apiKeyMsg}</div>}
+          </div>
+
+          {/* Two-factor authentication */}
+          <div className="bg-vm-surface border border-vm-border rounded p-6">
+            <h3 className="text-lg font-bold text-vm-text-bright mb-4 uppercase tracking-wider flex items-center gap-2"><Shield className="w-5 h-5 text-vm-accent" /> {t('settings.totp')}</h3>
+            <div className={`font-mono text-[11px] mb-4 ${profile.totp_enabled ? 'text-vm-success' : 'text-vm-text-dim'}`}>
+              {profile.totp_enabled ? t('settings.totp_on') : t('settings.totp_off')}
+            </div>
+            {!profile.totp_enabled && !totpEnroll && (
+              <button onClick={handleTotpStart} className="flex items-center gap-2 px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase"><Shield className="w-4 h-4" /> {t('settings.totp_start')}</button>
+            )}
+            {!profile.totp_enabled && totpEnroll && (
+              <div className="space-y-4">
+                <div className="font-mono text-[11px] text-vm-text-dim">{t('settings.totp_scan')}</div>
+                <img src={totpEnroll.qr_png_base64} alt="TOTP QR" className="w-48 h-48 bg-white p-2 rounded" />
+                <div>
+                  <div className="font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-1">{t('settings.totp_secret')}</div>
+                  <code className="font-mono text-sm text-vm-text-bright bg-vm-surface2 px-3 py-2 rounded inline-block select-all break-all">{totpEnroll.secret}</code>
+                </div>
+                <div className="flex items-end gap-3">
+                  <div>
+                    <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">{t('settings.totp_code')}</label>
+                    <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpForm.code} onChange={e => setTotpForm({ ...totpForm, code: e.target.value.replace(/\D/g, '') })} className="w-40 bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm tracking-[6px] outline-none focus:border-vm-accent" />
+                  </div>
+                  <button onClick={handleTotpVerify} disabled={totpForm.code.length !== 6} className="px-5 py-2.5 bg-vm-accent text-vm-bg rounded font-bold text-sm tracking-wider uppercase disabled:opacity-50">{t('settings.totp_confirm')}</button>
+                </div>
+              </div>
+            )}
+            {profile.totp_enabled && (
+              <div className="space-y-3">
+                <div className="font-mono text-[11px] text-vm-text-dim">{t('settings.totp_disable_hint')}</div>
+                <div className="flex items-end gap-3">
+                  <div>
+                    <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">{t('settings.current_password')}</label>
+                    <input type="password" value={totpForm.password} onChange={e => setTotpForm({ ...totpForm, password: e.target.value })} className="w-56 bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent" />
+                  </div>
+                  <div>
+                    <label className="block font-mono text-[11px] text-vm-text-dim tracking-[2px] uppercase mb-2">{t('settings.totp_code')}</label>
+                    <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpForm.code} onChange={e => setTotpForm({ ...totpForm, code: e.target.value.replace(/\D/g, '') })} className="w-40 bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm tracking-[6px] outline-none focus:border-vm-accent" />
+                  </div>
+                  <button onClick={handleTotpDisable} className="px-4 py-2.5 border border-vm-danger text-vm-danger rounded font-bold text-sm tracking-wider uppercase hover:bg-vm-danger/10">{t('settings.totp_disable')}</button>
+                </div>
+              </div>
+            )}
+            {totpMsg && <div className="mt-3 font-mono text-xs text-vm-accent">{totpMsg}</div>}
           </div>
         </div>
       )}
