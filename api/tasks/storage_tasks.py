@@ -16,7 +16,8 @@ from api.tasks.backup_tasks import _run_async, get_task_session
 
 logger = logging.getLogger(__name__)
 
-WARN_THRESHOLD = 0.80
+# 75 percent of the budget: Chrille's decision 2026-10-17 (task 157).
+WARN_THRESHOLD = 0.75
 CRITICAL_THRESHOLD = 0.95
 
 
@@ -61,7 +62,6 @@ async def _refresh() -> None:
                 continue
 
             prev_used = dest.used_bytes or 0
-            prev_capacity = dest.capacity_bytes or 0
 
             dest.used_bytes = used
             # Only set capacity if not already set. Respects a manually
@@ -70,9 +70,16 @@ async def _refresh() -> None:
                 dest.capacity_bytes = total
             dest.last_checked = datetime.now(timezone.utc)
 
-            if total and total > 0:
-                ratio = used / total
-                prev_ratio = (prev_used / prev_capacity) if prev_capacity else 0
+            # Alarm against the same ceiling the dashboard shows: the budget
+            # when one is set, otherwise the probed total. Measuring the ratio
+            # against the probed total while the dashboard used the budget
+            # made the two disagree, and the alarm could never fire on a
+            # budget. Both ratios use the same ceiling, so falling back under
+            # a threshold re-arms it and the next crossing notifies again.
+            capacity = dest.capacity_bytes or total
+            if capacity and capacity > 0:
+                ratio = used / capacity
+                prev_ratio = prev_used / capacity
                 event = None
                 if ratio >= CRITICAL_THRESHOLD and prev_ratio < CRITICAL_THRESHOLD:
                     event = "storage.critical"

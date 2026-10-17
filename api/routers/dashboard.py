@@ -164,13 +164,14 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         last_ok_iso = finished.isoformat()
         hours_since = round((now - finished).total_seconds() / 3600, 1)
 
-    # Storage warnings (>70% used)
+    # Storage warnings, same thresholds as the notifications in
+    # storage_tasks (75 and 95 percent of the budget).
     storage_warnings = []
     for s in storage_dests:
         if s.capacity_bytes and s.used_bytes:
             pct = round(s.used_bytes / s.capacity_bytes * 100, 1)
-            if pct > 70:
-                level = "critical" if pct > 90 else "warning"
+            if pct >= 75:
+                level = "critical" if pct >= 95 else "warning"
                 storage_warnings.append({
                     "id": str(s.id),
                     "name": s.name,

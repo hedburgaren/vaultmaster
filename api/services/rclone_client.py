@@ -171,19 +171,38 @@ async def get_storage_usage(dest) -> dict:
         except Exception as e:
             return {"error": str(e)}
 
-    exit_code, stdout, stderr = await _run_rclone(["about", remote, "--json"] + flags)
+    # "used" is what VaultMaster itself stores under its own remote path
+    # (rclone size), not the account's figure from rclone about. About counts
+    # the whole account including the trash: on the shared Google Drive that
+    # was 2.18 TiB "used" of which 1.75 TiB trash and the rest largely not
+    # ours, so the 2 TB budget read 110 percent (task 157, decision
+    # 2026-10-17-vaultmaster-holds-no-credentials-and-keeps-a-two-terabyte-
+    # drive-budget). About is kept only for the account total, and is optional
+    # because several backends do not implement it.
+    exit_code, stdout, stderr = await _run_rclone(["size", remote, "--json"] + flags, timeout=600)
+    if exit_code != 0:
+        return {"error": stderr or "rclone size failed"}
+    try:
+        used = json.loads(stdout).get("bytes")
+    except json.JSONDecodeError:
+        return {"error": "Failed to parse rclone size output"}
+    if used is None:
+        return {"error": "rclone size returned no bytes"}
+
+    total = free = None
+    exit_code, stdout, _ = await _run_rclone(["about", remote, "--json"] + flags)
     if exit_code == 0:
         try:
-            data = json.loads(stdout)
-            return {
-                "total_bytes": data.get("total"),
-                "used_bytes": data.get("used"),
-                "free_bytes": data.get("free"),
-                "percent_used": round(data.get("used", 0) / data.get("total", 1) * 100, 1) if data.get("total") else None,
-            }
+            about = json.loads(stdout)
+            total, free = about.get("total"), about.get("free")
         except json.JSONDecodeError:
-            return {"error": "Failed to parse rclone output"}
-    return {"error": stderr}
+            pass
+    return {
+        "total_bytes": total,
+        "used_bytes": used,
+        "free_bytes": free,
+        "percent_used": round(used / total * 100, 1) if total else None,
+    }
 
 
 async def list_storage_directory(dest, path: str = "/") -> list[dict]:
