@@ -289,6 +289,9 @@ async def notify_event(db, event: str, data: dict):
         "run.success": "Backup Successful",
         "run.failed": "Backup Failed",
         "run.partial": "Backup Partial",
+        "backup.partial_transfer": "Backup Missed a Destination",
+        "run.abandoned": "Backup Abandoned",
+        "artifact.corrupt": "Backup File Corrupt",
         "storage.warning": "Storage Warning",
         "storage.critical": "Storage Critical",
         "server.offline": "Server Offline",
@@ -386,6 +389,11 @@ def _format_event_message(event: str, data: dict) -> str:
         return f"✅ Backup completed\nJob: {data.get('job_name', 'N/A')}\nServer: {data.get('server_name', 'N/A')}\nSize: {data.get('size_bytes', 0):,} bytes\nDuration: {data.get('duration', 'N/A')}"
     elif event == "run.failed":
         return f"❌ Backup failed\nJob: {data.get('job_name', 'N/A')}\nServer: {data.get('server_name', 'N/A')}\nError: {data.get('error', 'Unknown')}"
+    elif event == "backup.partial_transfer":
+        return (f"⚠️ Backup missed a destination\nJob: {data.get('job_name', 'N/A')}\n"
+                f"Copies: {data.get('ok', '?')} of {data.get('total', '?')}\n"
+                f"Failed: {data.get('failed_destinations', 'N/A')}\n"
+                f"The source file was kept so the copy can be retried.")
     elif event == "storage.warning":
         return f"⚠️ Storage warning\nDestination: {data.get('name', 'N/A')}\nUsage: {data.get('percent_used', 0)}%"
     elif event == "storage.critical":

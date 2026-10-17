@@ -301,8 +301,12 @@ const translations: Dict = {
   'trigger.restore.completed': { sv: 'Återställning klar', en: 'Restore completed' },
   'trigger.restore.failed': { sv: 'Återställning misslyckades', en: 'Restore failed' },
   'trigger.server.offline': { sv: 'Server offline', en: 'Server offline' },
-  'trigger.storage.warning': { sv: 'Lagringsvarning (>70%)', en: 'Storage warning (>70%)' },
-  'trigger.storage.critical': { sv: 'Lagring kritisk (>90%)', en: 'Storage critical (>90%)' },
+  'trigger.storage.warning': { sv: 'Lagringsvarning (75 % av budget)', en: 'Storage warning (75% of budget)' },
+  'trigger.storage.critical': { sv: 'Lagring kritisk (95 % av budget)', en: 'Storage critical (95% of budget)' },
+  'trigger.run.abandoned': { sv: 'Backup övergiven (fastnade)', en: 'Backup abandoned (stuck)' },
+  'trigger.backup.partial_transfer': { sv: 'Kopia nådde inte alla mål', en: 'Copy missed a destination' },
+  'trigger.artifact.corrupt': { sv: 'Skadad backupfil', en: 'Corrupt backup file' },
+  'trigger.validation.failed': { sv: 'Validering misslyckades', en: 'Validation failed' },
 
   // ── Audit ──
   'audit.title': { sv: 'Revisionslogg', en: 'Audit Log' },

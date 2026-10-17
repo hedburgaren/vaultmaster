@@ -44,6 +44,9 @@ async def get_channel(channel_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 CRITICAL_TRIGGERS = {
     "run.failed", "validation.failed", "server.offline", "storage.critical",
+    # A copy that reached the local disk but not Drive is a lost off-site
+    # copy; it must not be possible to leave it without a listener (task 157).
+    "backup.partial_transfer",
 }
 
 

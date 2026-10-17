@@ -355,6 +355,7 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
 
                     # Copy to each storage destination
                     transfer_results: list[tuple[str, bool]] = []
+                    dest_names: dict[str, str] = {}
                     for dest_id in (job.destination_ids or []):
                         dest_result = await db.execute(
                             select(StorageDestination).where(StorageDestination.id == dest_id)
@@ -370,6 +371,7 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             logger.info(f"[{run.id}] Skipping inactive destination {dest.name}")
                             continue
 
+                        dest_names[str(dest_id)] = dest.name
                         # Build sub-path: server_name/job_name/filename
                         sub_path = f"{server.name}/{job.name}/{filename}"
                         stored_path = ""
@@ -475,7 +477,9 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             "job_name": job.name,
                             "ok": summary["ok_count"],
                             "total": summary["total"],
-                            "failed_destinations": ", ".join(summary["failed"]),
+                            "failed_destinations": ", ".join(
+                                dest_names.get(d, d) for d in summary["failed"]
+                            ),
                         })
 
                 elif filename and (job.destination_ids or []):

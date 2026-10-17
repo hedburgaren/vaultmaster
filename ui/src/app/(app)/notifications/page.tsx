@@ -8,8 +8,13 @@ import { Plus, Trash2, TestTube, Bell, Send, Eye, EyeOff, Pencil, X } from 'luci
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
 
+// Every event the API emits that a channel can subscribe to. The list used
+// to miss backup.partial_transfer, so a failed Drive upload next to a good
+// local copy raised an event no channel could be set to receive (task 157).
+// run.started was listed but is never emitted.
 const TRIGGER_VALUES = [
-  'run.success', 'run.failed', 'run.started',
+  'run.success', 'run.failed', 'run.abandoned', 'backup.partial_transfer',
+  'artifact.corrupt', 'validation.failed',
   'restore.started', 'restore.completed', 'restore.failed',
   'server.offline', 'storage.warning', 'storage.critical',
 ];
