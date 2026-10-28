@@ -47,13 +47,13 @@ async def _run_scan() -> None:
     findings["python_vulns"], findings["python_scan_error"] = await _pip_audit()
 
     from sqlalchemy import select
-    from api.models.credential import Credential
+    from api.models.credential import CredentialItem
     from api.models.mcp_client import MCPClient
 
     async with get_task_session() as db:
-        creds = (await db.execute(select(Credential))).scalars().all()
+        items = (await db.execute(select(CredentialItem))).scalars().all()
         cutoff_30 = datetime.now(timezone.utc) + timedelta(days=30)
-        for c in creds:
+        for c in items:
             findings["credential_expiry"]["total"] += 1
             if c.expires_at is None:
                 findings["credential_expiry"]["unbounded"] += 1

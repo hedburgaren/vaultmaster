@@ -186,13 +186,21 @@ export const getLatestValidationsByJob = () => apiFetch('/v1/validations/latest-
 export const triggerValidation = (jobId: string, data?: any) =>
   apiFetch(`/v1/validations/jobs/${jobId}/trigger`, { method: 'POST', body: JSON.stringify(data || { check_type: 'restore' }) });
 
-// Credentials
-export const getCredentials = (params?: string) => apiFetch(`/v1/credentials${params ? '?' + params : ''}`);
-export const getCredential = (id: string) => apiFetch(`/v1/credentials/${id}`);
-export const createCredential = (data: any) => apiFetch('/v1/credentials', { method: 'POST', body: JSON.stringify(data) });
-export const updateCredential = (id: string, data: any) => apiFetch(`/v1/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
-export const deleteCredential = (id: string) => apiFetch(`/v1/credentials/${id}`, { method: 'DELETE' });
-export const revealCredential = (id: string, password: string, purpose: string) =>
-  apiFetch(`/v1/credentials/${id}/reveal`, { method: 'POST', body: JSON.stringify({ password, purpose }) });
-export const rotateCredentialKey = (id: string) =>
-  apiFetch(`/v1/credentials/${id}/rotate-key`, { method: 'POST' });
+// Credentials (items with unlimited fields)
+export const getCredentialItems = (params?: string) => apiFetch(`/v1/credentials${params ? '?' + params : ''}`);
+export const getCredentialItem = (id: string) => apiFetch(`/v1/credentials/items/${id}`);
+export const createCredentialItem = (data: any) => apiFetch('/v1/credentials', { method: 'POST', body: JSON.stringify(data) });
+export const updateCredentialItem = (id: string, data: any) => apiFetch(`/v1/credentials/items/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const deleteCredentialItem = (id: string) => apiFetch(`/v1/credentials/items/${id}`, { method: 'DELETE' });
+export const addCredentialField = (itemId: string, data: any) =>
+  apiFetch(`/v1/credentials/items/${itemId}/fields`, { method: 'POST', body: JSON.stringify(data) });
+export const updateCredentialField = (fieldId: string, data: any) =>
+  apiFetch(`/v1/credentials/fields/${fieldId}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const deleteCredentialField = (fieldId: string) =>
+  apiFetch(`/v1/credentials/fields/${fieldId}`, { method: 'DELETE' });
+export const revealCredentialItem = (id: string, password: string, purpose: string, totpCode?: string) =>
+  apiFetch(`/v1/credentials/items/${id}/reveal`, { method: 'POST', body: JSON.stringify({ password, purpose, totp_code: totpCode || null }) });
+export const revealCredentialField = (fieldId: string, password: string, purpose: string, totpCode?: string) =>
+  apiFetch(`/v1/credentials/fields/${fieldId}/reveal`, { method: 'POST', body: JSON.stringify({ password, purpose, totp_code: totpCode || null }) });
+export const rotateCredentialItemKeys = (id: string) =>
+  apiFetch(`/v1/credentials/items/${id}/rotate-key`, { method: 'POST' });

@@ -296,11 +296,15 @@ class BackupValidationTrigger(BaseModel):
     artifact_id: uuid.UUID | None = None  # default: latest artifact for the job
 
 
-# ── Credentials ──
-class CredentialCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
-    credential_type: str = Field(default="api_key", max_length=50)
-    plaintext_value: str  # encrypted server-side; never returned
+# ── Credentials: items with unlimited fields ──
+class CredentialFieldIn(BaseModel):
+    """One (field_title, value) pair, e.g. ("inloggningsnamn", "redaktion@...")."""
+    field_title: str = Field(min_length=1, max_length=255)
+    value: str  # encrypted server-side per field; never returned by list/get
+
+
+class CredentialItemCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
     description: str | None = None
     tags: list[str] = []
     expires_at: datetime | None = None
@@ -308,12 +312,11 @@ class CredentialCreate(BaseModel):
     provenance: str | None = None
     mcp_enabled: bool = False
     mcp_scopes: list[str] = []
+    fields: list[CredentialFieldIn] = Field(min_length=1)
 
 
-class CredentialUpdate(BaseModel):
-    name: str | None = None
-    credential_type: str | None = None
-    plaintext_value: str | None = None  # re-encrypts if provided
+class CredentialItemUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     tags: list[str] | None = None
     expires_at: datetime | None = None
@@ -323,14 +326,35 @@ class CredentialUpdate(BaseModel):
     mcp_scopes: list[str] | None = None
 
 
-class CredentialOut(BaseModel):
+class CredentialFieldAdd(BaseModel):
+    field_title: str = Field(min_length=1, max_length=255)
+    value: str
+
+
+class CredentialFieldUpdate(BaseModel):
+    field_title: str | None = Field(default=None, min_length=1, max_length=255)
+    value: str | None = None  # re-encrypts just this field if provided
+
+
+class CredentialFieldOut(BaseModel):
+    id: uuid.UUID
+    field_title: str
+    key_version: int
+    sort_order: int
+    reveal_count: int
+    last_revealed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CredentialItemOut(BaseModel):
     id: uuid.UUID
     owner_id: uuid.UUID
-    name: str
-    credential_type: str
+    title: str
     description: str | None
     tags: list[str] | None
-    key_version: int
     expires_at: datetime | None
     rotation_policy: str | None
     provenance: str | None
@@ -338,6 +362,8 @@ class CredentialOut(BaseModel):
     mcp_scopes: list[str] | None
     last_revealed_at: datetime | None
     reveal_count: int
+    field_count: int = 0
+    fields: list[CredentialFieldOut] = []
     created_at: datetime
     updated_at: datetime
 
@@ -350,11 +376,16 @@ class CredentialRevealRequest(BaseModel):
     totp_code: str | None = None  # required if user has totp_enabled
 
 
-class CredentialRevealOut(BaseModel):
+class CredentialFieldRevealOut(BaseModel):
+    field_id: uuid.UUID
+    field_title: str
+    value: str
+
+
+class CredentialItemRevealOut(BaseModel):
     id: uuid.UUID
-    name: str
-    credential_type: str
-    plaintext_value: str
+    title: str
+    values: list[CredentialFieldRevealOut]
     expires_in_seconds: int = 60
 
 

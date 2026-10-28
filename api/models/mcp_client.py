@@ -4,10 +4,10 @@ A row represents one AI agent / runtime that's allowed to read scoped
 credentials via the MCP endpoints under /api/mcp/v1/. Auth is via
 X-MCP-Key (SHA-256 hash stored, never the plaintext).
 
-Scopes match against `Credential.tags` AND `Credential.mcp_scopes`:
-- A credential is visible to a client only if BOTH:
-    * `credential.mcp_enabled = true`
-    * client's scope set intersects (credential.mcp_scopes ∪ credential.tags)
+Scopes match against `CredentialItem.tags` AND `CredentialItem.mcp_scopes`:
+- A credential item is visible to a client only if BOTH:
+    * `credential_item.mcp_enabled = true`
+    * client's scope set intersects (item.mcp_scopes ∪ item.tags)
 """
 
 import uuid

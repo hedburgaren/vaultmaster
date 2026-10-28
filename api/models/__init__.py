@@ -10,7 +10,7 @@ from api.models.audit_log import AuditLog
 from api.models.webhook import Webhook
 from api.models.system_settings import SystemSetting
 from api.models.backup_validation_run import BackupValidationRun
-from api.models.credential import Credential
+from api.models.credential import CredentialField, CredentialItem
 from api.models.mcp_client import MCPClient
 
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "Webhook",
     "SystemSetting",
     "BackupValidationRun",
-    "Credential",
+    "CredentialItem",
+    "CredentialField",
     "MCPClient",
 ]

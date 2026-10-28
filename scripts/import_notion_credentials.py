@@ -2,8 +2,10 @@
 """Import VaultMaster credentials from a Notion page.
 
 Walks the Notion block tree under a given page id, extracts table rows
-of the form (Parameter | Value), and POSTs them as Credential rows in
-VaultMaster. Idempotent on (name) — existing credentials are PATCHed.
+of the form (Parameter | Value), and writes them as credential items in
+VaultMaster: every heading becomes one item (the overlying title), and
+its parameter rows become that item's fields. Idempotent on title;
+existing items get their fields matched by field title and updated.
 
 Usage:
     python -m scripts.import_notion_credentials \
@@ -11,25 +13,23 @@ Usage:
         --vm-username admin \
         --vm-password '<vm-password>' \
         --notion-token '<notion-integration-token>' \
-        --page-id '<notion-page-id>' \
-        --dry-run
+        --page-id '<notion-page-id>'
 
-After dry-run looks reasonable, drop --dry-run. Use --apply to actually
-write to VM.
+Default is dry-run. Add --apply to actually write to VM.
 
 Heuristics:
 - Tables with header row "Parameter | Värde" or "Parameter | Value"
   are treated as credential tables.
-- Each row becomes one Credential. The closest preceding heading
-  (heading_1/2/3) becomes the prefix in the credential name.
-  Example: "Groq" + "API-nyckel" → name "Groq — API-nyckel".
-- credential_type is guessed from the parameter label
-  (api_key, password, token, secret, oauth_token, ...).
-- Empty / placeholder values ("—", "N/A", "TBD") are skipped.
-- A `notion-import` provenance is set on every imported row.
+- Each row becomes one field on the heading's item.
+  Example: heading "Groq" + row "API-nyckel" gives item "Groq" with a
+  field titled "API-nyckel".
+- Empty / placeholder values (single dash, "N/A", "TBD") are skipped.
+- A `notion-import` provenance is set on every imported item.
+- Fields that exist in VM but are absent from the page are NOT deleted;
+  the page may be a partial view.
 
 After successful import, the Notion page can optionally be marked with
-a [migrerad]-prefix in the title — see README. This script does NOT
+a [migrerad]-prefix in the title; see README. This script does NOT
 modify the Notion page.
 """
 
@@ -51,23 +51,6 @@ PARAM_HEADERS = {"parameter", "param", "field", "fält"}
 VALUE_HEADERS = {"värde", "value", "data"}
 
 PLACEHOLDER_VALUES = {"", "—", "-", "n/a", "tbd", "todo", "?"}
-
-
-def guess_credential_type(label: str) -> str:
-    s = label.lower()
-    if any(k in s for k in ("api key", "api-nyckel", "api_key", "apikey")):
-        return "api_key"
-    if any(k in s for k in ("oauth", "access token", "refresh token", "bearer")):
-        return "oauth_token"
-    if "secret" in s or "client_secret" in s:
-        return "secret"
-    if "token" in s:
-        return "token"
-    if "lösenord" in s or "password" in s or "passwd" in s:
-        return "password"
-    if "private key" in s or "ssh" in s or "key" == s:
-        return "ssh_key"
-    return "api_key"
 
 
 def fetch_notion_blocks(token: str, page_id: str, depth: int = 0) -> list[dict]:
@@ -140,7 +123,7 @@ def walk_credential_pairs(blocks: list[dict]) -> Iterable[tuple[str, str, str]]:
             if h0 not in PARAM_HEADERS or h1 not in VALUE_HEADERS:
                 continue
 
-            heading_path = " — ".join(t for _, t in heading_stack)
+            heading_path = " / ".join(t for _, t in heading_stack)
             for row in rows[1:]:
                 cells = row.get("table_row", {}).get("cells", [])
                 if len(cells) < 2:
@@ -176,34 +159,63 @@ def auth_with_api_key(client: httpx.Client, api_key: str) -> None:
 
 
 def list_existing(client: httpx.Client) -> dict[str, dict]:
+    """Map item title -> item payload (fields metadata included, never values)."""
     resp = client.get("/api/v1/credentials")
     resp.raise_for_status()
-    return {c["name"]: c for c in resp.json()}
+    return {c["title"]: c for c in resp.json()}
 
 
-def upsert_credential(client: httpx.Client, existing: dict[str, dict], name: str, value: str, ctype: str, tags: list[str], provenance: str) -> str:
+def upsert_item(
+    client: httpx.Client,
+    existing: dict[str, dict],
+    title: str,
+    fields: list[tuple[str, str]],
+    tags: list[str],
+    provenance: str,
+) -> str:
+    """Create or update one item so that it holds exactly these fields.
+
+    Existing fields are matched by title and PATCHed (value updated);
+    new fields are added. Fields already in the item but absent from the
+    import are left alone: the Notion page may legitimately be a partial
+    view, and deleting a field the page does not mention would destroy a
+    secret nobody asked us to destroy.
+    """
+    if title in existing:
+        item = existing[title]
+        cid = item["id"]
+        current = {f["field_title"]: f["id"] for f in item.get("fields", [])}
+        notes = []
+        for field_title, value in fields:
+            if field_title in current:
+                resp = client.patch(
+                    f"/api/v1/credentials/fields/{current[field_title]}",
+                    json={"value": value},
+                )
+                if resp.status_code >= 300:
+                    notes.append(f"PATCH field {field_title}: FAILED {resp.status_code} {resp.text[:120]}")
+            else:
+                resp = client.post(
+                    f"/api/v1/credentials/items/{cid}/fields",
+                    json={"field_title": field_title, "value": value},
+                )
+                if resp.status_code >= 300:
+                    notes.append(f"POST field {field_title}: FAILED {resp.status_code} {resp.text[:120]}")
+        resp = client.patch(f"/api/v1/credentials/items/{cid}", json={"tags": tags, "provenance": provenance})
+        if resp.status_code >= 300:
+            notes.append(f"PATCH item: FAILED {resp.status_code} {resp.text[:120]}")
+        return "; ".join(notes) if notes else f"PATCH {title} (id={cid}, {len(fields)} field(s))"
+
     payload = {
-        "name": name,
-        "credential_type": ctype,
-        "plaintext_value": value,
+        "title": title,
         "tags": tags,
         "provenance": provenance,
+        "fields": [{"field_title": ft, "value": v} for ft, v in fields],
     }
-    if name in existing:
-        cid = existing[name]["id"]
-        resp = client.patch(f"/api/v1/credentials/{cid}", json={
-            "plaintext_value": value,
-            "credential_type": ctype,
-            "tags": tags,
-            "provenance": provenance,
-        })
-        if resp.status_code >= 300:
-            return f"PATCH {name}: FAILED {resp.status_code} {resp.text[:120]}"
-        return f"PATCH {name} (id={cid})"
     resp = client.post("/api/v1/credentials", json=payload)
     if resp.status_code >= 300:
-        return f"POST  {name}: FAILED {resp.status_code} {resp.text[:120]}"
-    return f"POST  {name} (id={resp.json()['id']})"
+        return f"POST  {title}: FAILED {resp.status_code} {resp.text[:120]}"
+    return f"POST  {title} (id={resp.json()['id']}, {len(fields)} field(s))"
 
 
 def main() -> int:
@@ -228,17 +240,21 @@ def main() -> int:
     pairs = list(walk_credential_pairs(blocks))
     print(f"[parse]  extracted {len(pairs)} (heading, parameter, value) triples")
     if not pairs:
-        print("[parse]  nothing to import — verify the page contains 'Parameter | Värde'-style tables", file=sys.stderr)
+        print("[parse]  nothing to import; verify the page contains 'Parameter | Värde'-style tables", file=sys.stderr)
         return 1
 
+    # One heading becomes ONE item; its parameters become that item's fields.
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for heading, param, value in pairs:
+        grouped.setdefault(heading or param, []).append((param, value))
+
+    heading_dash = re.compile(r"[\u2014\-]+")
     if not args.apply:
-        for heading, param, value in pairs[: args.limit or len(pairs)]:
-            ctype = guess_credential_type(param)
-            name = f"{heading} — {param}" if heading else param
-            tags = [t.strip().lower() for t in re.split(r"[—\-]+", heading) if t.strip()] or []
-            preview = (value[:8] + "…") if len(value) > 8 else value
-            print(f"[dry]    {name}  type={ctype}  tags={tags}  value={preview!r}")
-        print(f"\nRe-run with --apply to write {min(len(pairs), args.limit or len(pairs))} credentials to {args.base_url}.")
+        for heading, fields in list(grouped.items())[: args.limit or len(grouped)]:
+            tags = [t.strip().lower() for t in heading_dash.split(heading) if t.strip()] or []
+            preview = ", ".join(f"{ft}={v[:6]}…" if len(v) > 6 else f"{ft}={v}" for ft, v in fields)
+            print(f"[dry]    {heading}  fields={len(fields)}  tags={tags}  {preview}")
+        print(f"\nRe-run with --apply to write {min(len(grouped), args.limit or len(grouped))} credential items to {args.base_url}.")
         return 0
 
     with httpx.Client(base_url=args.base_url, timeout=20.0) as client:
@@ -249,19 +265,17 @@ def main() -> int:
             client.headers["Authorization"] = f"Bearer {token}"
 
         existing = list_existing(client)
-        print(f"[vm]     {len(existing)} existing credentials in VM")
+        print(f"[vm]     {len(existing)} existing credential items in VM")
 
         provenance = f"notion-import:{page_id}"
         n = 0
-        for heading, param, value in pairs[: args.limit or len(pairs)]:
-            ctype = guess_credential_type(param)
-            name = f"{heading} — {param}" if heading else param
-            tags = [t.strip().lower() for t in re.split(r"[—\-]+", heading) if t.strip()] or []
-            print("  " + upsert_credential(client, existing, name, value, ctype, tags, provenance))
+        for heading, fields in list(grouped.items())[: args.limit or len(grouped)]:
+            tags = [t.strip().lower() for t in heading_dash.split(heading) if t.strip()] or []
+            print("  " + upsert_item(client, existing, heading, fields, tags, provenance))
             n += 1
             time.sleep(0.05)
 
-        print(f"\nimport complete: {n} credentials processed")
+        print(f"\nimport complete: {n} credential items processed ({len(pairs)} fields total)")
 
     return 0
 
