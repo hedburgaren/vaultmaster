@@ -726,6 +726,21 @@ const translations: Dict = {
   'tree.size_on_disk': { sv: 'storlek på servern', en: 'size on the server' },
   'tree.toggle_file': { sv: 'välj/avvälj fil', en: 'toggle file' },
 
+  // ── Restore ──
+  'restore.title': { sv: 'Återställ', en: 'Restore' },
+  'restore.target_server': { sv: 'Målserver', en: 'Target server' },
+  'restore.need_server': { sv: 'Välj målserver.', en: 'Pick a target server.' },
+  'restore.need_db': { sv: 'Ange måldatabas.', en: 'Name the target database.' },
+  'restore.need_path': { sv: 'Ange en absolut sökväg som mål.', en: 'Give an absolute target path.' },
+  'restore.db_name': { sv: 'Måldatabas', en: 'Target database' },
+  'restore.db_warning': { sv: 'Återställningen skriver över allt i måldatabasen.', en: 'The restore overwrites everything in the target database.' },
+  'restore.path': { sv: 'Målsökväg', en: 'Target path' },
+  'restore.path_hint': { sv: 'Arkivets struktur packas upp under sökvägen. Återställ till / för att lägga tillbaka allt där det en gång låg.', en: 'The archive structure is extracted below this path. Restore to / to put everything back where it came from.' },
+  'restore.path_optional': { sv: 'Målsökväg (valfri)', en: 'Target path (optional)' },
+  'restore.volumes_hint': { sv: 'Utan sökväg packas volymerna upp i en stagingkatalog på målservern och ersätter inget.', en: 'Without a path, volumes are extracted to a staging directory on the target and replace nothing.' },
+  'restore.overwrite_volumes': { sv: 'Flytta in volymerna i målsökvägen och ersätt det som finns där (stoppa berörda stackar först).', en: 'Move the volumes into the target path, replacing what is there (stop the affected stacks first).' },
+  'restore.overwrite_warning': { sv: 'Återställning skriver över målet. Målet väljer du själv; systemet gissar aldrig.', en: 'A restore overwrites its target. You name the target; the system never guesses.' },
+
   // ── Coming Soon ──
   'coming.title': { sv: 'Kommer snart', en: 'Coming Soon' },
   'coming.desc': { sv: 'Dessa funktioner är planerade för framtida versioner av VaultMaster.', en: 'These features are planned for future versions of VaultMaster.' },

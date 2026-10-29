@@ -389,6 +389,22 @@ class CredentialItemRevealOut(BaseModel):
     expires_in_seconds: int = 60
 
 
+# ── Restore ──
+class RestoreRequest(BaseModel):
+    """One restore order. The target is never inferred: restoring overwrites.
+
+    What is required depends on the artifact type:
+      postgresql:      target_server_id + target_db_name
+      files:           target_server_id + target_path (absolute)
+      docker_volumes:  target_server_id; target_path optional (staging only
+                       unless confirm_overwrite)
+    """
+    target_server_id: uuid.UUID | None = None
+    target_db_name: str | None = None
+    target_path: str | None = None
+    confirm_overwrite: bool = False
+
+
 # ── MCP Client ──
 class MCPClientCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)

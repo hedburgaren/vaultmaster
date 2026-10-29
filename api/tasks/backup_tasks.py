@@ -48,6 +48,32 @@ def summarise_transfers(results: list[tuple[str, bool]]) -> dict:
 _UNVERIFIABLE_CHECKSUMS = {"", "pending", None}
 
 
+def restore_request_error(backup_type, target_server_id, target_db_name, target_path) -> str | None:
+    """What is missing from a restore order, or None if it is complete.
+
+    Pure so the router can refuse malformed orders with 422 before queuing
+    anything, and the task can refuse again for its own callers. The target
+    of a restore is never inferred: restoring overwrites whatever is there,
+    so each type names its own required target fields explicitly.
+    """
+    bt = (backup_type or "").lower()
+    if not target_server_id:
+        return "target_server_id is required for every restore: the target is never inferred."
+    if bt == "postgresql":
+        if not target_db_name:
+            return "postgresql restore requires target_db_name (restore overwrites it)."
+        return None
+    if bt == "files":
+        if not target_path or not str(target_path).startswith("/"):
+            return "files restore requires an absolute target_path to extract into."
+        return None
+    if bt == "docker_volumes":
+        return None  # staging-only restore needs nothing more
+    if bt in ("restic",):
+        return "restic restores are performed from the restic repository itself; not via this task."
+    return f"restore is not implemented for backup_type {backup_type!r}."
+
+
 def checksum_verdict(stored: str | None, computed: str | None) -> dict:
     """Compare a recorded checksum against a freshly computed one.
 
@@ -803,26 +829,35 @@ async def _do_reap_stale_runs():
 
 
 @celery_app.task(name="api.tasks.backup_tasks.run_restore_task")
-def run_restore_task(artifact_id: str, target_server_id: str | None = None, target_db_name: str | None = None):
-    """Restore a backup artifact into an explicitly named target database.
+def run_restore_task(artifact_id: str, target_server_id: str | None = None, target_db_name: str | None = None,
+                     target_path: str | None = None, confirm_overwrite: bool = False):
+    """Restore a backup artifact to an explicitly named target.
 
     Previously this was a stub that logged "queued" and returned, which is worse
     than not existing: a caller could reasonably believe a restore had happened.
 
     Restoring overwrites whatever is in the target, so the target is never
-    inferred. Both target_server_id and target_db_name are required, and the
-    task refuses to restore into the database the artifact was taken from unless
-    that database is named explicitly. The intent is that you cannot clobber
-    production by accident, only on purpose.
+    inferred. What the target means per type, and what each requires:
+
+      postgresql:     target database named explicitly (target_db_name)
+      files:          extract the tar into target_path on the target server;
+                      refuses a non-empty directory unless confirm_overwrite
+      docker_volumes: extract to a staging directory on the target server and
+                      report the volume directories found; with target_path AND
+                      confirm_overwrite the volumes are moved into place there
+                      (e.g. /var/lib/docker/volumes), which the operator does
+                      deliberately with the affected stack stopped
 
     Non-destructive verification lives in api.services.restore_validator, which
     restores into a throwaway container and is what the hourly validation sweep
     uses. Prefer that for "does this backup work?".
     """
-    return _run_async(_run_restore(artifact_id, target_server_id, target_db_name))
+    return _run_async(_run_restore(artifact_id, target_server_id, target_db_name,
+                                   target_path, confirm_overwrite))
 
 
-async def _run_restore(artifact_id: str, target_server_id: str | None, target_db_name: str | None):
+async def _run_restore(artifact_id: str, target_server_id: str | None, target_db_name: str | None,
+                       target_path: str | None = None, confirm_overwrite: bool = False):
     import shlex
     import shutil
     import tempfile
@@ -841,12 +876,12 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
         logs.append(msg)
         logger.info(f"[restore {artifact_id}] {msg}")
 
-    if not target_server_id or not target_db_name:
+    if not target_server_id:
         msg = (
-            "Restore refused: both target_server_id and target_db_name are required. "
-            "The restore target is never inferred, because restoring overwrites it. "
-            "To verify a backup without overwriting anything, use the restore "
-            "validator (it restores into a throwaway container)."
+            "Restore refused: target_server_id is required. The restore target "
+            "is never inferred, because restoring overwrites it. To verify a "
+            "backup without overwriting anything, use the restore validator "
+            "(it restores into a throwaway container)."
         )
         logger.error(f"[restore {artifact_id}] {msg}")
         return {"status": "refused", "error": msg}
@@ -859,6 +894,13 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
             )).scalar_one_or_none()
             if not artifact:
                 return {"status": "failed", "error": f"artifact {artifact_id} not found"}
+
+            req_error = restore_request_error(
+                artifact.backup_type, target_server_id, target_db_name, target_path
+            )
+            if req_error:
+                logger.error(f"[restore {artifact_id}] {req_error}")
+                return {"status": "refused", "error": req_error, "logs": logs}
 
             server = (await db.execute(
                 select(Server).where(Server.id == uuid.UUID(str(target_server_id)))
@@ -901,16 +943,16 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
         # untrustworthy for anything written before 2026-07-19.
         local_path = await _decrypt_if_needed(local_path, lambda _lvl, m: log(m))
 
-        if backup_type != "postgresql":
-            return {
-                "status": "failed",
-                "error": (
-                    f"Automated restore is only implemented for postgresql artifacts, "
-                    f"got backup_type={backup_type!r}. The artifact has been downloaded "
-                    f"and decrypted to {local_path} for manual restore."
-                ),
-                "logs": logs,
-            }
+        if backup_type == "files":
+            return await _restore_files_to_target(
+                server, local_path, str(artifact_id), target_path or "",
+                confirm_overwrite, logs,
+            )
+        if backup_type == "docker_volumes":
+            return await _restore_volumes(
+                server, local_path, str(artifact_id), target_path,
+                confirm_overwrite, logs,
+            )
 
         db_q = shlex.quote(target_db_name)
         log(f"restoring into database {target_db_name} on {server.name}")
@@ -976,6 +1018,168 @@ async def _run_restore(artifact_id: str, target_server_id: str | None, target_db
         return {"status": "failed", "error": f"{type(e).__name__}: {e}", "logs": logs}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def _upload_and_extract(server, local_path, artifact_id, dest_dir, logs) -> tuple[bool, str]:
+    """Upload the archive to the target server and extract it into dest_dir.
+
+    Shared by the files and docker_volumes restore paths: both are tar.gz
+    archives, both extract on the target host (the data is never
+    re-compressed locally), both clean their temp upload afterwards.
+    Returns (ok, detail). Extraction happens under `bash -o pipefail` so a
+    partial extract cannot report success.
+    """
+    import shlex as _shlex
+
+    from api.services.ssh_client import run_remote_command, upload_remote_file
+
+    remote_tmp = f"/tmp/vm-restores/restore_{artifact_id}"
+    q = _shlex.quote
+    await run_remote_command(server, f"mkdir -p {q('/tmp/vm-restores')} {q(dest_dir)}")
+    ok, msg = await upload_remote_file(server, local_path, remote_tmp)
+    if not ok:
+        return False, f"upload to target failed: {msg[:300]}"
+    try:
+        inner = (
+            f"tar -xzf {q(remote_tmp)} -C {q(dest_dir)} && "
+            f"echo VM_EXTRACT_OK $(tar -tzf {q(remote_tmp)} | wc -l)"
+        )
+        code, out, err = await run_remote_command(
+            server, f"bash -o pipefail -c {q(inner)}", timeout=7200
+        )
+        if code != 0 or "VM_EXTRACT_OK" not in (out or ""):
+            return False, f"extract failed (exit {code}): {(err or out or '').strip()[:300]}"
+        entries = (out or "").split("VM_EXTRACT_OK")[-1].strip().split()[0]
+        return True, entries
+    finally:
+        await run_remote_command(server, f"rm -f {q(remote_tmp)}")
+
+
+async def _restore_files_to_target(server, local_path, artifact_id, target_path,
+                                   confirm_overwrite, logs) -> dict:
+    """Extract a files artifact into target_path on the target server.
+
+    tar semantics, stated rather than hidden: the archive stores paths as
+    they were given to it (leading slash stripped), so extraction below
+    target_path rebuilds that structure. Restoring '/srv/agents/code' into
+    '/' puts it back where it came from; into '/restore/xyz' it becomes
+    '/restore/xyz/srv/agents/code'. The report names the top-level entries
+    so the operator sees exactly what landed where.
+
+    A non-empty target is refused unless confirm_overwrite: an extract over
+    existing files is indistinguishable from corruption until it is too
+    late, and the flag makes it a decision instead of an accident.
+    """
+    import shlex as _shlex
+
+    from api.services.ssh_client import run_remote_command
+
+    q = _shlex.quote
+    logs.append(f"files restore into {target_path} on {server.name}")
+
+    # Refuse to mix into existing content: an extract over populated files
+    # is indistinguishable from corruption until it is too late.
+    code, out, _ = await run_remote_command(
+        server,
+        f"test -d {q(target_path)} && ls -A {q(target_path)} | head -5 || echo VM_NO_DIR",
+    )
+    existing = (out or "").strip()
+    if existing and existing != "VM_NO_DIR" and not confirm_overwrite:
+        return {
+            "status": "refused",
+            "error": (
+                f"target {target_path} exists and is not empty "
+                f"(first entries: {existing.splitlines()[:3]}). "
+                "Restore would mix into existing content. Repeat with "
+                "confirm_overwrite=true only if that is the decision."
+            ),
+            "logs": logs,
+        }
+
+    ok, detail = await _upload_and_extract(server, local_path, artifact_id, target_path, logs)
+    if not ok:
+        return {"status": "failed", "error": detail, "logs": logs}
+
+    code, out, _ = await run_remote_command(
+        server, f"find {q(target_path)} -mindepth 1 -maxdepth 1 | head -20", timeout=120
+    )
+    top = [line.rsplit("/", 1)[-1] for line in (out or "").splitlines() if line.strip()]
+    logs.append(f"extracted {detail} entries; top level now: {', '.join(top[:10])}")
+    return {
+        "status": "completed",
+        "target_path": target_path,
+        "entries": detail,
+        "top_level": top,
+        "logs": logs,
+    }
+
+
+async def _restore_volumes(server, local_path, artifact_id, target_path,
+                           confirm_overwrite, logs) -> dict:
+    """docker_volumes restore: extract to staging, optionally move into place.
+
+    The archive contains volume directories (each with _data below it).
+    Stage-one always runs and is safe: nothing outside /tmp on the target
+    changes, and the report names every volume directory found in the
+    archive. Stage-two (target_path + confirm_overwrite) moves each volume
+    directory into target_path, REPLACING what is already there: that is a
+    deliberate act with the affected stack stopped, which is why it needs
+    both a real path and the flag.
+    """
+    import shlex as _shlex
+
+    from api.services.ssh_client import run_remote_command
+
+    q = _shlex.quote
+    staging = f"/tmp/vm-restores/vmrestore_{artifact_id}"
+    logs.append(f"docker_volumes restore: extracting to staging {staging} on {server.name}")
+
+    ok, detail = await _upload_and_extract(server, local_path, artifact_id, staging, logs)
+    if not ok:
+        return {"status": "failed", "error": detail}
+
+    code, out, _ = await run_remote_command(
+        server,
+        f"find {q(staging)} -type d -name _data -printf '%h\\n' | sed 's|.*/||' | sort -u",
+        timeout=300,
+    )
+    volumes = sorted(v for v in (out or "").splitlines() if v.strip())
+    if not volumes:
+        await run_remote_command(server, f"rm -rf {q(staging)}")
+        return {"status": "failed", "error": "no volume directories (_data) found in archive"}
+
+    moved = []
+    if confirm_overwrite and target_path:
+        for vol in volumes:
+            src = f"{staging}/var/lib/docker/volumes/{vol}"
+            code, _, err = await run_remote_command(
+                server,
+                f"test -d {q(src)} && rm -rf {q(target_path + '/' + vol)} && "
+                f"mv {q(src)} {q(target_path + '/' + vol)} && echo VM_MOVED",
+                timeout=600,
+            )
+            if code != 0:
+                await run_remote_command(server, f"rm -rf {q(staging)}")
+                return {"status": "failed", "error": f"moving volume {vol} failed: {(err or '').strip()[:200]}",
+                        "moved_before_failure": moved, "volumes": volumes}
+            moved.append(vol)
+        await run_remote_command(server, f"rm -rf {q(staging)}")
+        logs.append(f"moved into place under {target_path}: {', '.join(moved)}")
+        return {"status": "completed", "mode": "in-place", "target_path": target_path,
+                "volumes": volumes, "moved": moved}
+
+    logs.append(f"staged {len(volumes)} volume(s): {', '.join(volumes[:10])}; staging kept for inspection")
+    return {
+        "status": "completed",
+        "mode": "staging",
+        "staging_path": staging,
+        "volumes": volumes,
+        "hint": (
+            f"Volumes are extracted to {staging} on {server.name}. Repeat with "
+            f"target_path=/var/lib/docker/volumes and confirm_overwrite=true to "
+            f"replace the live volumes (stop the affected stack first)."
+        ),
+    }
 
 
 @celery_app.task(name="api.tasks.backup_tasks.verify_artifact_checksum")
