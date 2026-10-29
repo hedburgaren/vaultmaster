@@ -108,8 +108,12 @@ async def _require_reauth(
             detail=denied_detail,
             ip_address=_client_ip(request),
         )
-        code = 403
-        raise HTTPException(status_code=code, detail=denied_detail)
+        # Commit before raising. The dependency teardown rolls the session
+        # back on any exception that leaves the endpoint (get_db's except
+        # path), and without this the denial would answer 403 while its own
+        # audit row silently vanished. A probing caller must leave a trail.
+        await db.commit()
+        raise HTTPException(status_code=403, detail=denied_detail)
 
 
 def _next_sort_order(item: CredentialItem) -> int:
@@ -185,7 +189,7 @@ async def create_credential_item(
         await db.flush()
     except IntegrityError:
         raise HTTPException(status_code=409, detail="Could not create item")
-    await db.refresh(item, attribute_names=["fields"])
+    await db.refresh(item, attribute_names=["fields", "updated_at"])
 
     await log_action(
         db,
@@ -222,7 +226,7 @@ async def update_credential_item(
     for field, value in changes.items():
         setattr(item, field, value)
     await db.flush()
-    await db.refresh(item, attribute_names=["fields"])
+    await db.refresh(item, attribute_names=["fields", "updated_at"])
 
     await log_action(
         db,
@@ -245,7 +249,9 @@ async def delete_credential_item(
 ):
     item = await _get_owned_item(db, user, item_id)
     title, item_id_str = item.title, str(item.id)
+    # await is load-bearing; see the field-delete twin below.
     await db.delete(item)
+    await db.flush()
     await log_action(
         db,
         "credential_item.delete",
@@ -283,7 +289,7 @@ async def rotate_item_keys(
             rotated += 1
         versions.add(field.key_version)
     await db.flush()
-    await db.refresh(item, attribute_names=["fields"])
+    await db.refresh(item, attribute_names=["fields", "updated_at"])
 
     await log_action(
         db,
@@ -418,7 +424,11 @@ async def delete_credential_field(
             "an item with no fields is a title that lies about holding a secret.",
         )
     field_title, field_id_str = field.field_title, str(field.id)
-    db.delete(field)
+    # await is load-bearing: AsyncSession.delete is a coroutine. Called bare,
+    # nothing is deleted, the endpoint still answers 204, and the row sits
+    # there forever (found live against a real database 2026-10-29).
+    await db.delete(field)
+    await db.flush()
     await log_action(
         db,
         "credential_field.delete",

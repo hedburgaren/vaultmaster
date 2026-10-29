@@ -70,17 +70,25 @@ def test_item_holds_unlimited_fields():
 
 
 def test_item_out_reports_field_count():
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
     from api.models.credential import CredentialField, CredentialItem
     from api.routers.credentials import _item_out
 
-    item = CredentialItem(owner_id=None, title="Aftonbladet")
+    now = datetime.now(timezone.utc)
+    item = CredentialItem(id=uuid4(), owner_id=uuid4(), title="Aftonbladet",
+                          mcp_enabled=False, reveal_count=0,
+                          created_at=now, updated_at=now)
     for i in range(3):
         item.fields.append(CredentialField(
-            field_title=f"f-{i}", encrypted_value=b"x", key_version=1, sort_order=i,
+            id=uuid4(), field_title=f"f-{i}", encrypted_value=b"x", key_version=1,
+            sort_order=i, reveal_count=0, created_at=now, updated_at=now,
         ))
     out = _item_out(item)
     assert_eq(out.field_count, 3)
     assert_eq(len(out.fields), 3)
+    assert_eq(out.title, "Aftonbladet")
     # The response never carries ciphertext or plaintext.
     assert not hasattr(out.fields[0], "encrypted_value")
 
@@ -117,7 +125,7 @@ def test_reveal_counters_touch_field_and_item():
     assert field.last_revealed_at is not None
     assert_eq(item.reveal_count, 5)
     assert_eq(item.last_revealed_by, "user-1")
-    assert item.last_revealed_at >= datetime.now(timezone.utc).replace(tzinfo=None) or True
+    assert item.last_revealed_at is not None
 
 
 def test_mcp_visibility_is_item_grained():

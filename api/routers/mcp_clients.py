@@ -76,8 +76,13 @@ async def create_mcp_client(
         ip_address=_client_ip(request),
     )
 
-    out = MCPClientCreated.model_validate(client, from_attributes=True)
-    out_dict = out.model_dump()
+    # raw_key exists only here, never on the row, so the response model is
+    # built from the row's fields plus the key. model_validate(client) alone
+    # raises (raw_key required, absent on the ORM object), which made client
+    # creation/rotation answer 500 while the row was already flushed: a key
+    # nobody could ever use. Found live 2026-10-29.
+    base = MCPClientOut.model_validate(client, from_attributes=True)
+    out_dict = base.model_dump()
     out_dict["raw_key"] = raw
     return out_dict
 
@@ -144,8 +149,13 @@ async def rotate_mcp_key(
         ip_address=_client_ip(request),
     )
 
-    out = MCPClientCreated.model_validate(client, from_attributes=True)
-    out_dict = out.model_dump()
+    # raw_key exists only here, never on the row, so the response model is
+    # built from the row's fields plus the key. model_validate(client) alone
+    # raises (raw_key required, absent on the ORM object), which made client
+    # creation/rotation answer 500 while the row was already flushed: a key
+    # nobody could ever use. Found live 2026-10-29.
+    base = MCPClientOut.model_validate(client, from_attributes=True)
+    out_dict = base.model_dump()
     out_dict["raw_key"] = raw
     return out_dict
 

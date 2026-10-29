@@ -59,6 +59,30 @@ async def get_work_dir(db=None) -> str:
     return DEFAULT_WORK_DIR
 
 
+async def ensure_remote_dir(server, run_command, path: str) -> None:
+    """mkdir -p with the exit code READ, not discarded.
+
+    Every executor used to fire `mkdir -p` at the work directory and drop the
+    result on the floor. When the directory cannot be created (permissions,
+    read-only mount), the run marched on and the failure surfaced two steps
+    later as a redirect error on the output file. Because that filename ends
+    in .age on encrypted jobs, the error read as an encryption problem while
+    the actual fault was the work directory. Reported by Klådan 2026-10-29.
+
+    Failing HERE names the real cause at the moment it exists, before any
+    dump runs and before anything can be half-written.
+    """
+    exit_code, _out, err = await run_command(server, f"mkdir -p {shlex.quote(path)}", timeout=60)
+    if exit_code != 0:
+        host = getattr(server, "host", "?")
+        raise Exception(
+            f"Could not create work directory {path} on host {host} "
+            f"(mkdir exit {exit_code}): {(err or '').strip()[:300]}. "
+            "Fix the path or the SSH user's write permission there. "
+            "Nothing was backed up."
+        )
+
+
 async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
     """Execute a PostgreSQL backup via pg_dump (over SSH or via docker exec)."""
     work_dir = await get_work_dir(db)
@@ -117,7 +141,7 @@ async def execute_postgresql_backup(server, job, run_id: str, db=None) -> dict:
         if recipient:
             log("info", "Encryption enabled (age recipient validated, binary present on source host)")
 
-        await run_remote_command(server, f"mkdir -p {output_dir_q}")
+        await ensure_remote_dir(server, run_remote_command, output_dir_v)
 
         if stop_containers:
             containers_q = " ".join(shlex.quote(c) for c in stop_containers)
@@ -230,7 +254,7 @@ async def execute_docker_volumes_backup(server, job, run_id: str, db=None) -> di
         if recipient:
             log("info", "Encryption enabled (age recipient validated, binary present on source host)")
 
-        await run_remote_command(server, f"mkdir -p {work_dir_q}")
+        await ensure_remote_dir(server, run_remote_command, work_dir_v)
 
         if volumes:
             volume_paths_q = " ".join(shlex.quote(f"/var/lib/docker/volumes/{v}") for v in volumes)
@@ -321,7 +345,7 @@ async def execute_files_backup(server, job, run_id: str, db=None) -> dict:
         if recipient:
             log("info", "Encryption enabled (age recipient validated, binary present on source host)")
 
-        await run_remote_command(server, f"mkdir -p {work_dir_q}")
+        await ensure_remote_dir(server, run_remote_command, work_dir_v)
 
         exclude_flags = " ".join(f"--exclude={shlex.quote(e)}" for e in excludes)
         path_str_q = " ".join(shlex.quote(p) for p in paths)
@@ -451,6 +475,10 @@ async def execute_custom_backup(server, job, run_id: str, db=None) -> dict:
         # (and thus double-encrypt) files left by an earlier run.
         marker = f"{_safe_path(output_dir, 'output_dir')}/.vm_run_marker" if output_dir else None
         if marker:
+            # Checked, unlike the touch that follows: if output_dir cannot be
+            # created the run must stop HERE with the directory named, not
+            # later as "produced no new file" or an age redirect error.
+            await ensure_remote_dir(server, run_remote_command, _safe_path(output_dir, "output_dir"))
             await run_remote_command(server, f"touch {shlex.quote(marker)}")
 
         log("info", f"Running custom script")
