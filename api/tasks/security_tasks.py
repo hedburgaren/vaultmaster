@@ -12,7 +12,7 @@ combined findings:
 
 Runs weekly via Celery beat. Output goes to whatever
 NotificationChannel listens for "security.report"-trigger (currently
-only the Email channel by default — add Discord if desired).
+only the Email channel by default; add a channel if desired).
 """
 
 from __future__ import annotations
