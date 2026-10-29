@@ -65,6 +65,7 @@ export function isAuthenticated(): boolean {
 
 // Dashboard
 export const getDashboard = () => apiFetch('/v1/dashboard');
+export const getTrustReport = () => apiFetch('/v1/dashboard/trust-report');
 
 // Servers
 export const getServers = () => apiFetch('/v1/servers');
