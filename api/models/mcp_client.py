@@ -15,7 +15,7 @@ from datetime import datetime
 
 from sqlalchemy import String, DateTime, Boolean, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from api.database import Base
 
@@ -37,3 +37,12 @@ class MCPClient(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Granular layer: exact resources this client may read. See
+    # api/models/mcp_grant.py for the semantics and the deliberate
+    # additive relationship to the coarse scope/tag matching above.
+    grants = relationship(
+        "MCPGrant",
+        back_populates="client",
+        cascade="all, delete-orphan",
+    )

@@ -9,6 +9,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
@@ -17,7 +18,14 @@ from api.mcp.auth import hash_mcp_key
 from api.models.mcp_client import MCPClient
 from api.models.user import User
 from api.routers.audit import log_action
-from api.schemas import MCPClientCreate, MCPClientCreated, MCPClientOut, MCPClientUpdate
+from api.schemas import (
+    MCPClientCreate,
+    MCPClientCreated,
+    MCPClientOut,
+    MCPClientUpdate,
+    MCPGrantSetIn,
+    MCPGrantsOut,
+)
 
 router = APIRouter(
     prefix="/mcp-clients",
@@ -185,3 +193,126 @@ async def delete_mcp_client(
         detail=f"Deleted MCP client '{name}'",
         ip_address=_client_ip(request),
     )
+
+
+# ── Granular grants ──
+
+ALLOWED_API_SCOPES = {"backup.read", "credentials.read"}
+
+
+def _grants_out(client) -> MCPGrantsOut:
+    out = MCPGrantsOut(client_id=client.id)
+    for g in client.grants or []:
+        if g.resource_type == "credential_item":
+            out.credential_items.append(g.resource_id)
+        elif g.resource_type == "credential_field":
+            out.credential_fields.append(g.resource_id)
+        elif g.resource_type == "api":
+            out.api_scopes.append(g.resource_id)
+    return out
+
+
+@router.get("/{client_id}/grants", response_model=MCPGrantsOut)
+async def get_mcp_client_grants(
+    client_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(MCPClient)
+        .options(selectinload(MCPClient.grants))
+        .where(MCPClient.id == client_id, MCPClient.owner_id == user.id)
+    )
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="MCP client not found")
+    return _grants_out(client)
+
+
+@router.put("/{client_id}/grants", response_model=MCPGrantsOut)
+async def replace_mcp_client_grants(
+    client_id: uuid.UUID,
+    body: MCPGrantSetIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Replace the client's entire grant set in one call.
+
+    Replace rather than add/remove per grant: the caller states the complete
+    intended state, the difference is audited as one row, and there is no
+    reconciliation guessing about what the previous state was. Grants are
+    updatable by design; the key itself never changes.
+
+    Unknown item/field ids are refused with 422 naming them: a grant on a
+    resource that does not exist is almost certainly a stale id pasted from
+    somewhere, and silently accepting it would make "this agent can read 2
+    of 30 keys" a claim about 1 real key and one ghost.
+    """
+    from api.models.credential import CredentialField, CredentialItem
+    from api.models.mcp_grant import MCPGrant
+
+    result = await db.execute(
+        select(MCPClient)
+        .options(selectinload(MCPClient.grants))
+        .where(MCPClient.id == client_id, MCPClient.owner_id == user.id)
+    )
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="MCP client not found")
+
+    bad_scopes = sorted(set(body.api_scopes) - ALLOWED_API_SCOPES)
+    if bad_scopes:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown api scopes {bad_scopes}; allowed: {sorted(ALLOWED_API_SCOPES)}",
+        )
+
+    item_ids = {str(i) for i in body.credential_item_ids}
+    field_ids = {str(i) for i in body.credential_field_ids}
+
+    problems = []
+    if item_ids:
+        rows = (await db.execute(
+            select(CredentialItem.id).where(CredentialItem.id.in_(body.credential_item_ids))
+        )).scalars().all()
+        known = {str(r) for r in rows}
+        problems += [f"unknown item {i}" for i in sorted(item_ids - known)]
+    if field_ids:
+        rows = (await db.execute(
+            select(CredentialField.id).where(CredentialField.id.in_(body.credential_field_ids))
+        )).scalars().all()
+        known = {str(r) for r in rows}
+        problems += [f"unknown field {i}" for i in sorted(field_ids - known)]
+    if problems:
+        raise HTTPException(status_code=422, detail="; ".join(problems))
+
+    old = _grants_out(client)
+    for g in list(client.grants or []):
+        await db.delete(g)
+    for rid in sorted(item_ids):
+        client.grants.append(MCPGrant(resource_type="credential_item", resource_id=rid))
+    for rid in sorted(field_ids):
+        client.grants.append(MCPGrant(resource_type="credential_field", resource_id=rid))
+    for scope in sorted(set(body.api_scopes)):
+        client.grants.append(MCPGrant(resource_type="api", resource_id=scope))
+
+    await db.flush()
+    await db.refresh(client, attribute_names=["grants"])
+    new = _grants_out(client)
+
+    await log_action(
+        db,
+        action="mcp_client.grants",
+        user=user,
+        resource_type="mcp_client",
+        resource_id=str(client.id),
+        detail=(
+            f"Grants for '{client.name}' replaced: "
+            f"items {len(new.credential_items)} (was {len(old.credential_items)}), "
+            f"fields {len(new.credential_fields)} (was {len(old.credential_fields)}), "
+            f"api {new.api_scopes} (was {old.api_scopes})"
+        ),
+        ip_address=_client_ip(request),
+    )
+    return new

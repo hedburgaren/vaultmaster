@@ -12,6 +12,7 @@ from api.models.system_settings import SystemSetting
 from api.models.backup_validation_run import BackupValidationRun
 from api.models.credential import CredentialField, CredentialItem
 from api.models.mcp_client import MCPClient
+from api.models.mcp_grant import MCPGrant
 
 __all__ = [
     "Server",
@@ -29,4 +30,5 @@ __all__ = [
     "CredentialItem",
     "CredentialField",
     "MCPClient",
+    "MCPGrant",
 ]

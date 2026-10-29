@@ -429,6 +429,20 @@ class MCPClientCreated(MCPClientOut):
     raw_key: str  # only returned at create-time, never persisted in plaintext
 
 
+# Which resources a client may read, as one replaceable set.
+class MCPGrantSetIn(BaseModel):
+    credential_item_ids: list[uuid.UUID] = []
+    credential_field_ids: list[uuid.UUID] = []
+    api_scopes: list[str] = []
+
+
+class MCPGrantsOut(BaseModel):
+    client_id: uuid.UUID
+    credential_items: list[str] = []
+    credential_fields: list[str] = []
+    api_scopes: list[str] = []
+
+
 class MCPToolCallRequest(BaseModel):
     arguments: dict = {}
 
