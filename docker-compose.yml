@@ -37,7 +37,7 @@ services:
       - arc-vm-link
 
   db:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     container_name: vaultmaster-db
     restart: unless-stopped
     environment:
@@ -46,8 +46,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       TZ: Europe/Stockholm
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - /srv/archive/wal/vaultmaster:/var/lib/postgresql/wal-archive
+      - pgdata17:/var/lib/postgresql/data
+      - /srv/archive/wal/vaultmaster-pg17:/var/lib/postgresql/wal-archive
     ports:
       - "127.0.0.1:5433:5432"
     healthcheck:
@@ -138,6 +138,10 @@ services:
 
 volumes:
   pgdata:
+    # Legacy PG16 cluster, kept as the rollback copy of the 2026-10-17
+    # upgrade. Production data lives in pgdata17; do not mount this one
+    # for the db service.
+  pgdata17:
   redisdata:
 
 networks:
