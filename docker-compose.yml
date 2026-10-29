@@ -11,9 +11,14 @@ services:
       - "127.0.0.1:8100:8000"
     env_file:
       - .env
+    environment:
+      TZ: Europe/Stockholm
     volumes:
       - ./api:/app/api
       - ./migrations:/app/migrations
+      # Mounted for the same reason ./api is: the suites are run in this
+      # container and must be the ones in the working tree, not a snapshot.
+      - ./tests:/app/tests
       - /mnt/backup:/mnt/backup
       - /srv/archive:/srv/archive
       - /srv/archive/tmp/vaultmaster:/tmp/vaultmaster
@@ -29,18 +34,20 @@ services:
         condition: service_healthy
     networks:
       - vaultmaster
+      - arc-vm-link
 
   db:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     container_name: vaultmaster-db
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-vaultmaster}
       POSTGRES_USER: ${POSTGRES_USER:-vaultmaster}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      TZ: Europe/Stockholm
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - /srv/archive/wal/vaultmaster:/var/lib/postgresql/wal-archive
+      - pgdata17:/var/lib/postgresql/data
+      - /srv/archive/wal/vaultmaster-pg17:/var/lib/postgresql/wal-archive
     ports:
       - "127.0.0.1:5433:5432"
     healthcheck:
@@ -56,6 +63,8 @@ services:
     container_name: vaultmaster-redis
     restart: unless-stopped
     command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    environment:
+      TZ: Europe/Stockholm
     volumes:
       - redisdata:/data
     ports:
@@ -77,6 +86,8 @@ services:
     command: celery -A api.tasks.celery_app worker -l info -c 1 -Q backup,rotation,notification,validation
     env_file:
       - .env
+    environment:
+      TZ: Europe/Stockholm
     volumes:
       - ./api:/app/api
       - /mnt/backup:/mnt/backup
@@ -84,7 +95,16 @@ services:
       - /srv/archive/tmp/vaultmaster:/tmp/vaultmaster
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /root/.ssh:/root/.ssh:ro
-      - /root/.config/rclone:/root/.config/rclone:ro
+      # Must be writable: rclone persists refreshed OAuth tokens back into its
+      # config. Mounted :ro until 2026-07-19, which made every Drive operation
+      # exit non-zero with "Failed to save config after 10 tries" even when the
+      # operation itself succeeded. Deletes looked like failures, and an
+      # expiring refresh token would eventually have taken uploads down too.
+      - /root/.config/rclone:/root/.config/rclone
+      # age private identity, read-only. Only the worker gets it: it is the
+      # only service that decrypts (restore + hourly restore-validation).
+      # api and beat deliberately do not mount it.
+      - /etc/vaultmaster/age-identity.key:/etc/vaultmaster/age-identity.key:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -104,6 +124,8 @@ services:
     command: celery -A api.tasks.celery_app beat -l info --schedule /tmp/celerybeat-schedule
     env_file:
       - .env
+    environment:
+      TZ: Europe/Stockholm
     volumes:
       - ./api:/app/api
     depends_on:
@@ -116,8 +138,14 @@ services:
 
 volumes:
   pgdata:
+    # Legacy PG16 cluster, kept as the rollback copy of the 2026-10-17
+    # upgrade. Production data lives in pgdata17; do not mount this one
+    # for the db service.
+  pgdata17:
   redisdata:
 
 networks:
   vaultmaster:
     driver: bridge
+  arc-vm-link:
+    external: true

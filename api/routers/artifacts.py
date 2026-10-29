@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, desc, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
@@ -8,7 +8,7 @@ from datetime import datetime
 from api.auth import get_current_user
 from api.database import get_db
 from api.models.backup_artifact import BackupArtifact
-from api.schemas import BackupArtifactOut
+from api.schemas import BackupArtifactOut, RestoreRequest
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"], dependencies=[Depends(get_current_user)])
 
@@ -64,19 +64,40 @@ async def get_artifact(artifact_id: uuid.UUID, db: AsyncSession = Depends(get_db
     return artifact
 
 
-@router.post("/{artifact_id}/restore")
+@router.post("/{artifact_id}/restore", status_code=status.HTTP_202_ACCEPTED)
 async def restore_artifact(
     artifact_id: uuid.UUID,
-    target_server_id: uuid.UUID | None = None,
-    target_db_name: str | None = None,
+    body: RestoreRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    """Queue a restore with an explicit target, validated per artifact type.
+
+    The UI used to call this with no body at all, the task then refused the
+    order, and the caller was told "queued" anyway: a restore button that
+    reported work it had ordered and work that would never happen. The
+    requirements are checked HERE now, so an incomplete order gets 422 with
+    the reason instead of a task id.
+    """
     result = await db.execute(select(BackupArtifact).where(BackupArtifact.id == artifact_id))
     artifact = result.scalar_one_or_none()
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
+
+    from api.tasks.backup_tasks import restore_request_error
+    error = restore_request_error(
+        artifact.backup_type, body.target_server_id, body.target_db_name, body.target_path
+    )
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+
     from api.tasks.backup_tasks import run_restore_task
-    task = run_restore_task.delay(str(artifact_id), str(target_server_id) if target_server_id else None, target_db_name)
+    task = run_restore_task.delay(
+        str(artifact_id),
+        str(body.target_server_id) if body.target_server_id else None,
+        body.target_db_name,
+        body.target_path,
+        body.confirm_overwrite,
+    )
     return {"task_id": task.id, "status": "queued", "artifact_id": str(artifact_id)}
 
 

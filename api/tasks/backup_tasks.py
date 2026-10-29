@@ -13,6 +13,155 @@ from api.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+def summarise_transfers(results: list[tuple[str, bool]]) -> dict:
+    """Decide what a set of per-destination transfer outcomes actually means.
+
+    Extracted so the decision is testable on its own. Until 2026-07-19 it was
+    inline and wrong: a failed transfer was logged, the artifact row was created
+    anyway pointing at the SOURCE temp path, and the temp file was then deleted
+    unconditionally. The backup existed in neither place and the run said
+    'success'.
+
+    `safe_to_delete_source` is deliberately strict. The source copy may only go
+    once EVERY destination has its own copy. A partial success still needs the
+    source, because the destination that failed has to be retried from
+    somewhere. Keeping a temp file costs disk; deleting it too early costs the
+    backup.
+    """
+    if not results:
+        return {"any_ok": False, "all_ok": False, "safe_to_delete_source": False,
+                "ok_count": 0, "total": 0, "failed": []}
+
+    ok_count = sum(1 for _, ok in results if ok)
+    failed = [dest for dest, ok in results if not ok]
+    all_ok = ok_count == len(results)
+    return {
+        "any_ok": ok_count > 0,
+        "all_ok": all_ok,
+        "safe_to_delete_source": all_ok,
+        "ok_count": ok_count,
+        "total": len(results),
+        "failed": failed,
+    }
+
+
+_UNVERIFIABLE_CHECKSUMS = {"", "pending", None}
+
+
+def restore_request_error(backup_type, target_server_id, target_db_name, target_path) -> str | None:
+    """What is missing from a restore order, or None if it is complete.
+
+    Pure so the router can refuse malformed orders with 422 before queuing
+    anything, and the task can refuse again for its own callers. The target
+    of a restore is never inferred: restoring overwrites whatever is there,
+    so each type names its own required target fields explicitly.
+    """
+    bt = (backup_type or "").lower()
+    if not target_server_id:
+        return "target_server_id is required for every restore: the target is never inferred."
+    if bt == "postgresql":
+        if not target_db_name:
+            return "postgresql restore requires target_db_name (restore overwrites it)."
+        return None
+    if bt == "files":
+        if not target_path or not str(target_path).startswith("/"):
+            return "files restore requires an absolute target_path to extract into."
+        return None
+    if bt == "docker_volumes":
+        return None  # staging-only restore needs nothing more
+    if bt in ("restic",):
+        return "restic restores are performed from the restic repository itself; not via this task."
+    return f"restore is not implemented for backup_type {backup_type!r}."
+
+
+def checksum_verdict(stored: str | None, computed: str | None) -> dict:
+    """Compare a recorded checksum against a freshly computed one.
+
+    Four outcomes, deliberately distinct. Collapsing them into a boolean is how
+    "we could not check" ends up looking like "we checked and it was fine":
+
+      verified     stored and computed agree
+      corrupt      they disagree, the artifact is not what was written
+      unverifiable no checksum was ever recorded, so nothing can be compared
+      unreadable   the artifact could not be hashed now (gone, unreachable)
+
+    Only `verified` is a pass.
+    """
+    s = (stored or "").strip().lower()
+    c = (computed or "").strip().lower()
+
+    if s in _UNVERIFIABLE_CHECKSUMS or not s:
+        return {"ok": False, "status": "unverifiable",
+                "detail": f"no checksum was recorded for this artifact (stored={stored!r})"}
+    if not c:
+        return {"ok": False, "status": "unreadable",
+                "detail": "could not compute a checksum for the stored file"}
+    if s == c:
+        return {"ok": True, "status": "verified", "detail": "checksums match"}
+    return {"ok": False, "status": "corrupt",
+            "detail": f"stored {s[:16]}... does not match computed {c[:16]}..."}
+
+
+def transfer_allowed(dest, is_encrypted: bool) -> tuple[bool, str]:
+    """Decide whether an artifact may be sent to a given destination.
+
+    Policy (Chrille, 2026-07-19): nothing unencrypted may sit on Google Drive.
+
+    Enforced here rather than left to per-job configuration, because a rule
+    that lives only in an `encrypt` column on 47 job rows holds only until
+    somebody adds job 48. This is the boundary every artifact crosses on its
+    way off this machine, so it is the one place the invariant can actually be
+    guaranteed.
+
+    The local archive is exempt: it sits on our own disk under our own access
+    control, and refusing plaintext there would leave a job with no copy at all
+    rather than a less-protected one. Off-box is where the exposure is.
+    """
+    if getattr(dest, "backend", "local") == "local":
+        return True, ""
+    if is_encrypted:
+        return True, ""
+    return False, (
+        f"Refusing to send an UNENCRYPTED artifact to off-site destination "
+        f"'{getattr(dest, 'name', '?')}'. Policy: nothing unencrypted leaves this "
+        f"host. Set encrypt=true on the job."
+    )
+
+
+def withdraw_from_cleanup(entries: list, server, path: str) -> list:
+    """Remove one (server, path) pair from the guaranteed-cleanup list.
+
+    The finally block in _run_backup deletes every registered temp file no
+    matter how the run ended, which is correct for the normal case: an orphaned
+    temp file would otherwise leak forever.
+
+    It is wrong for the one case where the temp file is the only surviving copy.
+    When a destination fails, the source must be kept so the transfer can be
+    retried, and that decision has to physically withdraw the file from the
+    cleanup list. An earlier version only logged its intention and let the
+    finally block delete the file anyway, so the log claimed the source was
+    preserved while it was being removed. Announcing a decision is not the same
+    as taking it.
+    """
+    return [(s, p) for (s, p) in entries if not (s is server and p == path)]
+
+
+def file_is_free(fuser_rc: int | None) -> bool:
+    """True only when `fuser` positively reported the file as unused.
+
+    `fuser -s` exits 0 when a file IS in use and 1 when it is not. Every other
+    exit code means the check itself did not work: 127 for a missing binary,
+    126 for permission denied, and so on. Treating those as "not in use" (which
+    is what the code did until 2026-07-19) silently disarms the guard protecting
+    in-flight backup files, so a host without `fuser` installed would delete
+    archives mid-write.
+
+    Anything other than a clean rc=1 is treated as unknown, and unknown means
+    do not delete.
+    """
+    return fuser_rc == 1
+
+
 def _run_async(coro):
     """Helper to run async code from sync Celery tasks."""
     loop = asyncio.new_event_loop()
@@ -145,7 +294,30 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
             if rp and not result_data.get("skip_transfer"):
                 temp_files_to_clean.append((server, rp))
 
-            if result_data["success"]:
+            # An operator may have cancelled while we were working. The cancel
+            # endpoint flips the row to 'cancelled' and revokes with SIGTERM,
+            # but the revoke is best-effort: broker down, or a legacy run with
+            # no celery_task_id, and this process never hears about it. The
+            # write below then said 'success' over the operator's 'cancelled',
+            # so the API's answer was true for 30 seconds and then silently
+            # unmade. Re-read before writing: the row is the contract.
+            await db.refresh(run)
+            was_cancelled = run.status == "cancelled"
+            if was_cancelled:
+                logger.warning(
+                    "[%s] run was cancelled by operator while executing; "
+                    "keeping status=cancelled (work result: success=%s)",
+                    run.id, result_data.get("success"),
+                )
+                run.finished_at = datetime.now(timezone.utc)
+                run.error_message = (
+                    "Cancelled by operator during execution. The revoke did not "
+                    "reach the worker, so the backup itself ran to completion; "
+                    "any artifact produced was discarded with the temp files."
+                )
+                run.log_lines = result_data.get("logs", [])
+                await db.commit()
+            elif result_data["success"]:
                 run.status = "success"
                 run.size_bytes = result_data.get("size_bytes", 0)
                 run.log_lines = result_data.get("logs", [])
@@ -208,6 +380,8 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             logger.warning(f"[{run.id}] SFTP download failed: {msg}")
 
                     # Copy to each storage destination
+                    transfer_results: list[tuple[str, bool]] = []
+                    dest_names: dict[str, str] = {}
                     for dest_id in (job.destination_ids or []):
                         dest_result = await db.execute(
                             select(StorageDestination).where(StorageDestination.id == dest_id)
@@ -223,20 +397,43 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             logger.info(f"[{run.id}] Skipping inactive destination {dest.name}")
                             continue
 
+                        dest_names[str(dest_id)] = dest.name
                         # Build sub-path: server_name/job_name/filename
                         sub_path = f"{server.name}/{job.name}/{filename}"
                         stored_path = ""
+                        transferred = False
+
+                        may_send, refusal = transfer_allowed(
+                            dest, bool(result_data.get("is_encrypted", False))
+                        )
+                        if not may_send:
+                            logger.error(f"[{run.id}] {refusal}")
+                            transfer_results.append((str(dest_id), False))
+                            continue
 
                         if local_file:
                             ok, msg = await copy_file_to_storage(dest, local_file, sub_path)
                             if ok:
+                                # msg is the stored path now, not a sentence.
                                 stored_path = msg
+                                transferred = True
                                 logger.info(f"[{run.id}] Transferred to {dest.name}: {msg}")
                             else:
                                 logger.error(f"[{run.id}] Transfer to {dest.name} failed: {msg}")
                         else:
-                            logger.warning(f"[{run.id}] No local file available — recording artifact with remote_path only")
-                            stored_path = remote_path
+                            logger.error(
+                                f"[{run.id}] No local file available for {dest.name}; "
+                                f"nothing was transferred"
+                            )
+
+                        transfer_results.append((str(dest_id), transferred))
+
+                        # Only record an artifact for a destination that actually
+                        # received the file. Recording one for a failed transfer
+                        # (which is what happened until 2026-07-19) tells restore
+                        # a copy exists where none does.
+                        if not transferred:
+                            continue
 
                         artifact = BackupArtifact(
                             run_id=run.id,
@@ -245,7 +442,7 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             remote_path=stored_path or remote_path,
                             size_bytes=result_data.get("size_bytes", 0),
                             checksum_sha256=result_data.get("checksum_sha256") or "pending",
-                            is_encrypted=job.encrypt,
+                            is_encrypted=bool(result_data.get("is_encrypted", False)),
                             backup_type=job.backup_type,
                             tags=job.tags,
                             domain=job.domain,
@@ -262,13 +459,71 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                         except OSError:
                             pass
 
-                    # Cleanup: remove temp file from source server work_dir
-                    if remote_path:
-                        await delete_remote_file(server, remote_path)
-                        logger.info(f"[{run.id}] Cleaned up remote temp file: {remote_path}")
+                    # Cleanup: remove the source temp file ONLY once every
+                    # destination has its own copy.
+                    #
+                    # This used to be an unconditional delete. Combined with the
+                    # artifact row being written even for failed transfers, a
+                    # failing destination produced: no copy at the destination,
+                    # no copy at the source, an artifact claiming both, and a run
+                    # marked 'success'. Total silent data loss, reported green.
+                    summary = summarise_transfers(transfer_results)
+
+                    if summary["safe_to_delete_source"]:
+                        if remote_path:
+                            await delete_remote_file(server, remote_path)
+                            logger.info(f"[{run.id}] Cleaned up remote temp file: {remote_path}")
+                    else:
+                        # Withdraw it from the finally-block cleanup, otherwise
+                        # this branch only logs an intention that the finally
+                        # block then overrides.
+                        temp_files_to_clean = withdraw_from_cleanup(
+                            temp_files_to_clean, server, remote_path
+                        )
+                        logger.error(
+                            f"[{run.id}] KEEPING source file {remote_path}: only "
+                            f"{summary['ok_count']}/{summary['total']} destination(s) "
+                            f"received it. Failed: {summary['failed']}. "
+                            f"Withdrawn from temp cleanup so it can be retried."
+                        )
+
+                    # A run where nothing reached storage is not a success. The
+                    # whole point of the job is the copy at the destination.
+                    if not summary["any_ok"]:
+                        raise Exception(
+                            f"Backup produced a file but no destination accepted it "
+                            f"(0/{summary['total']} transfers succeeded). The source "
+                            f"copy has been kept at {remote_path}."
+                        )
+                    if not summary["all_ok"]:
+                        # Local import: the module-level one above lives inside
+                        # the skip_transfer branch, which does not run here.
+                        from api.services.notifier import notify_event as _notify
+                        await _notify(db, "backup.partial_transfer", {
+                            "job_name": job.name,
+                            "ok": summary["ok_count"],
+                            "total": summary["total"],
+                            "failed_destinations": ", ".join(
+                                dest_names.get(d, d) for d in summary["failed"]
+                            ),
+                        })
+
+                elif filename and (job.destination_ids or []):
+                    # Destinations ARE configured, yet the transfer block above
+                    # was skipped, which means remote_path came back empty. That
+                    # is a broken executor contract, not a "no destinations"
+                    # case. Recording artifacts here would point them at an
+                    # empty path and call the run a success, which is how custom
+                    # jobs silently never left staging for 615 runs.
+                    raise Exception(
+                        f"Executor produced '{filename}' but no usable remote_path, "
+                        f"while {len(job.destination_ids)} destination(s) are configured. "
+                        "Refusing to record artifacts for a transfer that never happened."
+                    )
 
                 elif filename:
-                    # No destinations configured — just record artifacts without transfer
+                    # Genuinely no destinations configured: record the artifact
+                    # against nothing so the run is still traceable.
                     for dest_id in (job.destination_ids or []):
                         artifact = BackupArtifact(
                             run_id=run.id,
@@ -277,7 +532,7 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                             remote_path=remote_path,
                             size_bytes=result_data.get("size_bytes", 0),
                             checksum_sha256=result_data.get("checksum_sha256") or "pending",
-                            is_encrypted=job.encrypt,
+                            is_encrypted=bool(result_data.get("is_encrypted", False)),
                             backup_type=job.backup_type,
                             tags=job.tags,
                             domain=job.domain,
@@ -388,18 +643,718 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                         logger.warning(f"[{run.id}] finally: cleanup of {path} failed: {cleanup_err}")
 
 
+@celery_app.task(name="api.tasks.backup_tasks.reap_stale_runs")
+def reap_stale_runs():
+    """Fail runs that have been 'running' far longer than any job could take.
+
+    Added 2026-07-19 after two runs were orphaned by a worker recreation during
+    their upload phase. A run whose worker dies keeps status='running' forever,
+    and check_scheduled_jobs skips a job while a previous run is still in
+    progress. So the job silently stops backing up: no failure, no alert, just
+    absence. `Home: Chrille` (tagged critical) went unbacked-up for 8 hours
+    that way, and PlastShop Odoo DB with it.
+
+    Silence is the dangerous part. A stuck run must become a visible failure,
+    because a failed backup gets noticed and a missing one does not.
+
+    Time-based rather than heartbeat-based on purpose: a heartbeat needs the
+    worker to be alive to report, which is exactly what is not true here. The
+    threshold is deliberately generous (default 6h) since the longest real run
+    is a 23 GB archive plus its upload.
+    """
+    return _run_async(_do_reap_stale_runs())
+
+
+async def _do_reap_stale_runs():
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from api.models.backup_job import BackupJob
+    from api.models.backup_run import BackupRun
+    from api.services.notifier import notify_event
+
+    settings = get_settings()
+    hours = int(getattr(settings, "stale_run_hours", 6) or 6)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    async with get_task_session() as db:
+        stale = (await db.execute(
+            select(BackupRun, BackupJob)
+            .join(BackupJob, BackupJob.id == BackupRun.job_id)
+            .where(BackupRun.status == "running", BackupRun.started_at < cutoff)
+        )).all()
+
+        # No early return here. The validation sweep below must run even when
+        # zero backup runs are stale, and today's real case was exactly that:
+        # one stuck validation, no stuck backups. An early return would have
+        # made the new sweep dead code on the most common path.
+        names = []
+        for run, job in stale:
+            age = datetime.now(timezone.utc) - run.started_at
+            run.status = "failed"
+            run.finished_at = datetime.now(timezone.utc)
+            run.error_message = (
+                f"Abandoned: still 'running' after {age.total_seconds() / 3600:.1f}h "
+                f"(threshold {hours}h). The worker executing it most likely died "
+                f"mid-run. Marked failed so the schedule is released."
+            )
+            names.append(job.name)
+            logger.warning(
+                "reap_stale_runs: %s run %s abandoned after %.1fh, marked failed",
+                job.name, run.id, age.total_seconds() / 3600,
+            )
+
+        if stale:
+            await db.commit()
+            await notify_event(db, "run.abandoned", {
+                "count": len(stale),
+                "jobs": ", ".join(sorted(set(names))),
+                "threshold_hours": hours,
+            })
+            await db.commit()
+
+        # Validation runs get orphaned the same way and had no reaper at all:
+        # a worker restart on 2026-07-20 left one stuck in 'running' with
+        # nothing ever coming back for it. The scheduling gate only looks at
+        # passed/failed so a stuck row does not block validation any more, but
+        # a row that claims to be running while nothing runs is still a false
+        # report, and the UI repeats it. Validations finish in minutes, so a
+        # 2h threshold is generous.
+        from api.models.backup_validation_run import BackupValidationRun
+
+        v_cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+        stale_validations = (await db.execute(
+            select(BackupValidationRun)
+            .where(BackupValidationRun.status == "running",
+                   BackupValidationRun.created_at < v_cutoff)
+        )).scalars().all()
+        for v in stale_validations:
+            v.status = "failed"
+            v.finished_at = datetime.now(timezone.utc)
+            v.error_message = (
+                "Abandoned: still 'running' after 2h. The worker executing it "
+                "most likely died mid-validation."
+            )
+            logger.warning("reap_stale_runs: validation %s abandoned, marked failed", v.id)
+        if stale_validations:
+            await db.commit()
+
+        # The rows above are bookkeeping. These are the actual leftovers: the
+        # validator's cleanup lives in a finally block, and a worker killed
+        # mid-validation never runs finally. Observed 2026-07-20: one temp
+        # postgres container 27h old, another 2h, and 22 GB of decrypted dump
+        # sitting in the shared tmp dir. Nothing swept any of it.
+        from api.services.restore_validator import SHARED_TMP, _run
+
+        reaped_containers = 0
+        sweep_errors = 0
+        code, out, err = await _run(
+            ["docker", "ps", "-a", "--filter", "name=vm-validate-",
+             "--format", "{{.Names}}"], timeout=30)
+        if code != 0:
+            # A failed listing is not "no containers".
+            logger.error("reap: could not list vm-validate containers: %s",
+                         (err or "").strip()[:200])
+            sweep_errors += 1
+        else:
+            for name in [n.strip() for n in (out or "").splitlines() if n.strip()]:
+                c2, created_raw, err2 = await _run(
+                    ["docker", "inspect", "-f", "{{.Created}}", name], timeout=15)
+                if c2 != 0:
+                    logger.error("reap: could not inspect %s: %s", name,
+                                 (err2 or "").strip()[:120])
+                    sweep_errors += 1
+                    continue
+                try:
+                    created = datetime.fromisoformat(
+                        created_raw.strip().split(".")[0]
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    logger.error("reap: unparseable Created %r for %s",
+                                 created_raw.strip()[:40], name)
+                    sweep_errors += 1
+                    continue
+                if datetime.now(timezone.utc) - created < timedelta(hours=2):
+                    continue
+                c3, _, err3 = await _run(["docker", "rm", "-f", name], timeout=30)
+                if c3 == 0:
+                    reaped_containers += 1
+                    logger.warning("reap: removed orphaned validation container %s "
+                                   "(created %s)", name, created_raw.strip()[:19])
+                else:
+                    logger.error("reap: failed to remove %s: %s", name,
+                                 (err3 or "").strip()[:120])
+                    sweep_errors += 1
+
+        # Workdirs under the shared tmp. Same 2h threshold; a live validation
+        # is minutes old. Sized before removal so the log states what was
+        # actually reclaimed, not what we hoped.
+        import shutil
+
+        reaped_dirs = 0
+        reclaimed_tmp_bytes = 0
+        try:
+            entries = list(os.scandir(SHARED_TMP))
+        except OSError as exc:
+            logger.error("reap: cannot scan %s: %s", SHARED_TMP, exc)
+            entries = []
+            sweep_errors += 1
+        for entry in entries:
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                age = datetime.now(timezone.utc).timestamp() - entry.stat().st_mtime
+                if age < 7200:
+                    continue
+                dir_size = sum(
+                    f.stat().st_size for f in os.scandir(entry.path)
+                    if f.is_file(follow_symlinks=False)
+                )
+                shutil.rmtree(entry.path)
+                reaped_dirs += 1
+                reclaimed_tmp_bytes += dir_size
+                logger.warning("reap: removed stale validation workdir %s (%.1f GB)",
+                               entry.name, dir_size / 1e9)
+            except OSError as exc:
+                logger.error("reap: failed to remove workdir %s: %s", entry.name, exc)
+                sweep_errors += 1
+
+        return {"reaped": len(stale), "jobs": names,
+                "reaped_validations": len(stale_validations),
+                "reaped_containers": reaped_containers,
+                "reaped_workdirs": reaped_dirs,
+                "reclaimed_tmp_bytes": reclaimed_tmp_bytes,
+                "sweep_errors": sweep_errors}
+
+
 @celery_app.task(name="api.tasks.backup_tasks.run_restore_task")
-def run_restore_task(artifact_id: str, target_server_id: str | None = None, target_db_name: str | None = None):
-    """Restore a backup artifact."""
-    logger.info(f"Restore task queued for artifact {artifact_id}")
-    # TODO: Implement restore logic (download artifact, decrypt, pg_restore/tar extract)
+def run_restore_task(artifact_id: str, target_server_id: str | None = None, target_db_name: str | None = None,
+                     target_path: str | None = None, confirm_overwrite: bool = False):
+    """Restore a backup artifact to an explicitly named target.
+
+    Previously this was a stub that logged "queued" and returned, which is worse
+    than not existing: a caller could reasonably believe a restore had happened.
+
+    Restoring overwrites whatever is in the target, so the target is never
+    inferred. What the target means per type, and what each requires:
+
+      postgresql:     target database named explicitly (target_db_name)
+      files:          extract the tar into target_path on the target server;
+                      refuses a non-empty directory unless confirm_overwrite
+      docker_volumes: extract to a staging directory on the target server and
+                      report the volume directories found; with target_path AND
+                      confirm_overwrite the volumes are moved into place there
+                      (e.g. /var/lib/docker/volumes), which the operator does
+                      deliberately with the affected stack stopped
+
+    Non-destructive verification lives in api.services.restore_validator, which
+    restores into a throwaway container and is what the hourly validation sweep
+    uses. Prefer that for "does this backup work?".
+    """
+    return _run_async(_run_restore(artifact_id, target_server_id, target_db_name,
+                                   target_path, confirm_overwrite))
+
+
+async def _run_restore(artifact_id: str, target_server_id: str | None, target_db_name: str | None,
+                       target_path: str | None = None, confirm_overwrite: bool = False):
+    import shlex
+    import shutil
+    import tempfile
+
+    from sqlalchemy import select
+
+    from api.models.backup_artifact import BackupArtifact
+    from api.models.server import Server
+    from api.services import age_crypto
+    from api.services.restore_validator import _download_artifact_to_temp, _decrypt_if_needed, _run
+    from api.services.ssh_client import run_remote_command, upload_remote_file
+
+    logs: list[str] = []
+
+    def log(msg: str) -> None:
+        logs.append(msg)
+        logger.info(f"[restore {artifact_id}] {msg}")
+
+    if not target_server_id:
+        msg = (
+            "Restore refused: target_server_id is required. The restore target "
+            "is never inferred, because restoring overwrites it. To verify a "
+            "backup without overwriting anything, use the restore validator "
+            "(it restores into a throwaway container)."
+        )
+        logger.error(f"[restore {artifact_id}] {msg}")
+        return {"status": "refused", "error": msg}
+
+    workdir = tempfile.mkdtemp(prefix="vm-restore-")
+    try:
+        async with get_task_session() as db:
+            artifact = (await db.execute(
+                select(BackupArtifact).where(BackupArtifact.id == uuid.UUID(str(artifact_id)))
+            )).scalar_one_or_none()
+            if not artifact:
+                return {"status": "failed", "error": f"artifact {artifact_id} not found"}
+
+            req_error = restore_request_error(
+                artifact.backup_type, target_server_id, target_db_name, target_path
+            )
+            if req_error:
+                logger.error(f"[restore {artifact_id}] {req_error}")
+                return {"status": "refused", "error": req_error, "logs": logs}
+
+            server = (await db.execute(
+                select(Server).where(Server.id == uuid.UUID(str(target_server_id)))
+            )).scalar_one_or_none()
+            if not server:
+                return {"status": "failed", "error": f"target server {target_server_id} not found"}
+
+            filename = artifact.filename or "restore.dump.gz"
+            backup_type = artifact.backup_type
+
+            # Restore has to run where the dump was produced, with the same
+            # client version and role. Running it on the host instead failed two
+            # ways at once: the host's pg_restore is older than the source
+            # server (PG 17 writes archive 1.16, which pg_restore 16 rejects),
+            # and psql connected as the sudo user, giving "role root does not
+            # exist". The backup path already knew all this; the restore path
+            # was written without looking at it.
+            from api.models.backup_job import BackupJob
+            from api.models.backup_run import BackupRun
+
+            src_job = (await db.execute(
+                select(BackupJob)
+                .join(BackupRun, BackupRun.job_id == BackupJob.id)
+                .where(BackupRun.id == artifact.run_id)
+            )).scalar_one_or_none()
+            src_cfg = (src_job.source_config if src_job else {}) or {}
+            src_container = src_cfg.get("container")
+            src_user = src_cfg.get("username") or src_cfg.get("pg_user") or "postgres"
+
+        local_path = os.path.join(workdir, filename)
+        log(f"downloading {filename}")
+        ok, msg = await _download_artifact_to_temp(artifact, local_path)
+        if not ok:
+            return {"status": "failed", "error": f"download failed: {msg}", "logs": logs}
+
+        if not os.path.isfile(local_path) or os.path.getsize(local_path) == 0:
+            return {"status": "failed", "error": "downloaded artifact is 0 bytes", "logs": logs}
+
+        # Dispatch on magic bytes, not artifact.is_encrypted. That column is
+        # untrustworthy for anything written before 2026-07-19.
+        local_path = await _decrypt_if_needed(local_path, lambda _lvl, m: log(m))
+
+        if backup_type == "files":
+            return await _restore_files_to_target(
+                server, local_path, str(artifact_id), target_path or "",
+                confirm_overwrite, logs,
+            )
+        if backup_type == "docker_volumes":
+            return await _restore_volumes(
+                server, local_path, str(artifact_id), target_path,
+                confirm_overwrite, logs,
+            )
+
+        db_q = shlex.quote(target_db_name)
+        log(f"restoring into database {target_db_name} on {server.name}")
+
+        remote_tmp = f"/tmp/vaultmaster/restore_{artifact_id}"
+        await run_remote_command(server, f"mkdir -p {shlex.quote(os.path.dirname(remote_tmp))}")
+
+        # Use the shared SSH helper, not raw scp. scp with server.host verbatim
+        # resolves 127.0.0.1 to this container's loopback rather than the Docker
+        # host, so every restore failed with "connection refused" on a port that
+        # was open the whole time. _build_connect_kwargs knows how to reach the
+        # host; going around it threw that knowledge away.
+        ok, msg = await upload_remote_file(server, local_path, remote_tmp)
+        if not ok:
+            return {"status": "failed", "error": f"upload to target failed: {msg[:300]}", "logs": logs}
+
+        # Same masking hazard as restore_validator: a bare `pg_restore || psql`
+        # reports only the fallback's status, so a failed restore looks like a
+        # success. Each reader's outcome is captured explicitly instead, and
+        # ON_ERROR_STOP makes psql fail on the first error rather than plough on.
+        q = shlex.quote(remote_tmp)
+        # Wrapped in bash explicitly. `set -o pipefail` bare would run under
+        # whatever /bin/sh is, and run_remote_command puts sudo'd commands
+        # through `sh -c`, which on Ubuntu is dash: "Illegal option -o pipefail".
+        # Same reasoning as age_crypto.wrap_pipeline, which got this right; this
+        # call site did not.
+        u_q = shlex.quote(src_user)
+        if src_container:
+            # Stream the dump into the database container over stdin, matching
+            # how the backup produced it (docker exec ... pg_dump).
+            c_q = shlex.quote(src_container)
+            pg_restore = f"docker exec -i {c_q} pg_restore -U {u_q} --no-owner --no-acl -d {db_q}"
+            psql = f"docker exec -i {c_q} psql -U {u_q} -d {db_q} -v ON_ERROR_STOP=1"
+        else:
+            pg_restore = f"pg_restore -U {u_q} --no-owner --no-acl -d {db_q}"
+            psql = f"psql -U {u_q} -d {db_q} -v ON_ERROR_STOP=1"
+
+        inner = (
+            f"if gunzip -c {q} | {pg_restore} 2>&1; then "
+            f"  echo 'VM_RESTORE_VIA=pg_restore'; "
+            f"elif gunzip -c {q} | {psql} 2>&1; then "
+            f"  echo 'VM_RESTORE_VIA=psql'; "
+            f"else "
+            f"  echo 'VM_RESTORE_VIA=none'; exit 1; "
+            f"fi"
+        )
+        restore_cmd = f"bash -o pipefail -c {shlex.quote(inner)}"
+        exit_code, stdout, stderr = await run_remote_command(server, restore_cmd, timeout=7200)
+        await run_remote_command(server, f"rm -f {shlex.quote(remote_tmp)}")
+
+        if exit_code != 0:
+            return {
+                "status": "failed",
+                "error": f"restore failed (exit {exit_code}): {(stderr or stdout or '').strip()[:500]}",
+                "logs": logs,
+            }
+
+        log("restore completed")
+        return {"status": "completed", "target_db": target_db_name, "logs": logs}
+
+    except Exception as e:
+        logger.exception(f"[restore {artifact_id}] failed")
+        return {"status": "failed", "error": f"{type(e).__name__}: {e}", "logs": logs}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def _upload_and_extract(server, local_path, artifact_id, dest_dir, logs) -> tuple[bool, str]:
+    """Upload the archive to the target server and extract it into dest_dir.
+
+    Shared by the files and docker_volumes restore paths: both are tar.gz
+    archives, both extract on the target host (the data is never
+    re-compressed locally), both clean their temp upload afterwards.
+    Returns (ok, detail). Extraction happens under `bash -o pipefail` so a
+    partial extract cannot report success.
+    """
+    import shlex as _shlex
+
+    from api.services.ssh_client import run_remote_command, upload_remote_file
+
+    remote_tmp = f"/tmp/vm-restores/restore_{artifact_id}"
+    q = _shlex.quote
+    await run_remote_command(server, f"mkdir -p {q('/tmp/vm-restores')} {q(dest_dir)}")
+    ok, msg = await upload_remote_file(server, local_path, remote_tmp)
+    if not ok:
+        return False, f"upload to target failed: {msg[:300]}"
+    try:
+        inner = (
+            f"tar -xzf {q(remote_tmp)} -C {q(dest_dir)} && "
+            f"echo VM_EXTRACT_OK $(tar -tzf {q(remote_tmp)} | wc -l)"
+        )
+        code, out, err = await run_remote_command(
+            server, f"bash -o pipefail -c {q(inner)}", timeout=7200
+        )
+        if code != 0 or "VM_EXTRACT_OK" not in (out or ""):
+            return False, f"extract failed (exit {code}): {(err or out or '').strip()[:300]}"
+        entries = (out or "").split("VM_EXTRACT_OK")[-1].strip().split()[0]
+        return True, entries
+    finally:
+        await run_remote_command(server, f"rm -f {q(remote_tmp)}")
+
+
+async def _restore_files_to_target(server, local_path, artifact_id, target_path,
+                                   confirm_overwrite, logs) -> dict:
+    """Extract a files artifact into target_path on the target server.
+
+    tar semantics, stated rather than hidden: the archive stores paths as
+    they were given to it (leading slash stripped), so extraction below
+    target_path rebuilds that structure. Restoring '/srv/agents/code' into
+    '/' puts it back where it came from; into '/restore/xyz' it becomes
+    '/restore/xyz/srv/agents/code'. The report names the top-level entries
+    so the operator sees exactly what landed where.
+
+    A non-empty target is refused unless confirm_overwrite: an extract over
+    existing files is indistinguishable from corruption until it is too
+    late, and the flag makes it a decision instead of an accident.
+    """
+    import shlex as _shlex
+
+    from api.services.ssh_client import run_remote_command
+
+    q = _shlex.quote
+    logs.append(f"files restore into {target_path} on {server.name}")
+
+    # Refuse to mix into existing content: an extract over populated files
+    # is indistinguishable from corruption until it is too late.
+    code, out, _ = await run_remote_command(
+        server,
+        f"test -d {q(target_path)} && ls -A {q(target_path)} | head -5 || echo VM_NO_DIR",
+    )
+    existing = (out or "").strip()
+    if existing and existing != "VM_NO_DIR" and not confirm_overwrite:
+        return {
+            "status": "refused",
+            "error": (
+                f"target {target_path} exists and is not empty "
+                f"(first entries: {existing.splitlines()[:3]}). "
+                "Restore would mix into existing content. Repeat with "
+                "confirm_overwrite=true only if that is the decision."
+            ),
+            "logs": logs,
+        }
+
+    ok, detail = await _upload_and_extract(server, local_path, artifact_id, target_path, logs)
+    if not ok:
+        return {"status": "failed", "error": detail, "logs": logs}
+
+    code, out, _ = await run_remote_command(
+        server, f"find {q(target_path)} -mindepth 1 -maxdepth 1 | head -20", timeout=120
+    )
+    top = [line.rsplit("/", 1)[-1] for line in (out or "").splitlines() if line.strip()]
+    logs.append(f"extracted {detail} entries; top level now: {', '.join(top[:10])}")
+    return {
+        "status": "completed",
+        "target_path": target_path,
+        "entries": detail,
+        "top_level": top,
+        "logs": logs,
+    }
+
+
+async def _restore_volumes(server, local_path, artifact_id, target_path,
+                           confirm_overwrite, logs) -> dict:
+    """docker_volumes restore: extract to staging, optionally move into place.
+
+    The archive contains volume directories (each with _data below it).
+    Stage-one always runs and is safe: nothing outside /tmp on the target
+    changes, and the report names every volume directory found in the
+    archive. Stage-two (target_path + confirm_overwrite) moves each volume
+    directory into target_path, REPLACING what is already there: that is a
+    deliberate act with the affected stack stopped, which is why it needs
+    both a real path and the flag.
+    """
+    import shlex as _shlex
+
+    from api.services.ssh_client import run_remote_command
+
+    q = _shlex.quote
+    staging = f"/tmp/vm-restores/vmrestore_{artifact_id}"
+    logs.append(f"docker_volumes restore: extracting to staging {staging} on {server.name}")
+
+    ok, detail = await _upload_and_extract(server, local_path, artifact_id, staging, logs)
+    if not ok:
+        return {"status": "failed", "error": detail}
+
+    code, out, _ = await run_remote_command(
+        server,
+        f"find {q(staging)} -type d -name _data -printf '%h\\n' | sed 's|.*/||' | sort -u",
+        timeout=300,
+    )
+    volumes = sorted(v for v in (out or "").splitlines() if v.strip())
+    if not volumes:
+        await run_remote_command(server, f"rm -rf {q(staging)}")
+        return {"status": "failed", "error": "no volume directories (_data) found in archive"}
+
+    moved = []
+    if confirm_overwrite and target_path:
+        for vol in volumes:
+            src = f"{staging}/var/lib/docker/volumes/{vol}"
+            code, _, err = await run_remote_command(
+                server,
+                f"test -d {q(src)} && rm -rf {q(target_path + '/' + vol)} && "
+                f"mv {q(src)} {q(target_path + '/' + vol)} && echo VM_MOVED",
+                timeout=600,
+            )
+            if code != 0:
+                await run_remote_command(server, f"rm -rf {q(staging)}")
+                return {"status": "failed", "error": f"moving volume {vol} failed: {(err or '').strip()[:200]}",
+                        "moved_before_failure": moved, "volumes": volumes}
+            moved.append(vol)
+        await run_remote_command(server, f"rm -rf {q(staging)}")
+        logs.append(f"moved into place under {target_path}: {', '.join(moved)}")
+        return {"status": "completed", "mode": "in-place", "target_path": target_path,
+                "volumes": volumes, "moved": moved}
+
+    logs.append(f"staged {len(volumes)} volume(s): {', '.join(volumes[:10])}; staging kept for inspection")
+    return {
+        "status": "completed",
+        "mode": "staging",
+        "staging_path": staging,
+        "volumes": volumes,
+        "hint": (
+            f"Volumes are extracted to {staging} on {server.name}. Repeat with "
+            f"target_path=/var/lib/docker/volumes and confirm_overwrite=true to "
+            f"replace the live volumes (stop the affected stack first)."
+        ),
+    }
 
 
 @celery_app.task(name="api.tasks.backup_tasks.verify_artifact_checksum")
 def verify_artifact_checksum(artifact_id: str):
-    """Verify the checksum of a stored artifact."""
-    logger.info(f"Checksum verification queued for artifact {artifact_id}")
-    # TODO: Implement checksum verification
+    """Verify that a stored artifact still hashes to its recorded checksum.
+
+    Was a TODO stub that logged "queued" and returned. It is reachable from the
+    API (api/routers/artifacts.py), so the UI offered a verify action that
+    handed back a task id and checked nothing. Not merely unimplemented: a
+    feature that claimed an integrity check had happened.
+
+    Hashes the file where it lives rather than downloading it, so a 23 GB
+    archive costs a remote hash instead of a transfer.
+    """
+    return _run_async(_do_verify_checksum(artifact_id))
+
+
+async def _verify_remote_via_local_md5(db, artifact, dest, remote_path: str) -> dict:
+    """Verify an off-site copy against the local copy's MD5.
+
+    Returns the same verdict shape as checksum_verdict. See the caller for why
+    this indirection exists (Drive publishes MD5 only).
+    """
+    import json as _json
+    import shlex
+
+    from sqlalchemy import select
+
+    from api.models.backup_artifact import BackupArtifact
+    from api.models.storage_destination import StorageDestination
+    from api.services.rclone_client import _build_backend, _run_rclone, normalize_stored_path
+
+    remote, flags = _build_backend(dest)
+    target = remote_path if ":" in remote_path else f"{remote}/{remote_path}"
+    parent, _, fname = target.rpartition("/")
+
+    code, out, err = await _run_rclone(
+        ["lsjson", "--hash", "--files-only", parent] + flags, timeout=600
+    )
+    if code != 0:
+        return {"ok": False, "status": "unreadable",
+                "detail": f"could not list {parent}: {(err or '').strip()[-120:]}"}
+
+    remote_md5 = ""
+    for item in _json.loads(out or "[]"):
+        if item.get("Name") == fname:
+            remote_md5 = ((item.get("Hashes") or {}).get("md5") or "").lower()
+            break
+    if not remote_md5:
+        return {"ok": False, "status": "unreadable",
+                "detail": f"{fname} not found off-site, or it publishes no MD5"}
+
+    # Find the local sibling of this artifact. The sibling is defined by
+    # run_id: the same backup run wrote both copies, so only a row from the
+    # same run holds the same bytes by construction. Matching on filename
+    # alone (the previous behaviour) picks an arbitrary same-named file, and
+    # custom jobs whose script always writes db.sql.gz, or two servers with
+    # the same database name, then produce false corrupt-verdicts against a
+    # file that was never this artifact's twin. A false alarm on artifact
+    # integrity is expensive: it sends someone hunting a corruption that
+    # does not exist, and teaches them to dismiss the verdict that one day
+    # will be real.
+    local_dest = (await db.execute(
+        select(StorageDestination).where(StorageDestination.backend == "local")
+    )).scalars().first()
+    local_row = None
+    if local_dest:
+        local_row = (await db.execute(
+            select(BackupArtifact).where(
+                BackupArtifact.run_id == artifact.run_id,
+                BackupArtifact.storage_id == local_dest.id,
+                BackupArtifact.is_deleted == False,  # noqa: E712
+            )
+        )).scalars().first()
+
+    local_path = normalize_stored_path(local_row.remote_path or "") if local_row else ""
+    if not local_path or not os.path.isfile(local_path):
+        return {"ok": False, "status": "unverifiable-offsite",
+                "detail": ("off-site copy exists but there is no local copy to compare "
+                           "against, and Drive publishes only MD5. Verifying it would "
+                           "require downloading the whole artifact.")}
+
+    proc = await asyncio.create_subprocess_shell(
+        f"md5sum {shlex.quote(local_path)}",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    mout, _ = await proc.communicate()
+    local_md5 = (mout.decode(errors="replace").split() or [""])[0].lower()
+
+    if not local_md5:
+        return {"ok": False, "status": "unreadable",
+                "detail": f"could not compute MD5 of the local copy at {local_path}"}
+    if local_md5 == remote_md5:
+        return {"ok": True, "status": "verified",
+                "detail": "off-site MD5 matches the local copy byte for byte"}
+    return {"ok": False, "status": "corrupt",
+            "detail": f"off-site MD5 {remote_md5[:12]}... differs from local {local_md5[:12]}..."}
+
+
+async def _do_verify_checksum(artifact_id: str) -> dict:
+    import shlex
+
+    from sqlalchemy import select
+
+    from api.models.backup_artifact import BackupArtifact
+    from api.models.storage_destination import StorageDestination
+    from api.services.rclone_client import _build_backend, _run_rclone, normalize_stored_path
+
+    async with get_task_session() as db:
+        try:
+            art_uuid = uuid.UUID(str(artifact_id))
+        except (ValueError, TypeError):
+            return {"ok": False, "status": "error", "detail": f"bad artifact id {artifact_id!r}"}
+
+        artifact = (await db.execute(
+            select(BackupArtifact).where(BackupArtifact.id == art_uuid)
+        )).scalar_one_or_none()
+        if not artifact:
+            return {"ok": False, "status": "error", "detail": f"artifact {artifact_id} not found"}
+
+        dest = (await db.execute(
+            select(StorageDestination).where(StorageDestination.id == artifact.storage_id)
+        )).scalar_one_or_none()
+        if not dest:
+            return {"ok": False, "status": "error",
+                    "detail": f"storage destination {artifact.storage_id} not found"}
+
+        path = normalize_stored_path(artifact.remote_path or "")
+        computed = ""
+
+        if not path:
+            verdict = {"ok": False, "status": "unreadable",
+                       "detail": "artifact has no usable path"}
+        elif dest.backend == "local":
+            if not os.path.isfile(path):
+                verdict = {"ok": False, "status": "unreadable",
+                           "detail": f"file not present at {path}"}
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    f"sha256sum {shlex.quote(path)}",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                out, _err = await proc.communicate()
+                computed = (out.decode(errors="replace").split() or [""])[0]
+                verdict = checksum_verdict(artifact.checksum_sha256, computed)
+        else:
+            # Google Drive exposes only MD5, never SHA256, so the recorded
+            # SHA256 cannot be checked against it without downloading the whole
+            # artifact. For a 23 GB archive that is not a check anyone will run.
+            #
+            # Verify transitively instead: Drive's MD5 against the MD5 of the
+            # local copy of the same artifact. Combined with the local copy
+            # having been verified against its own SHA256, that establishes the
+            # off-site copy is byte-identical without moving a byte.
+            #
+            # No local copy means no cheap path, and that is reported as such
+            # rather than dressed up as a pass.
+            verdict = await _verify_remote_via_local_md5(db, artifact, dest, path)
+
+        log_at = logger.info if verdict["ok"] else logger.error
+        log_at(
+            "checksum %s for %s (%s): %s",
+            verdict["status"], artifact.filename, dest.name, verdict["detail"],
+        )
+
+        if verdict["status"] == "corrupt":
+            from api.services.notifier import notify_event
+            await notify_event(db, "artifact.corrupt", {
+                "filename": artifact.filename,
+                "destination": dest.name,
+                "detail": verdict["detail"],
+            })
+            await db.commit()
+
+        return {**verdict, "artifact": artifact.filename, "destination": dest.name}
 
 
 @celery_app.task(name="api.tasks.backup_tasks.check_scheduled_jobs")
@@ -504,7 +1459,7 @@ def check_server_health():
 async def _check_health():
     from sqlalchemy import select
     from api.models.server import Server
-    from api.services.ssh_client import test_ssh_connection
+    from api.services.ssh_client import test_ssh_connection, connectivity_is_testable
     from api.services.notifier import notify_event
 
     async with get_task_session() as db:
@@ -515,7 +1470,16 @@ async def _check_health():
             success, message = await test_ssh_connection(server)
             was_online = server.last_seen and (datetime.now(timezone.utc) - server.last_seen).total_seconds() < 600
 
-            if success:
+            if success and not connectivity_is_testable(server):
+                # Nothing was probed, so nothing was learned. Stamping last_seen
+                # here kept API-type servers permanently "seen 0 seconds ago",
+                # which made was_online always true and server.offline
+                # unreachable for exactly the servers we could not verify.
+                logger.info(
+                    "health check: %s is auth_type=api, connectivity NOT verified "
+                    "(%s). Leaving last_seen untouched.", server.name, message,
+                )
+            elif success:
                 server.last_seen = datetime.now(timezone.utc)
                 server.last_error = None
             else:

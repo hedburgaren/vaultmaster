@@ -1,18 +1,26 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getArtifacts, restoreArtifact, verifyArtifact } from '@/lib/api';
+import { getArtifacts, restoreArtifact, verifyArtifact, getServers } from '@/lib/api';
 import { formatBytes, formatDate, formatRelative, backupTypeIcon } from '@/lib/utils';
 import Badge from '@/components/Badge';
-import { RotateCcw, ShieldCheck, Search, Lock, Calendar, Server, Globe, Tag, HardDrive } from 'lucide-react';
+import { RotateCcw, ShieldCheck, Search, Lock, Calendar, Server, Globe, Tag, HardDrive, X, AlertTriangle } from 'lucide-react';
 import { useT } from '@/lib/i18n';
+import { useToast } from '@/components/Toast';
+import { ConfirmModal } from '@/components/ConfirmModal';
+
+const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
+const LABEL = "block font-mono text-[10px] uppercase tracking-[2px] text-vm-text-dim mb-1";
 
 export default function ArtifactsPage() {
   const t = useT();
+  const toast = useToast();
   const [artifacts, setArtifacts] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
+  const [restoreFor, setRestoreFor] = useState<any | null>(null);
+  const [servers, setServers] = useState<any[]>([]);
 
   const load = () => {
     const params = new URLSearchParams();
@@ -22,17 +30,15 @@ export default function ArtifactsPage() {
   };
 
   useEffect(() => { load(); }, [search, typeFilter]);
-
-  const handleRestore = async (id: string) => {
-    if (confirm(t('artifacts.confirm_restore'))) {
-      const res = await restoreArtifact(id);
-      alert(`${t('artifacts.restore_queued')}: ${res.task_id}`);
-    }
-  };
+  useEffect(() => { getServers().then(setServers).catch(() => {}); }, []);
 
   const handleVerify = async (id: string) => {
-    const res = await verifyArtifact(id);
-    alert(`${t('artifacts.verify_queued')}: ${res.task_id}`);
+    try {
+      const res = await verifyArtifact(id);
+      toast.success(`${t('artifacts.verify_queued')}: ${String(res.task_id).slice(0, 8)}…`);
+    } catch (e: any) {
+      toast.error(e.message || 'Verify failed');
+    }
   };
 
   const sel = artifacts.find(a => a.id === selected);
@@ -99,7 +105,7 @@ export default function ArtifactsPage() {
                     <td className="px-4 py-3 text-right font-mono text-sm font-bold text-vm-accent">{formatBytes(a.size_bytes)}</td>
                     <td className="px-4 py-3">
                       <div className="flex gap-1.5">
-                        <button onClick={(e) => { e.stopPropagation(); handleRestore(a.id); }} className="flex items-center gap-1 px-2.5 py-1 bg-vm-success text-vm-bg rounded text-[10px] font-bold tracking-wider uppercase">
+                        <button onClick={(e) => { e.stopPropagation(); setRestoreFor(a); }} className="flex items-center gap-1 px-2.5 py-1 bg-vm-success text-vm-bg rounded text-[10px] font-bold tracking-wider uppercase">
                           <RotateCcw className="w-3 h-3" /> {t('action.restore')}
                         </button>
                       </div>
@@ -189,7 +195,7 @@ export default function ArtifactsPage() {
             </div>
 
             <div className="flex gap-2">
-              <button onClick={() => handleRestore(sel.id)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-vm-success text-vm-bg rounded font-bold text-sm tracking-wider uppercase">
+              <button onClick={() => setRestoreFor(sel)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-vm-success text-vm-bg rounded font-bold text-sm tracking-wider uppercase">
                 <RotateCcw className="w-4 h-4" /> {t('action.restore')}
               </button>
               <button onClick={() => handleVerify(sel.id)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 border border-vm-accent text-vm-accent rounded font-bold text-sm tracking-wider uppercase hover:bg-vm-accent/[0.08]">
@@ -198,6 +204,108 @@ export default function ArtifactsPage() {
             </div>
           </div>
         )}
+      </div>
+
+      {restoreFor && (
+        <RestoreModal
+          artifact={restoreFor}
+          servers={servers}
+          onClose={() => setRestoreFor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function RestoreModal({ artifact, servers, onClose }: { artifact: any; servers: any[]; onClose: () => void }) {
+  const t = useT();
+  const toast = useToast();
+  const [serverId, setServerId] = useState('');
+  const [dbName, setDbName] = useState('');
+  const [targetPath, setTargetPath] = useState('');
+  const [overwrite, setOverwrite] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const bt = artifact.backup_type;
+
+  const submit = async () => {
+    if (!serverId) { toast.warning(t('restore.need_server')); return; }
+    if (bt === 'postgresql' && !dbName.trim()) { toast.warning(t('restore.need_db')); return; }
+    if (bt === 'files' && !targetPath.trim().startsWith('/')) { toast.warning(t('restore.need_path')); return; }
+    setSubmitting(true);
+    try {
+      const res = await restoreArtifact(artifact.id, {
+        target_server_id: serverId,
+        target_db_name: dbName.trim() || null,
+        target_path: targetPath.trim() || null,
+        confirm_overwrite: overwrite,
+      });
+      toast.success(`${t('artifacts.restore_queued')}: ${String(res.task_id).slice(0, 8)}…`);
+      onClose();
+    } catch (e: any) {
+      toast.error(e.message || 'Restore failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-vm-surface2 border border-vm-border-bright rounded shadow-2xl w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-3 border-b border-vm-border flex items-center justify-between">
+          <span className="font-mono text-xs uppercase tracking-[2px] text-vm-text-bright truncate">{t('restore.title')}: {artifact.filename}</span>
+          <button onClick={onClose} className="text-vm-text-dim hover:text-vm-text-bright"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div>
+            <label className={LABEL}>{t('restore.target_server')}</label>
+            <select value={serverId} onChange={(e) => setServerId(e.target.value)} className={INPUT}>
+              <option value="">…</option>
+              {servers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+
+          {bt === 'postgresql' && (
+            <div>
+              <label className={LABEL}>{t('restore.db_name')}</label>
+              <input value={dbName} onChange={(e) => setDbName(e.target.value)} className={INPUT} placeholder="t.ex. produktdb_restore" />
+              <div className="font-mono text-[10px] text-vm-danger mt-1">{t('restore.db_warning')}</div>
+            </div>
+          )}
+
+          {bt === 'files' && (
+            <div>
+              <label className={LABEL}>{t('restore.path')}</label>
+              <input value={targetPath} onChange={(e) => setTargetPath(e.target.value)} className={INPUT} placeholder="/restore/artifact-xy" />
+              <div className="font-mono text-[10px] text-vm-text-dim mt-1">{t('restore.path_hint')}</div>
+            </div>
+          )}
+
+          {bt === 'docker_volumes' && (
+            <>
+              <div>
+                <label className={LABEL}>{t('restore.path_optional')}</label>
+                <input value={targetPath} onChange={(e) => setTargetPath(e.target.value)} className={INPUT} placeholder="/var/lib/docker/volumes" />
+                <div className="font-mono text-[10px] text-vm-text-dim mt-1">{t('restore.volumes_hint')}</div>
+              </div>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} className="mt-0.5 accent-[var(--vm-danger)]" />
+                <span className="font-mono text-[10px] text-vm-danger">{t('restore.overwrite_volumes')}</span>
+              </label>
+            </>
+          )}
+
+          <div className="flex items-start gap-2 p-2.5 bg-vm-warning/10 border border-vm-warning/30 rounded">
+            <AlertTriangle className="w-4 h-4 text-vm-warning shrink-0 mt-0.5" />
+            <div className="font-mono text-[11px] text-vm-warning">{t('restore.overwrite_warning')}</div>
+          </div>
+        </div>
+        <div className="px-5 py-3 border-t border-vm-border flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 border border-vm-border text-vm-text-dim rounded text-xs font-bold tracking-wider uppercase">{t('cred.cancel')}</button>
+          <button onClick={submit} disabled={submitting} className="px-3 py-1.5 bg-vm-success text-vm-bg rounded text-xs font-bold tracking-wider uppercase disabled:opacity-50">
+            {submitting ? '…' : t('action.restore')}
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -35,15 +35,61 @@ import os
 import shlex
 import subprocess
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from api.services import age_crypto
+
 logger = logging.getLogger(__name__)
 
-POSTGRES_IMAGE = "postgres:16-alpine"
+# Must be >= the newest PostgreSQL among the source databases. pg_restore reads
+# older archive formats but not newer ones: a PG 17 pg_dump writes archive
+# version 1.16, which pg_restore 16 rejects outright with "unsupported version
+# (1.16) in file header". Sources on this host currently span 15.18 to 17.10.
+# Bump this when a source database is upgraded past it.
+POSTGRES_IMAGE = os.environ.get("VM_VALIDATE_PG_IMAGE", "postgres:17-alpine")
 TEMP_DB = "vmverify"
 TEMP_USER = "postgres"
 TEMP_PASSWORD = "vmverify-temp-password"
+
+# Work dirs must sit at a path that resolves identically on the host, because
+# validate_postgresql_artifact bind-mounts the work dir into a sibling postgres
+# container through the shared docker socket. `-v` is interpreted by the daemon
+# on the host, so a path that exists only inside this container mounts as an
+# empty directory. pg_restore then finds nothing, the `|| psql` fallback masks
+# the error, and the run reports success with 0 tables. /srv/archive is bind
+# mounted at the same path on both sides, which makes it safe to use here.
+SHARED_TMP = os.environ.get("VM_VALIDATE_TMP", "/srv/archive/tmp/vm-validate")
+
+
+async def _decrypt_if_needed(local_path: str, log) -> str:
+    """Decrypt an age-encrypted artifact in place, returning the usable path.
+
+    Dispatches on the file's actual magic bytes rather than artifact.is_encrypted,
+    because that column lied for every artifact written before 2026-07-19 (5336
+    rows claimed encryption that never happened). Reading the bytes works for
+    both the old plaintext artifacts and the new encrypted ones, which is what
+    lets validation span the changeover without special-casing.
+    """
+    if not age_crypto.file_is_age_encrypted(local_path):
+        return local_path
+
+    if local_path.endswith(age_crypto.AGE_SUFFIX):
+        decrypted = local_path[: -len(age_crypto.AGE_SUFFIX)]
+    else:
+        decrypted = f"{local_path}.decrypted"
+
+    log("info", "Artifact is age-encrypted, decrypting with configured identity")
+    await age_crypto.decrypt_local_file(local_path, decrypted, _run)
+
+    try:
+        os.remove(local_path)
+    except OSError:
+        pass
+
+    log("info", f"Decrypted to {os.path.basename(decrypted)} ({os.path.getsize(decrypted)} bytes)")
+    return decrypted
 
 
 def _now() -> str:
@@ -64,6 +110,44 @@ async def _run(cmd: list[str], timeout: int = 600) -> tuple[int, str, str]:
         await proc.wait()
         return 124, "", "TIMEOUT"
     return proc.returncode or 0, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
+
+
+async def _wait_for_postgres(container_name: str, log, attempts: int = 60, delay: float = 1.0) -> bool:
+    """Wait until the REAL server is up and TEMP_DB is usable on it.
+
+    Deliberately not pg_isready. The postgres image entrypoint runs initdb,
+    then starts a TEMPORARY server listening on the unix socket only
+    (listen_addresses='') to create POSTGRES_DB and run the init scripts,
+    then stops it and starts the real one. pg_isready answers 0 against that
+    temporary server, so a gate built on it opens early and releases the
+    restore into the window where the temporary server is on its way out.
+    That was one cause wearing three faces, all seen in production between
+    2026-07-19 and 2026-08-04:
+
+        FATAL:  database "vmverify" does not exist    DB not created yet
+        FATAL:  the database system is shutting down  temp server stopping
+        No such file or directory (on the socket)     temp server gone
+
+    Retrying pg_isready cannot fix this. It reports that *a* server accepts
+    connections, never that the target database exists on the *real* one.
+
+    TCP is the discriminator: the temporary server does not listen on it at
+    all, so a row coming back over TCP proves both facts at once. The result
+    row is checked rather than just the exit code, because exit-0-with-no-
+    output is precisely what pg_isready returns.
+    """
+    for _ in range(attempts):
+        code, out, _err = await _run([
+            "docker", "exec",
+            "-e", f"PGPASSWORD={TEMP_PASSWORD}",
+            container_name,
+            "psql", "-h", "127.0.0.1", "-U", TEMP_USER, "-d", TEMP_DB,
+            "-tAc", "SELECT 1",
+        ], timeout=15)
+        if code == 0 and (out or "").strip() == "1":
+            return True
+        await asyncio.sleep(delay)
+    return False
 
 
 async def _download_artifact_to_temp(artifact, dest_path: str) -> tuple[bool, str]:
@@ -109,8 +193,19 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
     # Defensive `docker rm -f` before `docker run` covers the edge case where
     # a stale container with the exact same name still exists from a
     # previously-killed validation (rare but observed in tests).
-    container_name = f"vm-validate-{artifact.id}"
-    workdir = tempfile.mkdtemp(prefix="vm-validate-")
+    # Unique per VALIDATION, not per artifact. It used to be
+    # f"vm-validate-{artifact.id}", which is deterministic, combined with a
+    # defensive `docker rm -f` on that name just before `docker run`. Two
+    # validations of the same artifact therefore raced: the second one killed
+    # the first one's container in the middle of its pg_restore, and the first
+    # reported "pg_restore exit 1" on a backup that was perfectly fine.
+    #
+    # Observed for real on 2026-07-19: a PlastShop validation failed that way
+    # and passed on a rerun minutes later. A spurious validation.failed is not
+    # a harmless false alarm here, it is the alert people learn to ignore.
+    container_name = f"vm-validate-{artifact.id}-{uuid.uuid4().hex[:8]}"
+    os.makedirs(SHARED_TMP, exist_ok=True)
+    workdir = tempfile.mkdtemp(prefix="vm-validate-", dir=SHARED_TMP)
     local_dump = os.path.join(workdir, artifact.filename or "dump.gz")
 
     try:
@@ -124,6 +219,10 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
         log("info", f"Downloaded {size} bytes to {local_dump}")
         if size == 0:
             return {"status": "failed", "error": "downloaded artifact is 0 bytes", "logs": logs}
+
+        # Must happen before the workdir is mounted into the temp container:
+        # pg_restore cannot read an age file.
+        local_dump = await _decrypt_if_needed(local_dump, log)
 
         # Defensive cleanup of any stale container with the same name.
         # `docker rm -f` exits non-zero if it doesn't exist — that's fine,
@@ -144,27 +243,34 @@ async def validate_postgresql_artifact(job, artifact) -> dict:
             log("error", f"docker run failed (exit {code}): {stderr.strip()[:300]}")
             return {"status": "failed", "error": f"could not start temp container: {stderr.strip()[:200]}", "logs": logs}
 
-        for attempt in range(30):
-            code, _, _ = await _run([
-                "docker", "exec", container_name,
-                "pg_isready", "-U", TEMP_USER, "-d", TEMP_DB,
-            ], timeout=10)
-            if code == 0:
-                break
-            await asyncio.sleep(1)
-        else:
-            log("error", "postgres did not become ready within 30s")
+        if not await _wait_for_postgres(container_name, log):
+            log("error", "postgres did not become ready: no TCP query answered within the wait budget")
             return {"status": "failed", "error": "postgres did not become ready", "logs": logs}
 
         log("info", "postgres ready, restoring dump")
 
         in_container = f"/dump/{os.path.basename(local_dump)}"
         if local_dump.endswith(".dump.gz") or local_dump.endswith(".gz"):
+            # A .gz here may hold either a pg_dump custom archive or plain SQL,
+            # so both readers are tried. The `||` must not swallow the first
+            # one's failure though: this used to be
+            #   pg_restore ... || psql ...
+            # whose exit status is the fallback's alone. Observed for real on
+            # 2026-07-19: an empty bind mount made pg_restore find nothing, psql
+            # succeeded doing nothing, and validation passed with 0 tables.
+            #
+            # Now each reader's status is captured explicitly and the command
+            # fails unless one of them genuinely succeeded.
+            q = shlex.quote(in_container)
             restore_cmd = (
-                f"gunzip -c {shlex.quote(in_container)} | "
-                f"pg_restore -U {TEMP_USER} -d {TEMP_DB} --no-owner --no-acl 2>&1 || "
-                f"gunzip -c {shlex.quote(in_container)} | "
-                f"psql -U {TEMP_USER} -d {TEMP_DB} 2>&1"
+                f"set -o pipefail; "
+                f"if gunzip -c {q} | pg_restore -U {TEMP_USER} -d {TEMP_DB} --no-owner --no-acl 2>&1; then "
+                f"  echo 'VM_RESTORE_VIA=pg_restore'; "
+                f"elif gunzip -c {q} | psql -U {TEMP_USER} -d {TEMP_DB} -v ON_ERROR_STOP=1 2>&1; then "
+                f"  echo 'VM_RESTORE_VIA=psql'; "
+                f"else "
+                f"  echo 'VM_RESTORE_VIA=none'; exit 1; "
+                f"fi"
             )
         elif local_dump.endswith(".dump"):
             restore_cmd = f"pg_restore -U {TEMP_USER} -d {TEMP_DB} --no-owner --no-acl {shlex.quote(in_container)} 2>&1"
@@ -236,7 +342,8 @@ async def validate_files_artifact(job, artifact) -> dict:
     if not artifact:
         return {"status": "skipped", "error": "no artifact to validate", "logs": logs}
 
-    workdir = tempfile.mkdtemp(prefix="vm-validate-")
+    os.makedirs(SHARED_TMP, exist_ok=True)
+    workdir = tempfile.mkdtemp(prefix="vm-validate-", dir=SHARED_TMP)
     local_path = os.path.join(workdir, artifact.filename or "archive.tar.gz")
     try:
         log("info", f"Downloading {artifact.filename}")
@@ -247,6 +354,11 @@ async def validate_files_artifact(job, artifact) -> dict:
         size = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
         if size == 0:
             return {"status": "failed", "error": "downloaded archive is 0 bytes", "logs": logs}
+
+        # tar cannot read an age file. Reassigning local_path also keeps the
+        # finally-block cleanup pointed at the file that actually exists.
+        local_path = await _decrypt_if_needed(local_path, log)
+        size = os.path.getsize(local_path)
 
         log("info", f"tar -tzf check on {size} bytes")
         code, stdout, stderr = await _run(["tar", "-tzf", local_path], timeout=600)

@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func, desc
+from sqlalchemy import Integer, select, func, desc
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from croniter import croniter
 
@@ -53,10 +54,16 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
     )
     runs = runs_result.scalars().all()
     runs_success = sum(1 for r in runs if r.status == "success")
-    # Failed-count for the topbar bell counts only un-acknowledged ones,
-    # so it stays in lockstep with the recent_errors panel below.
-    # Status text on dashboard still reflects total failure rate.
-    runs_failed = sum(1 for r in runs if r.status == "failed" and r.acknowledged_at is None)
+    # Two different questions, two different fields. Conflating them made the
+    # dashboard card flip to green "all clear" the moment somebody clicked
+    # acknowledge, while the backups were still failing: acknowledging an
+    # error is a statement about the operator, not about the system.
+    #
+    #   runs_failed_24h         what actually happened. Drives the card.
+    #   runs_failed_unacked_24h what still needs a human. Drives the bell.
+    runs_failed_unacked = sum(
+        1 for r in runs if r.status == "failed" and r.acknowledged_at is None
+    )
     runs_failed_total = sum(1 for r in runs if r.status == "failed")
     success_rate = round(runs_success / max(runs_success + runs_failed_total, 1) * 100, 1)
 
@@ -99,7 +106,10 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         .join(Server, BackupRun.server_id == Server.id)
         .where(BackupRun.status == "failed", BackupRun.acknowledged_at.is_(None))
         .order_by(BackupRun.created_at.desc())
-        .limit(5)
+        # Was 5: with a backlog of unacknowledged failures every dismissal
+        # pulled the next old one into view, so the panel looked like it
+        # could not be emptied (task 157, 34 old failures). The panel scrolls.
+        .limit(100)
     )
     recent_errors = []
     for r, j, s in error_result.all():
@@ -155,13 +165,14 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         last_ok_iso = finished.isoformat()
         hours_since = round((now - finished).total_seconds() / 3600, 1)
 
-    # Storage warnings (>70% used)
+    # Storage warnings, same thresholds as the notifications in
+    # storage_tasks (75 and 95 percent of the budget).
     storage_warnings = []
     for s in storage_dests:
         if s.capacity_bytes and s.used_bytes:
             pct = round(s.used_bytes / s.capacity_bytes * 100, 1)
-            if pct > 70:
-                level = "critical" if pct > 90 else "warning"
+            if pct >= 75:
+                level = "critical" if pct >= 95 else "warning"
                 storage_warnings.append({
                     "id": str(s.id),
                     "name": s.name,
@@ -178,7 +189,8 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         storage_destinations=storage_info,
         runs_24h=len(runs),
         runs_success_24h=runs_success,
-        runs_failed_24h=runs_failed,
+        runs_failed_24h=runs_failed_total,
+        runs_failed_unacked_24h=runs_failed_unacked,
         success_rate=success_rate,
         next_runs=next_runs[:10],
         active_runs=active_runs,
@@ -272,3 +284,116 @@ async def get_stats(days: int = 30, db: AsyncSession = Depends(get_db)):
         "top_failing_jobs": top_failing,
         "by_backup_type": by_type,
     }
+
+
+@router.get("/trust-report")
+async def get_trust_report(db: AsyncSession = Depends(get_db)):
+    """One row per job: can this backup be trusted, and why (or why not).
+
+    Answers, from live data: when did the job last succeed, how far back
+    does a restorable copy actually reach, when was a restore last proven
+    by validation, is the archive encrypted, and how many destinations
+    hold a copy. The verdict comes from api.services.trust and the facts
+    travel with it.
+    """
+    from api.models.backup_validation_run import BackupValidationRun
+    from api.services.trust import trust_verdict
+
+    now = datetime.now(timezone.utc)
+
+    jobs = (await db.execute(select(BackupJob).options(
+        selectinload(BackupJob.runs), selectinload(BackupJob.retention_policy)
+    ))).scalars().all()
+    job_ids = [j.id for j in jobs]
+
+    # Befintliga artefakter per jobb: aldrig raderade, aldrig rensade.
+    art_rows = (await db.execute(
+        select(
+            BackupArtifact.run_id,
+            func.min(BackupArtifact.created_at).label("oldest"),
+            func.count().label("n"),
+            func.sum(func.coalesce(BackupArtifact.is_encrypted.cast(Integer), 0)).label("enc"),
+            func.count(func.distinct(BackupArtifact.storage_id)).label("dests"),
+        )
+        .where(BackupArtifact.is_deleted == False, BackupArtifact.purged_at.is_(None))
+        .group_by(BackupArtifact.run_id)
+    )).all()
+    artifacts_by_run = {r.run_id: r for r in art_rows}
+
+    # run -> jobb (en artefakt aggregates via sin körning)
+    runs = (await db.execute(select(BackupRun.id, BackupRun.job_id))).all()
+    run_to_job = {rid: jid for rid, jid in runs}
+
+    # Senaste valideringen per jobb
+    val_rows = (await db.execute(
+        select(BackupValidationRun)
+        .where(BackupValidationRun.job_id.in_(job_ids) if job_ids else False)
+        .order_by(BackupValidationRun.created_at.desc())
+    )).scalars().all()
+    latest_val: dict = {}
+    for v in val_rows:
+        if v.job_id not in latest_val:
+            latest_val[v.job_id] = v
+
+    out = []
+    for job in jobs:
+        runs_sorted = sorted(job.runs or [], key=lambda r: r.started_at or r.created_at, reverse=True)
+        last_success = next((r for r in runs_sorted if r.status == "success"), None)
+        last_any = runs_sorted[0] if runs_sorted else None
+
+        # Aggregata artefaktfakta over alla körningar for jobbet.
+        oldest = None
+        count = 0
+        encrypted = 0
+        dests = set()
+        for r in runs_sorted:
+            row = artifacts_by_run.get(r.id)
+            if not row:
+                continue
+            count += int(row.n)
+            encrypted += int(row.enc or 0)
+            oldest = row.oldest if oldest is None or row.oldest < oldest else oldest
+        # destinations: antal distinkta lagringsmål over hela arkivet
+        dest_rows = (await db.execute(
+            select(func.count(func.distinct(BackupArtifact.storage_id)))
+            .join(BackupRun, BackupRun.id == BackupArtifact.run_id)
+            .where(BackupRun.job_id == job.id,
+                   BackupArtifact.is_deleted == False,
+                   BackupArtifact.purged_at.is_(None))
+        )).scalar()
+        dest_count = int(dest_rows or 0)
+
+        val = latest_val.get(job.id)
+        verdict = trust_verdict(
+            now=now,
+            job_active=job.is_active,
+            last_success_at=(last_success.started_at or last_success.created_at) if last_success else None,
+            oldest_artifact_at=oldest,
+            artifact_count=count,
+            destinations_with_copy=dest_count,
+            last_validation_at=val.created_at if val else None,
+            last_validation_status=val.status if val else None,
+        )
+
+        out.append({
+            "job_id": str(job.id),
+            "name": job.name,
+            "backup_type": job.backup_type,
+            "is_active": job.is_active,
+            "schedule_cron": job.schedule_cron,
+            "level": verdict["level"],
+            "reasons": verdict["reasons"],
+            "last_success_at": (last_success.started_at or last_success.created_at).isoformat() if last_success else None,
+            "last_run_status": last_any.status if last_any else None,
+            "oldest_artifact_at": oldest.isoformat() if oldest else None,
+            "artifact_count": count,
+            "encrypted_artifacts": encrypted,
+            "encryption_complete": count > 0 and encrypted == count,
+            "destinations_with_copy": dest_count,
+            "last_validation_at": val.created_at.isoformat() if val else None,
+            "last_validation_status": val.status if val else None,
+        })
+
+    order = {"red": 0, "yellow": 1, "green": 2}
+    out.sort(key=lambda x: (order.get(x["level"], 3), x["name"].lower()))
+    return {"generated_at": now.isoformat(), "jobs": out}

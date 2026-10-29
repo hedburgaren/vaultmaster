@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getDashboard } from '@/lib/api';
+import { getDashboard, getTrustReport } from '@/lib/api';
+import { ShieldCheck, ShieldAlert, XCircle } from 'lucide-react';
 import { formatBytes, formatCountdown, formatRelative } from '@/lib/utils';
 import StatCard from '@/components/StatCard';
 import Badge from '@/components/Badge';
@@ -11,12 +12,15 @@ import { useT } from '@/lib/i18n';
 export default function DashboardPage() {
   const t = useT();
   const [data, setData] = useState<any>(null);
+  const [trust, setTrust] = useState<any>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
     getDashboard().then(setData).catch((e) => setError(e.message));
+    getTrustReport().then(setTrust).catch(() => {});
     const interval = setInterval(() => {
       getDashboard().then(setData).catch(() => {});
+      getTrustReport().then(setTrust).catch(() => {});
     }, 15000);
     return () => clearInterval(interval);
   }, []);
@@ -258,6 +262,88 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+      {trust && trust.jobs && trust.jobs.length > 0 && <TrustPanel report={trust} />}
+    </div>
+  );
+}
+
+const LEVEL_DOT: Record<string, string> = {
+  green: 'bg-vm-success',
+  yellow: 'bg-vm-warning',
+  red: 'bg-vm-danger',
+};
+
+const LEVEL_TEXT: Record<string, string> = {
+  green: 'text-vm-success',
+  yellow: 'text-vm-warning',
+  red: 'text-vm-danger',
+};
+
+function TrustPanel({ report }: { report: any }) {
+  const t = useT();
+  const counts = report.jobs.reduce((acc: any, j: any) => { acc[j.level] = (acc[j.level] || 0) + 1; return acc; }, {});
+  return (
+    <div>
+      <div className="flex items-center gap-2.5 mb-4">
+        <div className="w-0.5 h-[18px] bg-vm-accent rounded" />
+        <h2 className="text-base font-bold text-vm-text-bright tracking-[2px] uppercase">{t('trust.title')}</h2>
+        <div className="font-mono text-[10px] text-vm-text-dim">
+          <span className="text-vm-success">{counts.green || 0}</span> / <span className="text-vm-warning">{counts.yellow || 0}</span> / <span className="text-vm-danger">{counts.red || 0}</span>
+        </div>
+      </div>
+      <div className="bg-vm-surface border border-vm-border rounded overflow-x-auto">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-vm-border">
+              {['trust.job', 'trust.status', 'trust.last_success', 'trust.oldest', 'trust.validated', 'trust.encryption', 'trust.copies'].map((k) => (
+                <th key={k} className="px-4 py-2.5 font-mono text-[10px] text-vm-text-dim tracking-[2px] uppercase font-normal">{t(k)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {report.jobs.map((j: any) => (
+              <tr key={j.job_id} className="border-b border-vm-border/50">
+                <td className="px-4 py-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${LEVEL_DOT[j.level] || 'bg-vm-text-dim'}`} />
+                    <span className="font-mono text-xs text-vm-text-bright">{j.name}</span>
+                    {!j.is_active && <span className="font-mono text-[9px] px-1 rounded border border-vm-border text-vm-text-dim uppercase">{t('agents.inactive')}</span>}
+                  </div>
+                  {j.reasons.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {j.reasons.map((r: string) => (
+                        <span key={r} className={`font-mono text-[9px] px-1.5 py-0.5 rounded border ${LEVEL_TEXT[j.level]} border-current/30`}>{t('trust.' + r)}</span>
+                      ))}
+                    </div>
+                  )}
+                </td>
+                <td className={`px-4 py-2.5 font-mono text-[11px] ${LEVEL_TEXT[j.level] || 'text-vm-text-dim'}`}>{t('trust.level_' + j.level)}</td>
+                <td className="px-4 py-2.5 font-mono text-[11px] text-vm-text">{j.last_success_at ? new Date(j.last_success_at).toLocaleString('sv-SE') : t('trust.never')}</td>
+                <td className="px-4 py-2.5 font-mono text-[11px] text-vm-text">{j.oldest_artifact_at ? new Date(j.oldest_artifact_at).toLocaleDateString('sv-SE') : t('trust.none')}</td>
+                <td className="px-4 py-2.5 font-mono text-[11px]">
+                  {j.last_validation_status === 'passed' && <span className="text-vm-success">{new Date(j.last_validation_at).toLocaleDateString('sv-SE')}</span>}
+                  {j.last_validation_status === 'failed' && <span className="text-vm-danger">{new Date(j.last_validation_at).toLocaleDateString('sv-SE')}</span>}
+                  {j.last_validation_status === 'skipped' && <span className="text-vm-text-dim">{new Date(j.last_validation_at).toLocaleDateString('sv-SE')}</span>}
+                  {!j.last_validation_at && <span className="text-vm-text-dim">{t('trust.not_validated')}</span>}
+                </td>
+                <td className="px-4 py-2.5">
+                  {j.artifact_count === 0 ? (
+                    <span className="font-mono text-[11px] text-vm-text-dim">{t('trust.none')}</span>
+                  ) : j.encryption_complete ? (
+                    <span className="flex items-center gap-1 font-mono text-[11px] text-vm-success"><ShieldCheck className="w-3 h-3" />{t('trust.encrypted')}</span>
+                  ) : (
+                    <span className="flex items-center gap-1 font-mono text-[11px] text-vm-warning"><ShieldAlert className="w-3 h-3" />{j.encrypted_artifacts}/{j.artifact_count}</span>
+                  )}
+                </td>
+                <td className="px-4 py-2.5 font-mono text-[11px] text-vm-text">{j.destinations_with_copy}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="px-4 py-2 border-t border-vm-border font-mono text-[10px] text-vm-text-dim">
+          {t('trust.footer')} {new Date(report.generated_at).toLocaleTimeString('sv-SE')}
+        </div>
+      </div>
     </div>
   );
 }

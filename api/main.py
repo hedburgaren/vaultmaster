@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import inspect
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.config import get_settings
@@ -31,9 +32,52 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         msg = str(exc)
         if "already exists" in msg or "UniqueViolationError" in msg:
-            logger.warning("create_all race vs. peer worker — tables already exist, continuing")
+            # DDL is transactional in Postgres, so engine.begin() rolled back
+            # everything create_all had built in THIS transaction, not just the
+            # object that collided. In the peer-worker race that is harmless
+            # because the winner committed the full schema. It is not harmless
+            # when the collision comes from a leftover index or type from a
+            # removed model: then nothing was created, the exception is
+            # swallowed, and the API logs "started" over an incomplete schema.
+            #
+            # So verify rather than assume. The tables either exist or they do
+            # not, and that is a cheap question to ask.
+            logger.warning("create_all raised %r, verifying the schema is actually present", msg[:200])
+            try:
+                async with engine.begin() as conn:
+                    present = set(await conn.run_sync(
+                        lambda sync_conn: inspect(sync_conn).get_table_names()
+                    ))
+            except Exception as probe_exc:
+                logger.critical("could not verify schema after create_all raced: %s", probe_exc)
+                raise
+            expected = set(Base.metadata.tables.keys())
+            missing = expected - present
+            if missing:
+                logger.critical(
+                    "create_all did not complete and %d table(s) are MISSING: %s. "
+                    "Refusing to start: an API serving an incomplete schema fails "
+                    "in ways that look like data loss.",
+                    len(missing), ", ".join(sorted(missing)),
+                )
+                raise RuntimeError(f"incomplete schema, missing tables: {sorted(missing)}")
+            logger.warning("create_all race vs. peer worker, all %d tables present, continuing", len(expected))
         else:
             raise
+
+    # A model column without its migration passes create_all (which ignores
+    # columns on existing tables), passes startup, passes the health check,
+    # and then breaks every query touching that table. Happened 2026-07-19
+    # with backup_artifact.purged_at. Refuse to start instead.
+    from api.services.schema_guard import assert_schema_matches
+    n_tables = await assert_schema_matches()
+    # print, not logger: module loggers are not routed through uvicorn's
+    # config, so the confirmation was invisible and the guard's execution
+    # could not be distinguished from its absence.
+    import sys as _sys
+    print(f"schema guard (api): {n_tables} tables match their models",
+          file=_sys.stderr, flush=True)
+
     logger.info("VaultMaster API started")
     yield
     # Shutdown
@@ -133,4 +177,49 @@ app.include_router(metrics.router, prefix="/api")
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "vaultmaster"}
+    """Report whether the dependencies this service cannot work without are up.
+
+    Used to return a static {"status": "ok"} that could not fail. A health check
+    that cannot fail is not a health check: it reports the web process is
+    accepting connections, which the caller already knew by getting a response,
+    and stays green through a dead database or a stopped worker.
+
+    Returns 503 when a dependency is down, so anything watching this endpoint
+    finds out from the endpoint rather than from a missing backup.
+    """
+    from sqlalchemy import text as _text
+
+    from api.database import async_session
+
+    checks: dict[str, str] = {}
+    healthy = True
+
+    try:
+        async with async_session() as session:
+            await session.execute(_text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"FAILED: {type(e).__name__}: {str(e)[:120]}"
+        healthy = False
+
+    try:
+        import redis.asyncio as _redis
+
+        client = _redis.from_url(get_settings().redis_url)
+        try:
+            await client.ping()
+            checks["redis"] = "ok"
+        finally:
+            await client.aclose()
+    except Exception as e:
+        checks["redis"] = f"FAILED: {type(e).__name__}: {str(e)[:120]}"
+        healthy = False
+
+    body = {
+        "status": "ok" if healthy else "degraded",
+        "service": "vaultmaster",
+        "checks": checks,
+    }
+    if not healthy:
+        return JSONResponse(status_code=503, content=body)
+    return body

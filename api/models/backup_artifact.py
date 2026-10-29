@@ -26,7 +26,16 @@ class BackupArtifact(Base):
     server_name: Mapped[str | None] = mapped_column(String(255))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Set by rotation at FLAG time, before any file is touched. Says nothing
+    # about whether the file still exists.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set by execute_purge ONLY, and only after storage confirmed the file is
+    # gone. The one column that means "nothing left to delete here". Rotation
+    # must never touch it, or the distinction collapses and plan_purge starts
+    # skipping files that still exist. Added by migration 0006; mapping it
+    # before that migration ran broke every query against this table, which
+    # is what the schema guard now exists to catch at boot.
+    purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

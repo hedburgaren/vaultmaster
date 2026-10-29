@@ -201,20 +201,34 @@ def encrypt_dict_secrets(d: dict | None, extra_keys: set[str] | None = None) -> 
 
 
 def decrypt_dict_secrets(d: dict | None) -> dict | None:
-    """Decrypt any 'enc:vN:...'-prefixed string values in a dict in place."""
+    """Decrypt any 'enc:vN:...'-prefixed string values in a dict in place.
+
+    Raises on a value that carries the enc-prefix but cannot be decrypted.
+    The old behaviour was `except Exception: pass`, which returned the
+    ciphertext string as if it were the secret. The caller then used
+    "enc:v1:gAAAA..." as a Google client_secret or a Telegram token, and the
+    resulting 401 from the remote service pointed at everything except the
+    real cause: a key version dropped from CREDENTIALS_MASTER_KEYS while
+    rows still referenced it. Failing here names the actual problem at the
+    actual moment it exists.
+    """
     if not d:
         return d
     crypto = get_crypto()
     for k, v in list(d.items()):
         if not isinstance(v, str) or not v.startswith(_ENC_PREFIX):
             continue
-        # Strip "enc:vN:" prefix
         try:
             _, _vN, token = v.split(":", 2)
             d[k] = crypto.decrypt(token.encode("ascii"))
-        except Exception:
-            # Best-effort: leave malformed value alone rather than blow up
-            pass
+        except Exception as exc:
+            raise CredentialCryptoError(
+                f"config value {k!r} carries the {_ENC_PREFIX!r} prefix but "
+                f"cannot be decrypted ({type(exc).__name__}). Most likely a "
+                f"key version was removed from CREDENTIALS_MASTER_KEYS while "
+                f"this value still uses it. Refusing to hand back ciphertext "
+                f"as if it were the secret."
+            ) from exc
     return d
 
 

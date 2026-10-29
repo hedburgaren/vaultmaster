@@ -33,15 +33,25 @@ async function apiFetch(path: string, options: RequestInit = {}) {
 }
 
 // Auth
-export async function login(username: string, password: string) {
-  const res = await apiFetch('/v1/auth/login', {
+// Plain fetch, not apiFetch: a 401 here is an answer (wrong password, or a
+// TOTP code is needed), not an expired session to redirect away from.
+export class TotpRequiredError extends Error {}
+
+export async function login(username: string, password: string, totpCode?: string) {
+  const res = await fetch(`${API_BASE}/v1/auth/login`, {
     method: 'POST',
-    body: JSON.stringify({ username, password }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, ...(totpCode ? { totp_code: totpCode } : {}) }),
   });
-  if (res.access_token) {
-    localStorage.setItem('vm_token', res.access_token);
+  const body = await res.json().catch(() => ({ detail: res.statusText }));
+  if (!res.ok) {
+    if (body.detail === 'TOTP code required') throw new TotpRequiredError(body.detail);
+    throw new Error(body.detail || res.statusText);
   }
-  return res;
+  if (body.access_token) {
+    localStorage.setItem('vm_token', body.access_token);
+  }
+  return body;
 }
 
 export function logout() {
@@ -55,6 +65,7 @@ export function isAuthenticated(): boolean {
 
 // Dashboard
 export const getDashboard = () => apiFetch('/v1/dashboard');
+export const getTrustReport = () => apiFetch('/v1/dashboard/trust-report');
 
 // Servers
 export const getServers = () => apiFetch('/v1/servers');
@@ -65,6 +76,18 @@ export const deleteServer = (id: string) => apiFetch(`/v1/servers/${id}`, { meth
 export const testServer = (id: string) => apiFetch(`/v1/servers/${id}/test`, { method: 'POST' });
 export const testConnectionPresave = (data: any) => apiFetch('/v1/servers/test-connection', { method: 'POST', body: JSON.stringify(data) });
 export const browseServer = (id: string, path: string) => apiFetch(`/v1/servers/${id}/browse?path=${encodeURIComponent(path)}`);
+export const serverDirSize = (id: string, path: string) =>
+  apiFetch(`/v1/servers/${id}/dirsize`, { method: 'POST', body: JSON.stringify({ path }) });
+
+// MCP clients (agents) + granular grants
+export const getMcpClients = () => apiFetch('/v1/mcp-clients');
+export const createMcpClient = (data: any) => apiFetch('/v1/mcp-clients', { method: 'POST', body: JSON.stringify(data) });
+export const updateMcpClient = (id: string, data: any) => apiFetch(`/v1/mcp-clients/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const deleteMcpClient = (id: string) => apiFetch(`/v1/mcp-clients/${id}`, { method: 'DELETE' });
+export const rotateMcpClientKey = (id: string) => apiFetch(`/v1/mcp-clients/${id}/rotate-key`, { method: 'POST' });
+export const getMcpClientGrants = (id: string) => apiFetch(`/v1/mcp-clients/${id}/grants`);
+export const putMcpClientGrants = (id: string, data: any) =>
+  apiFetch(`/v1/mcp-clients/${id}/grants`, { method: 'PUT', body: JSON.stringify(data) });
 export const getSSHKeys = () => apiFetch('/v1/servers/ssh-keys');
 export const generateSSHKey = () => apiFetch('/v1/servers/ssh-keys/generate', { method: 'POST' });
 export const getServerDatabases = (id: string, dbType?: string) => apiFetch(`/v1/servers/${id}/databases?db_type=${dbType || 'postgresql'}`);
@@ -141,6 +164,11 @@ export const changePassword = (currentPassword: string, newPassword: string) =>
   apiFetch('/v1/auth/change-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) });
 export const generateApiKey = () => apiFetch('/v1/auth/api-key', { method: 'POST' });
 export const revokeApiKey = () => apiFetch('/v1/auth/api-key', { method: 'DELETE' });
+export const totpSetup = () => apiFetch('/v1/auth/totp/setup', { method: 'POST' });
+export const totpVerify = (totpCode: string) =>
+  apiFetch('/v1/auth/totp/verify', { method: 'POST', body: JSON.stringify({ totp_code: totpCode }) });
+export const totpDisable = (password: string, totpCode: string) =>
+  apiFetch('/v1/auth/totp/disable', { method: 'POST', body: JSON.stringify({ password, totp_code: totpCode }) });
 
 // Audit
 export const getAuditLogs = (params?: string) => apiFetch(`/v1/audit${params ? '?' + params : ''}`);
@@ -171,13 +199,21 @@ export const getLatestValidationsByJob = () => apiFetch('/v1/validations/latest-
 export const triggerValidation = (jobId: string, data?: any) =>
   apiFetch(`/v1/validations/jobs/${jobId}/trigger`, { method: 'POST', body: JSON.stringify(data || { check_type: 'restore' }) });
 
-// Credentials
-export const getCredentials = (params?: string) => apiFetch(`/v1/credentials${params ? '?' + params : ''}`);
-export const getCredential = (id: string) => apiFetch(`/v1/credentials/${id}`);
-export const createCredential = (data: any) => apiFetch('/v1/credentials', { method: 'POST', body: JSON.stringify(data) });
-export const updateCredential = (id: string, data: any) => apiFetch(`/v1/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
-export const deleteCredential = (id: string) => apiFetch(`/v1/credentials/${id}`, { method: 'DELETE' });
-export const revealCredential = (id: string, password: string, purpose: string) =>
-  apiFetch(`/v1/credentials/${id}/reveal`, { method: 'POST', body: JSON.stringify({ password, purpose }) });
-export const rotateCredentialKey = (id: string) =>
-  apiFetch(`/v1/credentials/${id}/rotate-key`, { method: 'POST' });
+// Credentials (items with unlimited fields)
+export const getCredentialItems = (params?: string) => apiFetch(`/v1/credentials${params ? '?' + params : ''}`);
+export const getCredentialItem = (id: string) => apiFetch(`/v1/credentials/items/${id}`);
+export const createCredentialItem = (data: any) => apiFetch('/v1/credentials', { method: 'POST', body: JSON.stringify(data) });
+export const updateCredentialItem = (id: string, data: any) => apiFetch(`/v1/credentials/items/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const deleteCredentialItem = (id: string) => apiFetch(`/v1/credentials/items/${id}`, { method: 'DELETE' });
+export const addCredentialField = (itemId: string, data: any) =>
+  apiFetch(`/v1/credentials/items/${itemId}/fields`, { method: 'POST', body: JSON.stringify(data) });
+export const updateCredentialField = (fieldId: string, data: any) =>
+  apiFetch(`/v1/credentials/fields/${fieldId}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const deleteCredentialField = (fieldId: string) =>
+  apiFetch(`/v1/credentials/fields/${fieldId}`, { method: 'DELETE' });
+export const revealCredentialItem = (id: string, password: string, purpose: string, totpCode?: string) =>
+  apiFetch(`/v1/credentials/items/${id}/reveal`, { method: 'POST', body: JSON.stringify({ password, purpose, totp_code: totpCode || null }) });
+export const revealCredentialField = (fieldId: string, password: string, purpose: string, totpCode?: string) =>
+  apiFetch(`/v1/credentials/fields/${fieldId}/reveal`, { method: 'POST', body: JSON.stringify({ password, purpose, totp_code: totpCode || null }) });
+export const rotateCredentialItemKeys = (id: string) =>
+  apiFetch(`/v1/credentials/items/${id}/rotate-key`, { method: 'POST' });

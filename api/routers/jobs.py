@@ -132,6 +132,14 @@ async def trigger_job(
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Bug #23 locked CREATING and UPDATING custom jobs to admins because they
+    # run arbitrary shell on the target server. Running one was left open, so
+    # the guard covered defining the payload but not firing it: a non-admin
+    # could still execute any custom job that already existed. Guarding the
+    # definition and not the execution is not a guard.
+    _require_admin_for_custom({"backup_type": job.backup_type}, current_user, "trigger")
+
     from api.tasks.backup_tasks import run_backup_task
     task = run_backup_task.apply_async(args=[str(job_id)], kwargs={"triggered_by": "manual"})
     # Bug #10: explicit audit entry tying the queued Celery task to the BackupJob.

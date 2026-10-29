@@ -11,6 +11,84 @@ from api.models.retention_policy import RetentionPolicy
 logger = logging.getLogger(__name__)
 
 
+def _gfs_configured(policy: RetentionPolicy) -> bool:
+    """True when the policy asks for any grandfather-father-son thinning.
+
+    When every keep_* is 0 the policy is pure max-age: keep everything until it
+    passes max_age_days. Distinguishing the two is what stops rotation from
+    treating "no bucket claimed this" as "delete this".
+    """
+    return any(
+        int(getattr(policy, attr, 0) or 0) > 0
+        for attr in ("keep_hourly", "keep_daily", "keep_weekly", "keep_monthly", "keep_yearly")
+    )
+
+
+def select_expired(artifacts, policy: RetentionPolicy, now: datetime) -> set:
+    """Return the ids of artifacts the policy says should not be retained.
+
+    Single source of truth for "should this artifact still exist". Both
+    apply_rotation (which flags rows) and purge.plan_purge (which deletes files)
+    call this, so the flag and the file can never disagree about what retention
+    means.
+
+    That split is what made the original bug survivable-looking: rotation had
+    its own inline copy of the decision, purge did not exist, and nothing ever
+    reconciled them. If purge only honoured max_age while rotation also did GFS
+    thinning, switching a job to GFS would flag artifacts forever without ever
+    reclaiming their space, which is the same failure in a new costume.
+
+    `artifacts` should be a single (job, destination) group. Mixing destinations
+    pits two copies of the same run against each other in the same bucket.
+    """
+    if not artifacts:
+        return set()
+
+    max_age_cutoff = (
+        now - timedelta(days=policy.max_age_days) if policy.max_age_days > 0 else None
+    )
+
+    buckets = {
+        "hourly": defaultdict(list),
+        "daily": defaultdict(list),
+        "weekly": defaultdict(list),
+        "monthly": defaultdict(list),
+        "yearly": defaultdict(list),
+    }
+    ordered = sorted(artifacts, key=lambda a: a.created_at, reverse=True)
+    for artifact in ordered:
+        b = _assign_bucket(artifact.created_at)
+        buckets["hourly"][b["hour"]].append(artifact)
+        buckets["daily"][b["day"]].append(artifact)
+        buckets["weekly"][b["week"]].append(artifact)
+        buckets["monthly"][b["month"]].append(artifact)
+        buckets["yearly"][b["year"]].append(artifact)
+
+    keep_ids = set()
+
+    def keep_from_bucket(bucket_dict: dict, keep_count: int):
+        for key in sorted(bucket_dict.keys(), reverse=True)[:keep_count]:
+            if bucket_dict[key]:
+                keep_ids.add(bucket_dict[key][0].id)
+
+    keep_from_bucket(buckets["hourly"], policy.keep_hourly)
+    keep_from_bucket(buckets["daily"], policy.keep_daily)
+    keep_from_bucket(buckets["weekly"], policy.keep_weekly)
+    keep_from_bucket(buckets["monthly"], policy.keep_monthly)
+    keep_from_bucket(buckets["yearly"], policy.keep_yearly)
+
+    gfs_configured = _gfs_configured(policy)
+
+    expired = set()
+    for artifact in ordered:
+        if artifact.id in keep_ids:
+            continue
+        too_old = bool(max_age_cutoff and artifact.created_at < max_age_cutoff)
+        if gfs_configured or too_old:
+            expired.add(artifact.id)
+    return expired
+
+
 def _assign_bucket(dt: datetime) -> dict:
     """Assign time buckets for GFS rotation."""
     return {
@@ -43,77 +121,54 @@ async def apply_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str 
             job_uuid = _uuid.UUID(str(job_id))
         except (ValueError, AttributeError, TypeError) as exc:
             logger.error(f"apply_rotation: invalid job_id {job_id!r}: {exc}")
-            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": [],
+                    "status": "error", "reason": f"invalid job_id {job_id!r}"}
         run_ids_result = await db.execute(select(BackupRun.id).where(BackupRun.job_id == job_uuid))
         run_ids = list(run_ids_result.scalars().all())
         if not run_ids:
-            # No runs for this job → nothing to rotate. Avoid `IN ()` SQL error.
-            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+            # No runs for this job, nothing to rotate. Avoid `IN ()` SQL error.
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": [],
+                    "status": "noop", "reason": "no runs for job"}
         query = query.where(BackupArtifact.run_id.in_(run_ids))
     if storage_id:
         try:
             storage_uuid = _uuid.UUID(str(storage_id))
         except (ValueError, AttributeError, TypeError) as exc:
             logger.error(f"apply_rotation: invalid storage_id {storage_id!r}: {exc}")
-            return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+            return {"kept": 0, "deleted": 0, "artifacts_deleted": [],
+                    "status": "error", "reason": f"invalid storage_id {storage_id!r}"}
         query = query.where(BackupArtifact.storage_id == storage_uuid)
 
     result = await db.execute(query.order_by(BackupArtifact.created_at.desc()))
     artifacts = result.scalars().all()
 
     if not artifacts:
-        return {"kept": 0, "deleted": 0, "artifacts_deleted": []}
+        return {"kept": 0, "deleted": 0, "artifacts_deleted": [],
+                "status": "noop", "reason": "no artifacts in scope"}
 
-    # Max age filter
     now = datetime.now(timezone.utc)
-    max_age_cutoff = now - timedelta(days=policy.max_age_days) if policy.max_age_days > 0 else None
 
-    # Assign buckets
-    buckets = {
-        "hourly": defaultdict(list),
-        "daily": defaultdict(list),
-        "weekly": defaultdict(list),
-        "monthly": defaultdict(list),
-        "yearly": defaultdict(list),
-    }
+    # Bug (found 2026-07-19): this function used to inline its own decision,
+    # reading "if artifact.id not in keep_ids: should_delete = True", i.e.
+    # anything no GFS bucket claimed was deleted. For a pure-max-age policy
+    # (all keep_* = 0, which is what all 47 jobs actually use) keep_ids is
+    # always empty, so every artifact was marked deleted 1 to 15 seconds after
+    # it was created, including the one the run had just produced. 8305 of 8311
+    # artifacts were flagged deleted while the files sat on disk, which hid real
+    # backups from the restore path.
+    #
+    # The decision now lives in select_expired() and is shared with purge, so
+    # the flag and the file cannot drift apart.
+    expired_ids = select_expired(artifacts, policy, now)
 
-    for artifact in artifacts:
-        b = _assign_bucket(artifact.created_at)
-        buckets["hourly"][b["hour"]].append(artifact)
-        buckets["daily"][b["day"]].append(artifact)
-        buckets["weekly"][b["week"]].append(artifact)
-        buckets["monthly"][b["month"]].append(artifact)
-        buckets["yearly"][b["year"]].append(artifact)
-
-    # Determine which to keep
-    keep_ids = set()
-
-    def keep_from_bucket(bucket_dict: dict, keep_count: int):
-        sorted_keys = sorted(bucket_dict.keys(), reverse=True)
-        for key in sorted_keys[:keep_count]:
-            # Keep the newest in each bucket
-            if bucket_dict[key]:
-                keep_ids.add(bucket_dict[key][0].id)
-
-    keep_from_bucket(buckets["hourly"], policy.keep_hourly)
-    keep_from_bucket(buckets["daily"], policy.keep_daily)
-    keep_from_bucket(buckets["weekly"], policy.keep_weekly)
-    keep_from_bucket(buckets["monthly"], policy.keep_monthly)
-    keep_from_bucket(buckets["yearly"], policy.keep_yearly)
-
-    # Mark deletions
     deleted = []
     for artifact in artifacts:
-        should_delete = False
-        if artifact.id not in keep_ids:
-            should_delete = True
-        if max_age_cutoff and artifact.created_at < max_age_cutoff:
-            should_delete = True
-
-        if should_delete and artifact.id not in keep_ids:
+        if artifact.id in expired_ids:
             artifact.is_deleted = True
             artifact.deleted_at = now
             deleted.append(str(artifact.id))
+
+    keep_ids = {a.id for a in artifacts} - expired_ids
 
     await db.flush()
 
@@ -121,54 +176,77 @@ async def apply_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str 
     return {"kept": len(keep_ids), "deleted": len(deleted), "artifacts_deleted": deleted}
 
 
-async def preview_rotation(db: AsyncSession, policy: RetentionPolicy, job_id: str | None = None) -> dict:
-    """Preview what rotation would do without actually deleting."""
+async def preview_rotation(
+    db: AsyncSession,
+    policy: RetentionPolicy,
+    job_id: str | None = None,
+    storage_id: str | None = None,
+) -> dict:
+    """Preview what rotation would do without actually deleting.
+
+    job_id used to be accepted and then never referenced, so the preview ran
+    select_expired over every artifact in the archive regardless of what the
+    caller asked about. The retention router passes job_id in good faith, so
+    "what would this policy do to this job" was answered with a number for the
+    whole system.
+
+    It was also wrong in kind, not just in scope. select_expired documents that
+    its input should be a single (job, destination) group, because GFS buckets
+    keep N per period. Pooling every destination together pits two copies of
+    the same run against each other and reports one of them as expiring, which
+    apply_rotation would never do: it is called once per destination.
+    """
+    import uuid as _uuid
+
     query = select(BackupArtifact).where(BackupArtifact.is_deleted == False)
+    if job_id:
+        from api.models.backup_run import BackupRun
+        try:
+            job_uuid = _uuid.UUID(str(job_id))
+        except (ValueError, AttributeError, TypeError) as exc:
+            logger.error(f"preview_rotation: invalid job_id {job_id!r}: {exc}")
+            return {"total_artifacts": 0, "would_keep": 0, "would_delete": 0,
+                    "artifacts_to_delete": [], "status": "error",
+                    "reason": f"invalid job_id {job_id!r}"}
+        run_ids = list((await db.execute(
+            select(BackupRun.id).where(BackupRun.job_id == job_uuid)
+        )).scalars().all())
+        if not run_ids:
+            return {"total_artifacts": 0, "would_keep": 0, "would_delete": 0,
+                    "artifacts_to_delete": [], "status": "noop",
+                    "reason": "no runs for job"}
+        query = query.where(BackupArtifact.run_id.in_(run_ids))
+    if storage_id:
+        try:
+            query = query.where(BackupArtifact.storage_id == _uuid.UUID(str(storage_id)))
+        except (ValueError, AttributeError, TypeError) as exc:
+            logger.error(f"preview_rotation: invalid storage_id {storage_id!r}: {exc}")
+            return {"total_artifacts": 0, "would_keep": 0, "would_delete": 0,
+                    "artifacts_to_delete": [], "status": "error",
+                    "reason": f"invalid storage_id {storage_id!r}"}
+
     result = await db.execute(query.order_by(BackupArtifact.created_at.desc()))
     artifacts = result.scalars().all()
 
     now = datetime.now(timezone.utc)
     max_age_cutoff = now - timedelta(days=policy.max_age_days) if policy.max_age_days > 0 else None
 
-    buckets = {
-        "hourly": defaultdict(list),
-        "daily": defaultdict(list),
-        "weekly": defaultdict(list),
-        "monthly": defaultdict(list),
-        "yearly": defaultdict(list),
-    }
-
-    for artifact in artifacts:
-        b = _assign_bucket(artifact.created_at)
-        buckets["hourly"][b["hour"]].append(artifact)
-        buckets["daily"][b["day"]].append(artifact)
-        buckets["weekly"][b["week"]].append(artifact)
-        buckets["monthly"][b["month"]].append(artifact)
-        buckets["yearly"][b["year"]].append(artifact)
-
-    keep_ids = set()
-
-    def keep_from_bucket(bucket_dict, keep_count):
-        sorted_keys = sorted(bucket_dict.keys(), reverse=True)
-        for key in sorted_keys[:keep_count]:
-            if bucket_dict[key]:
-                keep_ids.add(bucket_dict[key][0].id)
-
-    keep_from_bucket(buckets["hourly"], policy.keep_hourly)
-    keep_from_bucket(buckets["daily"], policy.keep_daily)
-    keep_from_bucket(buckets["weekly"], policy.keep_weekly)
-    keep_from_bucket(buckets["monthly"], policy.keep_monthly)
-    keep_from_bucket(buckets["yearly"], policy.keep_yearly)
+    # Same decision function as apply_rotation and purge. A preview that
+    # disagrees with the real thing is worse than no preview, since it is used
+    # to sanity-check policy changes before they run.
+    expired_ids = select_expired(artifacts, policy, now)
+    keep_ids = {a.id for a in artifacts} - expired_ids
 
     would_delete = []
     for artifact in artifacts:
-        if artifact.id not in keep_ids:
+        if artifact.id in expired_ids:
+            too_old = bool(max_age_cutoff and artifact.created_at < max_age_cutoff)
             would_delete.append({
                 "id": str(artifact.id),
                 "filename": artifact.filename,
                 "created_at": artifact.created_at.isoformat(),
                 "size_bytes": artifact.size_bytes,
-                "reason": "max_age" if max_age_cutoff and artifact.created_at < max_age_cutoff else "rotation",
+                "reason": "max_age" if too_old else "rotation",
             })
 
     return {

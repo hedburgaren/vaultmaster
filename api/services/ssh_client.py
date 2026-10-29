@@ -49,6 +49,28 @@ def _build_connect_kwargs(server) -> dict:
     Handles ssh_key, ssh_password, and fallback auth types.
     """
     resolved = _resolve_host(server.host)
+
+    # known_hosts=None disables host-key verification. Accepted deliberately
+    # (Chrille, 2026-07-19): VaultMaster runs on hedburgaren and every SSH
+    # target is the host itself via loopback. Offsite traffic goes through
+    # rclone to Google Drive over TLS, not through this code path, so there is
+    # no network segment for anyone to sit on.
+    #
+    # That acceptance is conditional on the assumption, so the assumption is
+    # checked rather than assumed. The day someone adds a genuinely remote
+    # server, this stops being a considered trade-off and becomes an unguarded
+    # MITM surface, and nothing else in the system would say so.
+    is_loopback = _normalize_host(server.host) in LOCAL_HOSTS
+    if not is_loopback:
+        logger.warning(
+            "SSH host-key verification is DISABLED (known_hosts=None) for "
+            "non-loopback host %s. That setting was accepted on the assumption "
+            "that all SSH targets are local to hedburgaren. This host breaks "
+            "that assumption: traffic to it can be intercepted without "
+            "detection. Seed known_hosts and enable verification for it.",
+            server.host,
+        )
+
     kwargs: dict = {
         "host": resolved,
         "port": getattr(server, 'port', 22) or 22,
@@ -73,6 +95,18 @@ def _build_connect_kwargs(server) -> dict:
         kwargs["client_keys"] = [key_path]
 
     return kwargs
+
+
+def connectivity_is_testable(server) -> bool:
+    """Whether test_ssh_connection actually reaches out to the server.
+
+    For auth_type='api' it does not: it validates the shape of the host string
+    and returns True. Treating that True as proof of life meant a dead API
+    target was stamped last_seen on every health sweep and could never trip
+    server.offline. The check is not wrong, it is just answering a different
+    question than the caller was asking.
+    """
+    return getattr(server, "auth_type", "") != "api"
 
 
 async def test_ssh_connection(server) -> tuple[bool, str]:
@@ -108,7 +142,14 @@ async def test_ssh_connection(server) -> tuple[bool, str]:
             # do here. Real connectivity is verified by the provider client.
             if not (host.startswith("http://") or host.startswith("https://") or "." in host or ":" in host):
                 return False, f"API host {host!r} doesn't look like a URL/hostname"
-            return True, f"API-based server (host={host}) — provider client tests connectivity"
+            # True here means "the host string is well formed", NOT "the server
+            # answered". Callers must gate last_seen on connectivity_is_testable()
+            # so a dead API target does not get stamped as freshly online, which
+            # would make server.offline permanently unreachable for it.
+            return True, (
+                f"API-based server (host={host}), NOT probed: "
+                f"connectivity is verified by the provider client, not here"
+            )
 
         kwargs = _build_connect_kwargs(server)
         async with asyncssh.connect(**kwargs) as conn:
@@ -441,7 +482,28 @@ async def list_remote_docker(server) -> dict:
                         "used_by": volume_to_containers.get(vol_name, []),
                     })
 
-            return {"containers": containers, "volumes": volumes, "error": None}
+            # A failed docker command used to leave its list empty and still
+            # report error=None, so "docker is unreachable" and "this host runs
+            # no containers" looked identical to the caller and the UI.
+            probe_errors = []
+            if c_result.exit_status != 0:
+                probe_errors.append(
+                    f"docker ps failed (exit {c_result.exit_status}): "
+                    f"{(c_result.stderr or '').strip()[:150]}"
+                )
+            if v_result.exit_status != 0:
+                probe_errors.append(
+                    f"docker volume ls failed (exit {v_result.exit_status}): "
+                    f"{(v_result.stderr or '').strip()[:150]}"
+                )
+            if probe_errors:
+                logger.warning(f"list_remote_docker({server.name}): {'; '.join(probe_errors)}")
+
+            return {
+                "containers": containers,
+                "volumes": volumes,
+                "error": "; ".join(probe_errors) if probe_errors else None,
+            }
 
     except Exception as e:
         logger.error(f"Failed to list Docker on {getattr(server, 'name', '?')}: {e}")
@@ -462,6 +524,49 @@ def is_local_server(server) -> bool:
     if getattr(server, 'auth_type', '') == 'local':
         return True
     return False
+
+
+async def upload_remote_file(
+    server,
+    local_path: str,
+    remote_path: str,
+    timeout: int = 4 * 3600,
+    max_retries: int = 2,
+) -> tuple[bool, str]:
+    """Upload a local file to a server via SFTP.
+
+    Added 2026-07-19 because the restore path shelled out to `scp` with
+    `server.host` verbatim. Inside this container 127.0.0.1 is the container's
+    own loopback, not the Docker host, so every restore died with "connection
+    refused" on a port that is open. _build_connect_kwargs already rewrites
+    localhost via _resolve_host, which is exactly the knowledge the raw scp
+    call threw away.
+
+    Uses the same connection setup as every other SSH operation here, so host
+    resolution, auth and key handling cannot drift apart from them again.
+    """
+    kwargs = _build_connect_kwargs(server)
+    last_err: str = ""
+
+    async def _do_transfer() -> None:
+        async with asyncssh.connect(**kwargs) as conn:
+            async with conn.start_sftp_client() as sftp:
+                await sftp.put(local_path, remote_path)
+
+    for attempt in range(max_retries + 1):
+        try:
+            await asyncio.wait_for(_do_transfer(), timeout=timeout)
+            return True, f"Uploaded {local_path} to {remote_path}"
+        except asyncio.TimeoutError:
+            last_err = f"SFTP upload wall-clock timeout after {timeout}s for {remote_path}"
+            logger.error(last_err)
+        except Exception as e:
+            last_err = f"SFTP upload failed: {e}"
+            logger.error(last_err)
+        if attempt < max_retries:
+            await asyncio.sleep(2 ** attempt * 5)
+
+    return False, last_err
 
 
 async def download_remote_file(

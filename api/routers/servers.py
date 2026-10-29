@@ -13,7 +13,7 @@ from api.database import get_db
 from api.models.server import Server
 from api.models.user import User
 from api.schemas import ServerCreate, ServerUpdate, ServerOut
-from api.services.ssh_client import test_ssh_connection, list_remote_directory, list_remote_databases, list_remote_docker, prune_docker_volumes
+from api.services.ssh_client import test_ssh_connection, connectivity_is_testable, list_remote_directory, list_remote_databases, list_remote_docker, prune_docker_volumes
 
 router = APIRouter(prefix="/servers", tags=["servers"], dependencies=[Depends(get_current_user)])
 
@@ -191,15 +191,18 @@ async def test_connection(server_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     success, message = await test_ssh_connection(server)
-    if success:
+    tested = connectivity_is_testable(server)
+    if success and tested:
         from datetime import datetime, timezone
         server.last_seen = datetime.now(timezone.utc)
         server.last_error = None
         await db.flush()
-    else:
+    elif not success:
         server.last_error = message
         await db.flush()
-    return {"success": success, "message": message}
+    # success but not tested: leave last_seen alone. Stamping it would record
+    # a sighting that never happened.
+    return {"success": success, "message": message, "connectivity_tested": tested}
 
 
 @router.get("/{server_id}/browse")
@@ -210,3 +213,61 @@ async def browse_server(server_id: uuid.UUID, path: str = "/", db: AsyncSession 
         raise HTTPException(status_code=404, detail="Server not found")
     entries = await list_remote_directory(server, path)
     return {"path": path, "entries": entries}
+
+
+def _parse_du_output(out: str, path: str) -> int:
+    """Parse `du -sb PATH` output into bytes. First field, one line.
+
+    Extracted so the picker's size promise is testable: `du -sb` prints
+    apparent size in bytes, which is what an operator means when asking
+    how big a folder is, not block-allocated size.
+    """
+    line = (out or "").strip().splitlines()[0] if (out or "").strip() else ""
+    if not line:
+        raise ValueError(f"du returned no output for {path}")
+    first = line.split()[0]
+    if not first.isdigit():
+        raise ValueError(f"du output not parseable for {path}: {line[:80]}")
+    return int(first)
+
+
+@router.post("/{server_id}/dirsize")
+async def server_dir_size(
+    server_id: uuid.UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Apparent size in bytes of one directory, on demand.
+
+    The tree picker lists sizes for free (files carry them in the listing);
+    directories do not, and running du for every expanded folder would
+    hammer the disk for numbers nobody asked for. So: the UI asks for one
+    folder when the operator asks for it, with a timeout, and the answer
+    says both the number and how long it took.
+    """
+    from time import monotonic
+
+    from api.services.ssh_client import run_remote_command
+
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    import shlex as _shlex
+    raw = str(body.get("path") or "").strip()
+    if not raw.startswith("/"):
+        raise HTTPException(status_code=422, detail="path must be absolute")
+    # -s: one summary line. -B1: bytes, not blocks (apparent size).
+    started = monotonic()
+    code, out, err = await run_remote_command(
+        server, f"du -sb -B1 {_shlex.quote(raw)}", timeout=120
+    )
+    took_ms = int((monotonic() - started) * 1000)
+    if code != 0:
+        raise HTTPException(status_code=502, detail=f"du failed: {(err or '').strip()[:200]}")
+    try:
+        bytes_ = _parse_du_output(out, raw)
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"path": raw, "bytes": bytes_, "took_ms": took_ms}

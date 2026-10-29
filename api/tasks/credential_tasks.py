@@ -1,6 +1,6 @@
 """Periodic credential maintenance tasks.
 
-scan_credential_expiry — emits credential.expiring / credential.expired
+scan_credential_expiry: emits credential.expiring / credential.expired
 notification events. Runs daily via Celery beat.
 """
 
@@ -15,14 +15,14 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(name="api.tasks.credential_tasks.scan_credential_expiry")
 def scan_credential_expiry():
-    """Scan all credentials with non-null expires_at; fire one
-    notification event per soon-to-expire / already-expired entry."""
+    """Scan all credential items with non-null expires_at; fire one
+    notification event per soon-to-expire / already-expired item."""
     _run_async(_scan_expiry())
 
 
 async def _scan_expiry() -> None:
     from sqlalchemy import select
-    from api.models.credential import Credential
+    from api.models.credential import CredentialItem
     from api.services.notifier import notify_event
 
     now = datetime.now(timezone.utc)
@@ -30,25 +30,24 @@ async def _scan_expiry() -> None:
 
     async with get_task_session() as db:
         result = await db.execute(
-            select(Credential).where(Credential.expires_at.is_not(None))
+            select(CredentialItem).where(CredentialItem.expires_at.is_not(None))
         )
-        creds = result.scalars().all()
+        items = result.scalars().all()
 
         n_warn = 0
         n_expired = 0
-        for c in creds:
-            exp = c.expires_at
+        for item in items:
+            exp = item.expires_at
             if not exp:
                 continue
             if exp.tzinfo is None:
                 exp = exp.replace(tzinfo=timezone.utc)
             days_left = (exp - now).days
             payload = {
-                "name": c.name,
-                "credential_type": c.credential_type,
+                "title": item.title,
                 "expires_at": exp.isoformat(),
                 "days_left": days_left,
-                "credential_id": str(c.id),
+                "credential_id": str(item.id),
             }
             if exp < now:
                 await notify_event(db, "credential.expired", payload)

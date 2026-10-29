@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from fastapi import Header, HTTPException, status, Depends
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
@@ -28,7 +29,11 @@ async def get_mcp_client(
         raise HTTPException(status_code=401, detail="X-MCP-Key header required")
 
     key_hash = hash_mcp_key(x_mcp_key)
-    result = await db.execute(select(MCPClient).where(MCPClient.key_hash == key_hash))
+    result = await db.execute(
+        select(MCPClient)
+        .options(selectinload(MCPClient.grants))
+        .where(MCPClient.key_hash == key_hash)
+    )
     client = result.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=401, detail="Unknown MCP key")

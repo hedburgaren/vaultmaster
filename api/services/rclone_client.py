@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -170,19 +171,38 @@ async def get_storage_usage(dest) -> dict:
         except Exception as e:
             return {"error": str(e)}
 
-    exit_code, stdout, stderr = await _run_rclone(["about", remote, "--json"] + flags)
+    # "used" is what VaultMaster itself stores under its own remote path
+    # (rclone size), not the account's figure from rclone about. About counts
+    # the whole account including the trash: on the shared Google Drive that
+    # was 2.18 TiB "used" of which 1.75 TiB trash and the rest largely not
+    # ours, so the 2 TB budget read 110 percent (task 157, decision
+    # 2026-10-17-vaultmaster-holds-no-credentials-and-keeps-a-two-terabyte-
+    # drive-budget). About is kept only for the account total, and is optional
+    # because several backends do not implement it.
+    exit_code, stdout, stderr = await _run_rclone(["size", remote, "--json"] + flags, timeout=600)
+    if exit_code != 0:
+        return {"error": stderr or "rclone size failed"}
+    try:
+        used = json.loads(stdout).get("bytes")
+    except json.JSONDecodeError:
+        return {"error": "Failed to parse rclone size output"}
+    if used is None:
+        return {"error": "rclone size returned no bytes"}
+
+    total = free = None
+    exit_code, stdout, _ = await _run_rclone(["about", remote, "--json"] + flags)
     if exit_code == 0:
         try:
-            data = json.loads(stdout)
-            return {
-                "total_bytes": data.get("total"),
-                "used_bytes": data.get("used"),
-                "free_bytes": data.get("free"),
-                "percent_used": round(data.get("used", 0) / data.get("total", 1) * 100, 1) if data.get("total") else None,
-            }
+            about = json.loads(stdout)
+            total, free = about.get("total"), about.get("free")
         except json.JSONDecodeError:
-            return {"error": "Failed to parse rclone output"}
-    return {"error": stderr}
+            pass
+    return {
+        "total_bytes": total,
+        "used_bytes": used,
+        "free_bytes": free,
+        "percent_used": round(used / total * 100, 1) if total else None,
+    }
 
 
 async def list_storage_directory(dest, path: str = "/") -> list[dict]:
@@ -224,20 +244,192 @@ async def list_storage_directory(dest, path: str = "/") -> list[dict]:
 
 
 async def copy_file_to_storage(dest, local_path: str, remote_subpath: str) -> tuple[bool, str]:
-    """Copy a file to a storage destination."""
+    """Copy a file to a storage destination.
+
+    On success the second element is the STORED PATH, not a human message.
+    It used to be f"Copied to {target}", and the caller wrote that sentence
+    straight into BackupArtifact.remote_path. Every artifact ever recorded
+    therefore had a path of the form "Copied to /srv/archive/..." which
+    download_file_from_storage could not resolve, so restore and restore
+    validation could never locate a file. Callers that want a log line should
+    format one from the returned path.
+    """
     remote, flags = _build_backend(dest)
     target = f"{remote}/{remote_subpath}"
 
     if dest.backend == "local":
-        target_dir = os.path.dirname(f"{remote}/{remote_subpath}")
-        os.makedirs(target_dir, exist_ok=True)
-        shutil.copy2(local_path, f"{remote}/{remote_subpath}")
-        return True, f"Copied to {remote}/{remote_subpath}"
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(local_path, target)
+        return True, target
 
     exit_code, stdout, stderr = await _run_rclone(["copyto", local_path, target] + flags, timeout=3600)
     if exit_code == 0:
-        return True, f"Copied to {target}"
+        return True, target
     return False, f"Failed: {stderr}"
+
+
+# Legacy artifacts stored the copy_file_to_storage *message* as their path.
+_LEGACY_PATH_PREFIX = "Copied to "
+
+
+def local_absence_confirmed(path: str) -> tuple[bool, str]:
+    """Is a local file provably gone, as opposed to merely unreachable?
+
+    The remote branch of delete_file_from_storage already refuses to read a
+    failed probe as proof of absence ("Unknown is not absent"). The local
+    branch used a bare os.path.isfile, which returns False for a whole family
+    of conditions that are not absence:
+
+      - the parent directory is missing because a mount is not mounted
+      - EACCES on a component of the path
+      - ENOTDIR, ESTALE on an NFS handle, EIO on a failing disk
+
+    That mattered because purge treats "absent" as success: it flags the row
+    is_deleted and moves on. A local destination pointing at an unmounted
+    volume would therefore have every one of its artifacts marked deleted in a
+    single run, and when the volume came back the files would still be sitting
+    there, now invisible to restore. Silent, and the worst possible direction.
+
+    Absence is only confirmed when the file is not there AND the directory that
+    would contain it is present. An unmounted mountpoint fails the second test,
+    because the nested job directories live on the volume, not on the stub.
+    """
+    if os.path.lexists(path):
+        return False, f"file still present: {path}"
+
+    parent = os.path.dirname(path) or "."
+    try:
+        st = os.stat(parent)
+    except FileNotFoundError:
+        return False, (
+            f"parent directory {parent} does not exist, so a missing file "
+            f"proves nothing (unmounted volume?)"
+        )
+    except OSError as e:
+        return False, f"parent directory {parent} unreadable ({e.strerror})"
+
+    if not stat.S_ISDIR(st.st_mode):
+        return False, f"parent path {parent} is not a directory"
+    if not os.access(parent, os.R_OK | os.X_OK):
+        return False, f"parent directory {parent} is not readable, cannot confirm absence"
+
+    return True, f"confirmed absent, parent {parent} is reachable"
+
+
+def probe_says_absent(exit_code: int | None, listing: str | None) -> bool:
+    """True only when an existence probe RAN and found nothing.
+
+    A probe that failed tells us nothing about the file. Reading its failure as
+    absence is how a file that is still there gets recorded as deleted: the row
+    is flagged, the artifact vanishes from every view the system offers, and the
+    bytes keep occupying the quota nobody is now counting.
+
+    Unknown is not absent.
+    """
+    return exit_code == 0 and not (listing or "").strip()
+
+
+def listing_says_absent(listing: str | None, name: str) -> bool:
+    """True when a SUCCESSFUL listing of the parent directory lacks `name`.
+
+    The caller has already established that the listing ran (exit 0). This
+    only answers whether the file is in it. An empty listing is a real answer
+    here: the directory exists and holds nothing, so the file is gone.
+    """
+    entries = {line.strip().rstrip("/") for line in (listing or "").splitlines() if line.strip()}
+    return name not in entries
+
+
+def normalize_stored_path(remote_path: str) -> str:
+    """Strip the legacy "Copied to " prefix from a stored artifact path.
+
+    Roughly 8300 artifacts predate the fix above and carry the prefix. Handling
+    it on read makes those backups locatable again instead of requiring a bulk
+    rewrite of historical rows.
+    """
+    p = (remote_path or "").strip()
+    if p.startswith(_LEGACY_PATH_PREFIX):
+        return p[len(_LEGACY_PATH_PREFIX):].strip()
+    return p
+
+
+async def delete_file_from_storage(dest, remote_path: str) -> tuple[bool, str]:
+    """Delete a single artifact file from a storage destination.
+
+    This did not exist until 2026-07-19, which is why nothing ever reclaimed
+    space: rotation only ever set a database flag. Retention was enforced on
+    paper and nowhere else.
+
+    A missing file counts as success. Purge is expected to be re-runnable and
+    an already-gone file is the desired end state, not an error.
+    """
+    path = normalize_stored_path(remote_path)
+    if not path:
+        return False, "empty remote_path"
+
+    if dest.backend == "local":
+        try:
+            os.remove(path)
+            return True, f"deleted {path}"
+        except FileNotFoundError:
+            # Delete first, ask questions second. os.remove is the only call
+            # that can distinguish these cases without a race, and reaching
+            # FileNotFoundError still does not prove the file is gone: it also
+            # fires when the directory holding it is unreachable.
+            gone, why = local_absence_confirmed(path)
+            if gone:
+                return True, f"already absent: {path}"
+            return False, f"delete failed and absence could not be confirmed: {why}"
+        except OSError as e:
+            return False, f"delete failed: {e}"
+
+    remote, flags = _build_backend(dest)
+    target = path if ":" in path else f"{remote}/{path}"
+    exit_code, _stdout, stderr = await _run_rclone(["deletefile", target] + flags, timeout=300)
+    if exit_code == 0:
+        return True, f"deleted {target}"
+
+    # Do not infer the outcome from the error text. The first version matched
+    # "not found" and "does not exist", and rclone actually says "is a directory
+    # or doesn't exist" (contraction), so every already-deleted file was
+    # reported as a failure. Its row then never got flagged and the next run
+    # retried the same delete forever.
+    #
+    # String matching is the wrong tool anyway: the same phrases appear for
+    # bucket-not-found and permission problems, which are real failures. Check
+    # the actual state instead: if the file is not there, the desired end state
+    # is reached, whatever rclone said on the way.
+    # The probe itself must succeed for its answer to mean anything. An earlier
+    # version accepted ANY non-zero exit as proof of absence, which turned auth
+    # failures, network outages, permission denials and timeouts into "deleted".
+    # The row would then be flagged while the file sat there consuming quota,
+    # invisible to the system. Swapping a bad inference from stderr for a bad
+    # inference from a failed probe is not an improvement.
+    #
+    # The probe lists the PARENT directory, not the file. `rclone lsf <file>`
+    # on a path that no longer exists exits 3 ("directory not found"), which
+    # is exactly the case purge needs to recognise, and by the rule above a
+    # failed probe proves nothing. So every already-deleted file came back as
+    # "could not be confirmed", its row stayed unpurged, and the same 3 887
+    # deletes were retried daily (measured 2026-09-28: 5 646 warnings in 48 h,
+    # all legacy rows whose files left GDrive months ago). Listing the parent
+    # mirrors local_absence_confirmed: the directory that would hold the file
+    # is reachable, and the file is not in it.
+    parent, _, name = target.rpartition("/")
+    if not name or not parent.rstrip(":"):
+        return False, f"delete failed and the path has no parent to probe: {target}"
+    check_code, check_out, check_err = await _run_rclone(
+        ["lsf", parent, "--files-only"] + flags, timeout=120
+    )
+    if check_code != 0:
+        return False, (
+            f"delete failed and existence could not be confirmed either "
+            f"(lsf of parent exit {check_code}): {(check_err or stderr or '').strip()[:160]}"
+        )
+    if listing_says_absent(check_out, name):
+        return True, f"already absent: {target}"
+
+    return False, f"delete failed, file still present: {stderr.strip()[:200]}"
 
 
 async def download_file_from_storage(dest, remote_path: str, local_path: str) -> tuple[bool, str]:
@@ -248,6 +440,8 @@ async def download_file_from_storage(dest, remote_path: str, local_path: str) ->
     For local backends it's a filesystem path; for cloud backends it's a
     backend:bucket/path string that rclone understands.
     """
+    remote_path = normalize_stored_path(remote_path)
+
     if dest.backend == "local":
         if not os.path.isfile(remote_path):
             return False, f"local file not found: {remote_path}"

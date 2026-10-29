@@ -27,3 +27,4 @@ docs/disaster-recovery.md
 docs/seafile-backup-strategy.md
 scripts/seed_discord_channels.py
 ui/.next.bak.*/
+ui/tsconfig.tsbuildinfo
