@@ -75,6 +75,18 @@ export const deleteServer = (id: string) => apiFetch(`/v1/servers/${id}`, { meth
 export const testServer = (id: string) => apiFetch(`/v1/servers/${id}/test`, { method: 'POST' });
 export const testConnectionPresave = (data: any) => apiFetch('/v1/servers/test-connection', { method: 'POST', body: JSON.stringify(data) });
 export const browseServer = (id: string, path: string) => apiFetch(`/v1/servers/${id}/browse?path=${encodeURIComponent(path)}`);
+export const serverDirSize = (id: string, path: string) =>
+  apiFetch(`/v1/servers/${id}/dirsize`, { method: 'POST', body: JSON.stringify({ path }) });
+
+// MCP clients (agents) + granular grants
+export const getMcpClients = () => apiFetch('/v1/mcp-clients');
+export const createMcpClient = (data: any) => apiFetch('/v1/mcp-clients', { method: 'POST', body: JSON.stringify(data) });
+export const updateMcpClient = (id: string, data: any) => apiFetch(`/v1/mcp-clients/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const deleteMcpClient = (id: string) => apiFetch(`/v1/mcp-clients/${id}`, { method: 'DELETE' });
+export const rotateMcpClientKey = (id: string) => apiFetch(`/v1/mcp-clients/${id}/rotate-key`, { method: 'POST' });
+export const getMcpClientGrants = (id: string) => apiFetch(`/v1/mcp-clients/${id}/grants`);
+export const putMcpClientGrants = (id: string, data: any) =>
+  apiFetch(`/v1/mcp-clients/${id}/grants`, { method: 'PUT', body: JSON.stringify(data) });
 export const getSSHKeys = () => apiFetch('/v1/servers/ssh-keys');
 export const generateSSHKey = () => apiFetch('/v1/servers/ssh-keys/generate', { method: 'POST' });
 export const getServerDatabases = (id: string, dbType?: string) => apiFetch(`/v1/servers/${id}/databases?db_type=${dbType || 'postgresql'}`);

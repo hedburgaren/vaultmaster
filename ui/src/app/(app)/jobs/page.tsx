@@ -8,6 +8,7 @@ import Badge from '@/components/Badge';
 import FormLabel from '@/components/FormLabel';
 import TagInput from '@/components/TagInput';
 import CronBuilder from '@/components/CronBuilder';
+import { FileTreePicker } from '@/components/FileTreePicker';
 import { Plus, Play, Trash2, Clock, Lock, Pencil, X, FolderOpen, ArrowUp, Loader2, Database, Container, Terminal, HardDrive, RefreshCw, ChevronDown, ChevronUp, ShieldCheck, ShieldAlert, Shield } from 'lucide-react';
 
 const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5 text-vm-text font-mono text-sm outline-none focus:border-vm-accent";
@@ -185,6 +186,15 @@ export default function JobsPage() {
     const newPaths = current ? `${current}\n${fullPath}` : fullPath;
     setForm({ ...form, source_paths: newPaths });
   };
+  // Tree picker twin: toggle one path in the newline-separated list, so the
+  // checkboxes and the textarea are two views of the same truth.
+  const toggleSourcePath = (fullPath: string) => {
+    setForm((f) => {
+      const paths = f.source_paths.split('\n').map((p: string) => p.trim()).filter(Boolean);
+      const next = paths.includes(fullPath) ? paths.filter((p) => p !== fullPath) : [...paths, fullPath];
+      return { ...f, source_paths: next.join('\n') };
+    });
+  };
 
   const toggleDestination = (id: string) => {
     setForm(f => ({ ...f, destination_ids: f.destination_ids.includes(id) ? f.destination_ids.filter(d => d !== id) : [...f.destination_ids, id] }));
@@ -212,6 +222,13 @@ export default function JobsPage() {
             </div>
             <FormLabel label={t('jobs.source_path')} tooltip={t('jobs.source_path_tip')} />
             <textarea value={form.source_paths} onChange={e => setForm({...form, source_paths: e.target.value})} className={INPUT + ' h-24 resize-y'} placeholder={t('jobs.source_path_placeholder')} />
+            <div className="mt-3">
+              <FileTreePicker
+                serverId={form.server_id}
+                selected={form.source_paths.split('\n').map((p: string) => p.trim()).filter(Boolean)}
+                onToggle={toggleSourcePath}
+              />
+            </div>
             <button type="button" onClick={openBrowser} disabled={!form.server_id} className="mt-2 flex items-center gap-1.5 px-3 py-1.5 border border-vm-accent text-vm-accent rounded text-xs font-bold tracking-wider uppercase hover:bg-vm-accent/[0.08] disabled:opacity-50">
               <FolderOpen className="w-3.5 h-3.5" /> {t('jobs.browse_files')}
             </button>
