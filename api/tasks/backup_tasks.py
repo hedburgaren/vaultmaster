@@ -592,14 +592,19 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
 
             # Send notifications
             from api.services.notifier import notify_event
+            from api.services.quiet_hosts import quiet_failure
             event = f"run.{run.status}"
-            await notify_event(db, event, {
-                "job_name": job.name,
-                "server_name": server.name,
-                "size_bytes": run.size_bytes,
-                "error": run.error_message,
-                "duration": str(run.finished_at - run.started_at) if run.finished_at and run.started_at else None,
-            })
+            grace = int(getattr(get_settings(), "intermittent_grace_hours", 96) or 96)
+            if event == "run.failed" and await quiet_failure(db, job, server, grace):
+                logger.info(f"[{run.id}] {server.name} is intermittent and backed up within {grace}h: failure recorded, not notified")
+            else:
+                await notify_event(db, event, {
+                    "job_name": job.name,
+                    "server_name": server.name,
+                    "size_bytes": run.size_bytes,
+                    "error": run.error_message,
+                    "duration": str(run.finished_at - run.started_at) if run.finished_at and run.started_at else None,
+                })
 
         except Exception as e:
             # Don't squash a Retry, let Celery handle it.
@@ -617,13 +622,18 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
             # crash, transfer error) silently skipped all configured channels.
             try:
                 from api.services.notifier import notify_event
-                await notify_event(db, "run.failed", {
-                    "job_name": job.name,
-                    "server_name": server.name,
-                    "size_bytes": run.size_bytes,
-                    "error": run.error_message,
-                    "duration": str(run.finished_at - run.started_at) if run.finished_at and run.started_at else None,
-                })
+                from api.services.quiet_hosts import quiet_failure
+                grace = int(getattr(get_settings(), "intermittent_grace_hours", 96) or 96)
+                if await quiet_failure(db, job, server, grace):
+                    logger.info(f"[{run.id}] {server.name} is intermittent and backed up within {grace}h: failure recorded, not notified")
+                else:
+                    await notify_event(db, "run.failed", {
+                        "job_name": job.name,
+                        "server_name": server.name,
+                        "size_bytes": run.size_bytes,
+                        "error": run.error_message,
+                        "duration": str(run.finished_at - run.started_at) if run.finished_at and run.started_at else None,
+                    })
             except Exception as notify_err:
                 logger.warning(f"[{run.id}] notify on exception-path failed: {notify_err}")
             raise
@@ -1461,6 +1471,7 @@ async def _check_health():
     from api.models.server import Server
     from api.services.ssh_client import test_ssh_connection, connectivity_is_testable
     from api.services.notifier import notify_event
+    from api.services.quiet_hosts import is_intermittent
 
     async with get_task_session() as db:
         result = await db.execute(select(Server).where(Server.is_active == True))
@@ -1484,7 +1495,9 @@ async def _check_health():
                 server.last_error = None
             else:
                 server.last_error = message
-                if was_online:
+                # An intermittent server (a laptop) is offline by design; its
+                # backups alarm on their own once they go stale (quiet_hosts).
+                if was_online and not is_intermittent(server):
                     await notify_event(db, "server.offline", {"server_name": server.name, "error": message})
 
         await db.commit()

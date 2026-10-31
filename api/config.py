@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # longest legitimate run is a 23 GB archive plus upload.
     stale_run_hours: int = 6
 
+    # A server tagged "intermittent" (a laptop) does not alarm on a failed
+    # run while its job succeeded within this many hours, and never on
+    # server.offline. 96 h covers a long weekend with the lid closed.
+    intermittent_grace_hours: int = 96
+
     # Credential vault — separate from JWT secret_key by design.
     # Format: "v1:<base64-Fernet-key>,v2:<base64-Fernet-key>"
     # The HIGHEST version number is used for new encryptions; all listed
