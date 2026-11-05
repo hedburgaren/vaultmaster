@@ -43,6 +43,7 @@ DUE_JOBS = [f"{m} {h} * * *" for h, m in
 LONG_JOB_START = NIGHT.replace(hour=2, minute=30)   # 03:30 local
 LONG_JOB_END = NIGHT.replace(hour=4, minute=10)     # about 05:10 local
 DEFINED = NIGHT - timedelta(days=30)
+CATCH_UP_HOURS = 2
 
 
 def old_rule(cron, now):
@@ -95,7 +96,7 @@ def test_old_rule_skips_the_whole_window():
 def test_new_rule_catches_up_behind_a_long_backup():
     def decide(cron, now, has_run):
         fire = sp.latest_fire(cron, now)
-        action = sp.schedule_action(fire, now, DEFINED, has_run, catch_up_hours=6)
+        action = sp.schedule_action(fire, now, DEFINED, has_run, catch_up_hours=CATCH_UP_HOURS)
         return action in (sp.RUN, sp.CATCH_UP)
     decide.expires = 120
     started = replay_single_slot_night(decide)
@@ -103,17 +104,29 @@ def test_new_rule_catches_up_behind_a_long_backup():
           f"replay: even on one shared slot the new rule starts all {len(DUE_JOBS)} jobs ({len(started)})")
 
 
+def test_catch_up_default_covers_the_incident():
+    from api.config import Settings
+    check(Settings().schedule_catch_up_hours == CATCH_UP_HOURS,
+          f"the shipped catch-up bound is the one the replay used ({CATCH_UP_HOURS} h)")
+
+
 def test_schedule_action_cases():
     fire = NIGHT.replace(hour=3)
     a = sp.schedule_action
-    check(a(fire, fire + timedelta(seconds=30), DEFINED, False, 6) == sp.RUN, "on time: run")
-    check(a(fire, fire + timedelta(minutes=95), DEFINED, False, 6) == sp.CATCH_UP, "95 min late: catch up")
-    check(a(fire, fire + timedelta(hours=7), DEFINED, False, 6) == sp.MISSED, "7 h late with a 6 h bound: missed, not run")
-    check(a(fire, fire + timedelta(minutes=95), DEFINED, True, 6) == sp.NONE, "already had its run: nothing")
-    check(a(fire, fire + timedelta(minutes=95), fire + timedelta(minutes=1), False, 6) == sp.NONE,
-          "created or edited after the fire time: not owed (moving 03:30 to 21:00 at noon does not start it at noon)")
+    h = CATCH_UP_HOURS
+    check(a(fire, fire + timedelta(seconds=30), DEFINED, False, h) == sp.RUN, "on time: run")
+    check(a(fire, fire + timedelta(minutes=95), DEFINED, False, h) == sp.CATCH_UP, "95 min late: catch up")
+    check(a(fire, fire + timedelta(hours=3), DEFINED, False, h) == sp.MISSED, "3 h late with a 2 h bound: missed, not run")
+    check(a(fire, fire + timedelta(minutes=95), DEFINED, True, h) == sp.NONE, "already had its run: nothing")
+    check(a(fire, fire + timedelta(minutes=95), fire + timedelta(minutes=1), False, h) == sp.NONE,
+          "created after the fire time: not owed")
+    # A schedule moved from 03:30 to 21:00 at noon: the 03:30 run today is
+    # after yesterday's 21:00, so the run rule alone says nothing is owed.
+    moved_fire = NIGHT - timedelta(hours=3)  # yesterday 21:00 local is 20:00 UTC, near enough
+    check(a(moved_fire, NIGHT.replace(hour=11), DEFINED, True, h) == sp.NONE,
+          "a schedule moved at noon does not start the job at noon")
     naive = fire.replace(tzinfo=None)
-    check(a(naive, fire + timedelta(seconds=30), None, False, 6) == sp.RUN, "naive datetimes are read as UTC")
+    check(a(naive, fire + timedelta(seconds=30), None, False, h) == sp.RUN, "naive datetimes are read as UTC")
 
 
 def test_is_stale_cases():
@@ -124,8 +137,6 @@ def test_is_stale_cases():
     check(not sp.is_stale(daily, now - timedelta(hours=30), DEFINED, now, 1.5), "daily job, last run 30 h ago: not stale")
     check(not sp.is_stale(daily, None, now - timedelta(hours=2), now, 1.5), "new job that never ran, created 2 h ago: not stale")
     check(sp.is_stale(daily, None, now - timedelta(days=3), now, 1.5), "job that never ran in 3 days: stale")
-    check(not sp.is_stale(daily, now - timedelta(days=5), now - timedelta(hours=3), now, 1.5),
-          "edited 3 h ago: measured from the edit")
     check(sp.is_stale("0 * * * *", now - timedelta(minutes=100), DEFINED, now, 1.5), "hourly job, 100 min without a run: stale")
     # The three nights themselves: daily jobs, last run 10-28 night, checked 10-30 noon.
     check(sp.is_stale(DUE_JOBS[0], NIGHT - timedelta(days=2) + timedelta(hours=3), DEFINED, now, 1.5),
@@ -135,7 +146,7 @@ def test_is_stale_cases():
 def test_scheduler_has_its_own_lane():
     from api.tasks.celery_app import celery_app
     routes = celery_app.conf.task_routes
-    for name in ("check_scheduled_jobs", "reap_stale_runs", "scan_stale_jobs"):
+    for name in ("check_scheduled_jobs", "scan_stale_jobs"):
         full = f"api.tasks.backup_tasks.{name}"
         check(routes.get(full, {}).get("queue") == "scheduler", f"{name} is routed to the scheduler queue")
     check(routes.get("api.tasks.backup_tasks.*", {}).get("queue") == "backup", "backups still go to the backup queue")
@@ -144,7 +155,9 @@ def test_scheduler_has_its_own_lane():
     # exact names must win over the "backup_tasks.*" pattern.
     import api.tasks.backup_tasks  # noqa: F401  registers the tasks
     router = celery_app.amqp.router
-    for name, queue in [("check_scheduled_jobs", "scheduler"), ("reap_stale_runs", "scheduler"),
+    # reap_stale_runs must stay with the backup worker: its sweep runs docker
+    # and reads the archive mount, neither of which the scheduler container has.
+    for name, queue in [("check_scheduled_jobs", "scheduler"), ("reap_stale_runs", "backup"),
                         ("scan_stale_jobs", "scheduler"), ("run_backup_task", "backup"),
                         ("check_server_health", "backup")]:
         got = router.route({}, f"api.tasks.backup_tasks.{name}")["queue"].name
@@ -201,10 +214,132 @@ def test_claim_once():
     check(_claim_once(_FakeRedis(fail=True), "k", 10) is None, "Redis error: unknown, not a claim")
 
 
+class _Result:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self.rows)
+
+    def first(self):
+        return self.rows[0] if self.rows else None
+
+
+class _FakeDB:
+    """Answers the three queries _check_scheduled makes, by table and column."""
+
+    def __init__(self, jobs, runs_since_fire=(), running=()):
+        self.jobs = jobs
+        self.runs_since_fire = set(runs_since_fire)
+        self.running = set(running)
+
+    async def execute(self, stmt):
+        sql = str(stmt)
+        job_id = None
+        for p in stmt.compile().params.values():
+            if isinstance(p, str) and p.startswith("job-"):
+                job_id = p
+        if "FROM backup_job" in sql:
+            return _Result(self.jobs)
+        if "backup_run.status" in sql:
+            class _Run:
+                started_at = NIGHT
+            return _Result([_Run()] if job_id in self.running else [])
+        return _Result(["id"] if job_id in self.runs_since_fire else [])
+
+    async def commit(self):
+        pass
+
+
+class _Job:
+    def __init__(self, ident, cron):
+        self.id = ident
+        self.name = ident
+        self.schedule_cron = cron
+        self.created_at = DEFINED
+        self.updated_at = DEFINED
+
+
+def _drive_check_scheduled(db, now, redis):
+    """Run the real _check_scheduled once with the database, Redis, broker,
+    notifier and clock replaced. Returns (triggered, notified)."""
+    import asyncio
+    from contextlib import asynccontextmanager
+    from api.tasks import backup_tasks as bt
+    from api.services import notifier
+
+    triggered, notified = [], []
+
+    @asynccontextmanager
+    async def session():
+        yield db
+
+    async def fake_notify(_db, event, data):
+        notified.append((event, data))
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    saved = (bt.get_task_session, bt._redis_or_none, bt.run_backup_task.apply_async,
+             notifier.notify_event, bt.datetime)
+    bt.get_task_session = session
+    bt._redis_or_none = lambda caller: redis
+    bt.run_backup_task.apply_async = lambda args, kwargs: triggered.append((args[0], kwargs["triggered_by"]))
+    notifier.notify_event = fake_notify
+    bt.datetime = _Clock
+    try:
+        asyncio.run(bt._check_scheduled())
+    finally:
+        (bt.get_task_session, bt._redis_or_none, bt.run_backup_task.apply_async,
+         notifier.notify_event, bt.datetime) = saved
+    return triggered, notified
+
+
+class _ClosableRedis(_FakeRedis):
+    def close(self):
+        pass
+
+
+def test_check_scheduled_end_to_end():
+    fire = NIGHT.replace(hour=2, minute=35)
+    late = fire + timedelta(minutes=95)
+    job = _Job("job-a", "35 2 * * *")
+
+    r = _ClosableRedis()
+    trig, _ = _drive_check_scheduled(_FakeDB([job]), late, r)
+    check(trig == [("job-a", "scheduler-catch-up")], f"95 min late, no run yet: started once as a catch-up ({trig})")
+    trig, _ = _drive_check_scheduled(_FakeDB([job]), late + timedelta(minutes=1), r)
+    check(trig == [], "next tick, run row not created yet (task still queued): not started again")
+
+    trig, _ = _drive_check_scheduled(_FakeDB([job], runs_since_fire={"job-a"}), late, _ClosableRedis())
+    check(trig == [], "already had its run: not started")
+
+    trig, _ = _drive_check_scheduled(_FakeDB([job]), late, None)
+    check(trig == [], "Redis down: a catch-up is not started, since it cannot be deduplicated")
+
+    trig, _ = _drive_check_scheduled(_FakeDB([job]), fire + timedelta(seconds=40), None)
+    check(trig == [("job-a", "scheduler")], "Redis down, on time: started as before the fix")
+
+    r = _ClosableRedis()
+    trig, note = _drive_check_scheduled(_FakeDB([job]), fire + timedelta(hours=3), r)
+    check(trig == [] and [e for e, _ in note] == ["schedule.missed"],
+          f"3 h late: not started, schedule.missed sent ({trig}, {[e for e, _ in note]})")
+    trig, note = _drive_check_scheduled(_FakeDB([job]), fire + timedelta(hours=3, minutes=1), r)
+    check(note == [], "the same missed fire time is reported once")
+
+    trig, _ = _drive_check_scheduled(_FakeDB([job], running={"job-a"}), late, _ClosableRedis())
+    check(trig == [], "a run still in progress: not started")
+
+
 if __name__ == "__main__":
     for fn in [test_old_rule_skips_the_whole_window, test_new_rule_catches_up_behind_a_long_backup,
-               test_schedule_action_cases, test_is_stale_cases, test_scheduler_has_its_own_lane,
-               test_new_events_reach_someone, test_claim_once]:
+               test_catch_up_default_covers_the_incident, test_schedule_action_cases, test_is_stale_cases, test_scheduler_has_its_own_lane,
+               test_new_events_reach_someone, test_claim_once, test_check_scheduled_end_to_end]:
         print(fn.__name__)
         fn()
     print()

@@ -69,10 +69,14 @@ def schedule_action(
 ) -> str:
     """What the scheduler should do about the latest fire time.
 
-    ``defined_at`` is when the job was created or last edited. A fire time
-    before that belongs to an older definition of the job (it was created
-    later, or its schedule was moved), so it is not owed a run: otherwise
-    moving a job from 03:30 to 21:00 at noon would start it at noon.
+    ``defined_at`` is when the job was created. A fire time before that is
+    not owed a run, so a job created at noon with a 03:30 schedule waits for
+    03:30. It is deliberately not the time of the last edit: edits (a rename,
+    a tag) are frequent, and an edit must not erase a missed run. A moved
+    schedule is covered by the run rule itself: a job moved from 03:30 to
+    21:00 at noon had its 03:30 run after yesterday's 21:00, so nothing is
+    owed; a move to a time that just passed catches up at most
+    ``catch_up_hours`` later, which is why that bound is short.
     """
     fire_time = _aware(fire_time)
     now = _aware(now)
@@ -105,8 +109,7 @@ def is_stale(
     created this morning with a nightly schedule is not stale at noon.
     """
     now = _aware(now)
-    # The later of the two: a job whose schedule was edited after its last
-    # run is measured from the edit, under its new cadence.
+    # The later of the two: a job that never ran is measured from its creation.
     candidates = [t for t in (_aware(last_run_at), _aware(defined_at)) if t is not None]
     reference = max(candidates) if candidates else None
     if reference is None:

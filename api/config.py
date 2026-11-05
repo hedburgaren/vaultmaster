@@ -46,9 +46,10 @@ class Settings(BaseSettings):
 
     # A scheduled fire time that the scheduler sees late (its tick waited, the
     # scheduler was down) is still started if it is at most this many hours
-    # old, and reported as schedule.missed beyond that, rather than started in
-    # the middle of the working day.
-    schedule_catch_up_hours: float = 6
+    # old, and reported as schedule.missed beyond that. Short on purpose: the
+    # 2026-10-29 tick was 95 minutes late, and 2 h lets a 04:30 job catch up
+    # by 06:30 without pushing night backups into the working day.
+    schedule_catch_up_hours: float = 2
 
     # An active job whose newest run is older than this many schedule
     # intervals raises job.stale, once a day per job.

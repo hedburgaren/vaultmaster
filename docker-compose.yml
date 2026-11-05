@@ -118,8 +118,8 @@ services:
   # The scheduler's own lane (card DEV-7). The worker above serves every
   # backup with one slot, so a long backup held the per-minute scheduler tick
   # for over an hour and the jobs due in that time were skipped. This worker
-  # serves only the "scheduler" queue: deciding what is due, reaping stuck
-  # runs and the stale-job alarm. It starts no backup itself; it queues them
+  # serves only the "scheduler" queue: deciding what is due and the
+  # stale-job alarm. It starts no backup itself; it queues them
   # for the worker above. Needs only the database and Redis, so no backup,
   # archive, docker socket or key mounts.
   scheduler:

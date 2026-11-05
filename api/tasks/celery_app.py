@@ -25,9 +25,10 @@ celery_app.conf.update(
         # "scheduler"). Until 2026-11 these ticks shared the backup queue with
         # a single slot, so a 65 GB backup held them for over an hour and the
         # jobs they should have started were skipped (card DEV-7). Exact names
-        # are matched before the pattern below.
+        # are matched before the pattern below. reap_stale_runs stays on the
+        # backup worker: its sweep needs the docker socket and the archive
+        # mount, which the scheduler container deliberately does not have.
         "api.tasks.backup_tasks.check_scheduled_jobs": {"queue": "scheduler"},
-        "api.tasks.backup_tasks.reap_stale_runs": {"queue": "scheduler"},
         "api.tasks.backup_tasks.scan_stale_jobs": {"queue": "scheduler"},
         "api.tasks.backup_tasks.*": {"queue": "backup"},
         "api.tasks.rotation_tasks.*": {"queue": "rotation"},

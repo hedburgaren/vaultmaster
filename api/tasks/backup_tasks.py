@@ -1434,7 +1434,7 @@ async def _check_scheduled():
     from api.services import schedule_policy
     from api.services.notifier import notify_event
 
-    catch_up_hours = float(getattr(get_settings(), "schedule_catch_up_hours", 6) or 6)
+    catch_up_hours = float(getattr(get_settings(), "schedule_catch_up_hours", 2) or 2)
 
     async with get_task_session() as db:
         result = await db.execute(select(BackupJob).where(BackupJob.is_active == True))
@@ -1446,10 +1446,9 @@ async def _check_scheduled():
         for job in jobs:
             try:
                 prev_time = schedule_policy.latest_fire(job.schedule_cron, now)
-                defined_at = max(
-                    [t for t in (job.created_at, job.updated_at) if t is not None],
-                    default=None,
-                )
+                # created_at, not updated_at: updated_at moves on any edit (a
+                # rename, a tag), and an edit must not erase a missed run.
+                defined_at = job.created_at
 
                 # Has this fire time had its run? Until 2026-11 the question
                 # was "is the fire time within 300 s of now", which turned a
@@ -1559,10 +1558,8 @@ async def _do_scan_stale_jobs():
         stale = []
         for job in jobs:
             try:
-                defined_at = max(
-                    [t for t in (job.created_at, job.updated_at) if t is not None],
-                    default=None,
-                )
+                # created_at, not updated_at: an edit must not restart the clock.
+                defined_at = job.created_at
                 last = last_runs.get(job.id)
                 if not schedule_policy.is_stale(job.schedule_cron, last, defined_at, now, factor):
                     continue
