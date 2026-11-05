@@ -106,7 +106,8 @@ def test_new_rule_catches_up_behind_a_long_backup():
 
 def test_catch_up_default_covers_the_incident():
     from api.config import Settings
-    check(Settings().schedule_catch_up_hours == CATCH_UP_HOURS,
+    # The field's default, not Settings(): a local .env must not decide this.
+    check(Settings.model_fields["schedule_catch_up_hours"].default == CATCH_UP_HOURS,
           f"the shipped catch-up bound is the one the replay used ({CATCH_UP_HOURS} h)")
 
 
@@ -120,11 +121,18 @@ def test_schedule_action_cases():
     check(a(fire, fire + timedelta(minutes=95), DEFINED, True, h) == sp.NONE, "already had its run: nothing")
     check(a(fire, fire + timedelta(minutes=95), fire + timedelta(minutes=1), False, h) == sp.NONE,
           "created after the fire time: not owed")
-    # A schedule moved from 03:30 to 21:00 at noon: the 03:30 run today is
-    # after yesterday's 21:00, so the run rule alone says nothing is owed.
-    moved_fire = NIGHT - timedelta(hours=3)  # yesterday 21:00 local is 20:00 UTC, near enough
-    check(a(moved_fire, NIGHT.replace(hour=11), DEFINED, True, h) == sp.NONE,
-          "a schedule moved at noon does not start the job at noon")
+    # A schedule moved at noon. has_run is derived the way _check_scheduled
+    # derives it: is there a run created at or after the new latest fire time.
+    noon = NIGHT.replace(hour=11)
+    last_run = NIGHT.replace(hour=2, minute=30)  # tonight's 03:30 local run
+    to_evening = sp.latest_fire("0 20 * * *", noon)  # moved to 21:00 local
+    check(a(to_evening, noon, DEFINED, last_run >= to_evening, h) == sp.NONE,
+          "moved from 03:30 to 21:00 at noon: tonight's run counts, nothing starts at noon")
+    # Accepted, documented behaviour: moved to a time that passed less than
+    # the catch-up bound ago, the job catches up now, as if it had been late.
+    to_morning = sp.latest_fire("0 10 * * *", noon)  # moved to 11:00 local, an hour ago
+    check(a(to_morning, noon, DEFINED, last_run >= to_morning, h) == sp.CATCH_UP,
+          "moved to a time one hour ago: catches up now (accepted, bounded by catch-up hours)")
     naive = fire.replace(tzinfo=None)
     check(a(naive, fire + timedelta(seconds=30), None, False, h) == sp.RUN, "naive datetimes are read as UTC")
 
