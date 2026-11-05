@@ -13,7 +13,8 @@ const INPUT = "w-full bg-vm-surface2 border border-vm-border rounded px-3 py-2.5
 // local copy raised an event no channel could be set to receive (task 157).
 // run.started was listed but is never emitted.
 const TRIGGER_VALUES = [
-  'run.success', 'run.failed', 'run.abandoned', 'backup.partial_transfer',
+  'run.success', 'run.failed', 'run.abandoned', 'schedule.missed', 'job.stale',
+  'backup.partial_transfer',
   'artifact.corrupt', 'validation.failed',
   'restore.started', 'restore.completed', 'restore.failed',
   'server.offline', 'storage.warning', 'storage.critical',

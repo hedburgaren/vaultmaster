@@ -1367,6 +1367,34 @@ async def _do_verify_checksum(artifact_id: str) -> dict:
         return {**verdict, "artifact": artifact.filename, "destination": dest.name}
 
 
+# A fire time's trigger key must outlive the wait in the backup queue plus the
+# catch-up bound; the missed key must outlive the rest of the day it reports.
+TRIGGER_KEY_TTL = 2 * 86400
+MISSED_KEY_TTL = 2 * 86400
+STALE_KEY_TTL = 26 * 3600
+
+
+def _claim_once(redis_client, key: str, ttl: int):
+    """SET NX on key. True: claimed now. False: someone already holds it.
+    None: no Redis, or Redis failed, so nothing can be deduplicated."""
+    if redis_client is None:
+        return None
+    try:
+        return bool(redis_client.set(key, "1", nx=True, ex=ttl))
+    except Exception as exc:
+        logger.warning(f"_claim_once: redis SETNX failed for {key}: {exc}")
+        return None
+
+
+def _redis_or_none(caller: str):
+    try:
+        import redis as _redis  # type: ignore[import-not-found]
+        return _redis.from_url(get_settings().redis_url, decode_responses=True)
+    except Exception as exc:
+        logger.warning(f"{caller}: redis unavailable: {exc}")
+        return None
+
+
 @celery_app.task(name="api.tasks.backup_tasks.check_scheduled_jobs")
 def check_scheduled_jobs():
     """Check for jobs that need to run based on their cron schedule."""
@@ -1374,7 +1402,18 @@ def check_scheduled_jobs():
 
 
 async def _check_scheduled():
-    """Bug #28: bredare window (300s i st.f. 60s) + Redis SETNX-dedup.
+    """Start every active job whose latest fire time has not had its run.
+
+    2026-11 (card DEV-7, agent-kanban 417): the rule is now "has this fire
+    time had its run" (schedule_policy.schedule_action), not "is the fire
+    time within 300 s of now". A tick that arrives late catches up within
+    schedule_catch_up_hours and reports schedule.missed beyond that, instead
+    of skipping in silence. This task also runs on its own queue and worker
+    (queue "scheduler"), so a long backup can no longer hold it back.
+
+    History below, kept because it explains the Redis key.
+
+    Bug #28: bredare window (300s i st.f. 60s) + Redis SETNX-dedup.
 
     Tidigare: 60-sekunders window. Om beat-tickern var sen (worker omstart,
     GC-paus, tung scheduler-tick) eller om ``check-scheduled-jobs`` schemat
@@ -1387,77 +1426,171 @@ async def _check_scheduled():
     men fördubblar inte heller.
     """
     from sqlalchemy import select
-    from croniter import croniter
     from api.models.backup_job import BackupJob
     from api.models.backup_run import BackupRun
 
-    redis_client = None
-    try:
-        import redis as _redis  # type: ignore[import-not-found]
-        from api.config import get_settings as _get_settings
-        redis_client = _redis.from_url(_get_settings().redis_url, decode_responses=True)
-    except Exception as exc:
-        logger.warning(f"_check_scheduled: redis unavailable, falling back to DB-only dedup: {exc}")
+    redis_client = _redis_or_none("_check_scheduled")
+
+    from api.services import schedule_policy
+    from api.services.notifier import notify_event
+
+    catch_up_hours = float(getattr(get_settings(), "schedule_catch_up_hours", 6) or 6)
 
     async with get_task_session() as db:
         result = await db.execute(select(BackupJob).where(BackupJob.is_active == True))
         jobs = result.scalars().all()
 
         now = datetime.now(timezone.utc)
-        WINDOW_SECONDS = 300  # was 60 — too tight if beat is late
+        missed = []
 
         for job in jobs:
             try:
-                cron = croniter(job.schedule_cron, now)
-                prev_time = cron.get_prev(datetime)
+                prev_time = schedule_policy.latest_fire(job.schedule_cron, now)
+                defined_at = max(
+                    [t for t in (job.created_at, job.updated_at) if t is not None],
+                    default=None,
+                )
 
-                if (now - prev_time).total_seconds() >= WINDOW_SECONDS:
+                # Has this fire time had its run? Until 2026-11 the question
+                # was "is the fire time within 300 s of now", which turned a
+                # late tick into a silent skip (see schedule_policy).
+                run_result = await db.execute(
+                    select(BackupRun.id)
+                    .where(BackupRun.job_id == job.id, BackupRun.created_at >= prev_time)
+                    .limit(1)
+                )
+                has_run = run_result.first() is not None
+
+                action = schedule_policy.schedule_action(
+                    prev_time, now, defined_at, has_run, catch_up_hours)
+                if action == schedule_policy.NONE:
+                    continue
+
+                bucket = int(prev_time.timestamp())
+                if action == schedule_policy.MISSED:
+                    # Too late to start now. Reported once per fire time; a
+                    # job that keeps missing is also caught by scan_stale_jobs.
+                    if _claim_once(redis_client, f"vm:missed:{job.id}:{bucket}", MISSED_KEY_TTL) is True:
+                        missed.append({"job_name": job.name,
+                                       "fire_time": prev_time.isoformat(timespec="minutes")})
+                    else:
+                        logger.warning("_check_scheduled: %s missed its run at %s (not reported again)",
+                                       job.name, prev_time)
                     continue
 
                 # Skip if this job already has a run still in progress.
                 running_result = await db.execute(
                     select(BackupRun)
                     .where(BackupRun.job_id == job.id, BackupRun.status == "running")
+                    .limit(1)
                 )
-                already_running = running_result.scalar_one_or_none()
+                already_running = running_result.scalars().first()
                 if already_running:
-                    logger.info(f"Skipping {job.name} — previous run still in progress (started {already_running.started_at})")
+                    logger.info(f"Skipping {job.name}, previous run still in progress (started {already_running.started_at})")
                     continue
 
-                # DB-side window check — keeps dedup correct even if Redis is down.
-                run_result = await db.execute(
-                    select(BackupRun)
-                    .where(BackupRun.job_id == job.id, BackupRun.created_at >= prev_time)
-                )
-                existing = run_result.scalar_one_or_none()
-                if existing:
+                # One trigger per fire time. The run row only appears when the
+                # worker starts the task, which can be hours later if a long
+                # backup holds the backup queue, so every tick until then sees
+                # "no run" and the key is what stops a second trigger. A late
+                # (catch-up) trigger therefore requires the key; an on-time
+                # one keeps the old behaviour of going ahead if Redis is down.
+                claimed = _claim_once(redis_client, f"vm:last_scheduled:{job.id}:{bucket}", TRIGGER_KEY_TTL)
+                if claimed is False:
+                    logger.debug(f"_check_scheduled: dedup hit for {job.name} bucket {bucket}")
+                    continue
+                if claimed is None and action == schedule_policy.CATCH_UP:
+                    logger.error("_check_scheduled: %s is due since %s but Redis is unavailable, so a "
+                                 "catch-up cannot be deduplicated and is not started", job.name, prev_time)
                     continue
 
-                # Redis SETNX dedup — keyed on (job_id, prev_time-epoch) so
-                # a single cron-bucket only triggers once even if multiple
-                # ticks land inside our widened 300s window.
-                if redis_client is not None:
-                    bucket_key = f"vm:last_scheduled:{job.id}:{int(prev_time.timestamp())}"
-                    try:
-                        # NX → only set if absent. EX 3600 → 1h TTL keeps redis tidy.
-                        acquired = redis_client.set(bucket_key, "1", nx=True, ex=3600)
-                    except Exception as exc:
-                        logger.warning(f"_check_scheduled: redis SETNX failed for {job.name}: {exc}; allowing trigger")
-                        acquired = True
-                    if not acquired:
-                        logger.debug(f"_check_scheduled: dedup hit for {job.name} bucket {bucket_key}")
-                        continue
-
-                logger.info(f"Triggering scheduled backup: {job.name}")
-                run_backup_task.apply_async(args=[str(job.id)], kwargs={"triggered_by": "scheduler"})
+                if action == schedule_policy.CATCH_UP:
+                    logger.warning("_check_scheduled: catching up %s, fire time %s was %.0f min ago",
+                                   job.name, prev_time, (now - prev_time).total_seconds() / 60)
+                    triggered_by = "scheduler-catch-up"
+                else:
+                    logger.info(f"Triggering scheduled backup: {job.name}")
+                    triggered_by = "scheduler"
+                run_backup_task.apply_async(args=[str(job.id)], kwargs={"triggered_by": triggered_by})
             except Exception as e:
                 logger.error(f"Error checking schedule for job {job.name}: {e}")
+
+        for item in missed:
+            await notify_event(db, "schedule.missed", {**item, "catch_up_hours": catch_up_hours})
 
     if redis_client is not None:
         try:
             redis_client.close()
         except Exception:
             pass
+
+
+@celery_app.task(name="api.tasks.backup_tasks.scan_stale_jobs")
+def scan_stale_jobs():
+    """Alarm on active jobs that have had no run for too long.
+
+    The backstop behind every other rule (card DEV-7). From 2026-10-29 to
+    2026-11-01 seventeen jobs had no run at all for three nights: nothing
+    failed, so nothing alarmed, and the trust panel showed it to whoever
+    looked but told nobody. Any run counts here, success or failure, since a
+    failure alarms on its own; this one is about absence, whatever the cause.
+    """
+    return _run_async(_do_scan_stale_jobs())
+
+
+async def _do_scan_stale_jobs():
+    from sqlalchemy import select, func
+
+    from api.models.backup_job import BackupJob
+    from api.models.backup_run import BackupRun
+    from api.services import schedule_policy
+    from api.services.notifier import notify_event
+
+    factor = float(getattr(get_settings(), "stale_job_factor", 1.5) or 1.5)
+    now = datetime.now(timezone.utc)
+    redis_client = _redis_or_none("scan_stale_jobs")
+
+    async with get_task_session() as db:
+        last_runs = dict((await db.execute(
+            select(BackupRun.job_id, func.max(BackupRun.created_at)).group_by(BackupRun.job_id)
+        )).all())
+        jobs = (await db.execute(select(BackupJob).where(BackupJob.is_active == True))).scalars().all()
+
+        stale = []
+        for job in jobs:
+            try:
+                defined_at = max(
+                    [t for t in (job.created_at, job.updated_at) if t is not None],
+                    default=None,
+                )
+                last = last_runs.get(job.id)
+                if not schedule_policy.is_stale(job.schedule_cron, last, defined_at, now, factor):
+                    continue
+                # Once a day per job, not every hour: the alarm channel is read
+                # by a person, and a repeated alarm teaches them to skip it.
+                # Without Redis it repeats hourly: louder, never quieter.
+                key = f"vm:stale:{job.id}:{now.date().isoformat()}"
+                if _claim_once(redis_client, key, STALE_KEY_TTL) is False:
+                    continue
+                stale.append({
+                    "job_name": job.name,
+                    "last_run": last.isoformat(timespec="minutes") if last else "never",
+                    "schedule": job.schedule_cron,
+                })
+            except Exception as exc:
+                logger.error(f"scan_stale_jobs: could not judge {job.name}: {exc}")
+
+        if stale:
+            logger.warning("scan_stale_jobs: %d stale job(s): %s",
+                           len(stale), ", ".join(s["job_name"] for s in stale))
+            await notify_event(db, "job.stale", {"jobs": stale, "factor": factor})
+
+    if redis_client is not None:
+        try:
+            redis_client.close()
+        except Exception:
+            pass
+    return {"stale": [s["job_name"] for s in stale]}
 
 
 @celery_app.task(name="api.tasks.backup_tasks.check_server_health")

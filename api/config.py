@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     # longest legitimate run is a 23 GB archive plus upload.
     stale_run_hours: int = 6
 
+    # A scheduled fire time that the scheduler sees late (its tick waited, the
+    # scheduler was down) is still started if it is at most this many hours
+    # old, and reported as schedule.missed beyond that, rather than started in
+    # the middle of the working day.
+    schedule_catch_up_hours: float = 6
+
+    # An active job whose newest run is older than this many schedule
+    # intervals raises job.stale, once a day per job.
+    stale_job_factor: float = 1.5
+
     # A server tagged "intermittent" (a laptop) does not alarm on a failed
     # run while its job succeeded within this many hours, and never on
     # server.offline. 96 h covers a long weekend with the lid closed.

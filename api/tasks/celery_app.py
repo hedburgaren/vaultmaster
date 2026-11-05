@@ -21,6 +21,14 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_routes={
+        # The scheduler's own lane, served by its own worker (compose service
+        # "scheduler"). Until 2026-11 these ticks shared the backup queue with
+        # a single slot, so a 65 GB backup held them for over an hour and the
+        # jobs they should have started were skipped (card DEV-7). Exact names
+        # are matched before the pattern below.
+        "api.tasks.backup_tasks.check_scheduled_jobs": {"queue": "scheduler"},
+        "api.tasks.backup_tasks.reap_stale_runs": {"queue": "scheduler"},
+        "api.tasks.backup_tasks.scan_stale_jobs": {"queue": "scheduler"},
         "api.tasks.backup_tasks.*": {"queue": "backup"},
         "api.tasks.rotation_tasks.*": {"queue": "rotation"},
         "api.tasks.validation_tasks.*": {"queue": "validation"},
@@ -39,6 +47,15 @@ celery_app.conf.update(
         "check-scheduled-jobs": {
             "task": "api.tasks.backup_tasks.check_scheduled_jobs",
             "schedule": 60.0,  # every minute
+            # A tick that waited longer than this is dropped rather than run
+            # in a pile with the ones behind it; the next tick catches up.
+            "options": {"expires": 120},
+        },
+        # An active job with no run for more than stale_job_factor intervals
+        # alarms (job.stale). The backstop for absence, whatever its cause.
+        "scan-stale-jobs": {
+            "task": "api.tasks.backup_tasks.scan_stale_jobs",
+            "schedule": 3600.0,
         },
         "check-server-health": {
             "task": "api.tasks.backup_tasks.check_server_health",

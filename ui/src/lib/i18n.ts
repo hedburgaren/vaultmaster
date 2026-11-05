@@ -304,6 +304,8 @@ const translations: Dict = {
   'trigger.storage.warning': { sv: 'Lagringsvarning (75 % av budget)', en: 'Storage warning (75% of budget)' },
   'trigger.storage.critical': { sv: 'Lagring kritisk (95 % av budget)', en: 'Storage critical (95% of budget)' },
   'trigger.run.abandoned': { sv: 'Backup övergiven (fastnade)', en: 'Backup abandoned (stuck)' },
+  'trigger.schedule.missed': { sv: 'Schemalagd backup startade inte', en: 'Scheduled backup did not start' },
+  'trigger.job.stale': { sv: 'Backupjobb har slutat köras', en: 'Backup job has stopped running' },
   'trigger.backup.partial_transfer': { sv: 'Kopia nådde inte alla mål', en: 'Copy missed a destination' },
   'trigger.artifact.corrupt': { sv: 'Skadad backupfil', en: 'Corrupt backup file' },
   'trigger.validation.failed': { sv: 'Validering misslyckades', en: 'Validation failed' },

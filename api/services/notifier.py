@@ -219,6 +219,8 @@ async def notify_event(db, event: str, data: dict):
         "credential.expired": "Credential Expired",
         "backup.anomaly": "Backup Anomaly Detected",
         "security.report": "Weekly Security Scan",
+        "schedule.missed": "Scheduled Backup Missed",
+        "job.stale": "Backup Job Has Stopped Running",
     }
 
     subject = subject_map.get(event, event)
@@ -344,6 +346,23 @@ def _format_event_message(event: str, data: dict) -> str:
                 f"Name: {data.get('name', 'N/A')}\n"
                 f"Type: {data.get('credential_type', 'N/A')}\n"
                 f"Expired: {data.get('expires_at', 'N/A')}")
+    elif event == "schedule.missed":
+        return (f"⏰ Scheduled backup did not start\n"
+                f"Job: {data.get('job_name', 'N/A')}\n"
+                f"Due: {data.get('fire_time', 'N/A')} UTC\n"
+                f"The scheduler saw it more than {data.get('catch_up_hours', '?')} h late, "
+                f"so it was not started now. It runs again at its next scheduled time; "
+                f"start it by hand if that is too long to wait.")
+    elif event == "job.stale":
+        jobs = data.get("jobs", []) or []
+        lines = [f"🚨 {len(jobs)} backup job(s) have stopped running "
+                 f"(no run in over {data.get('factor', '?')} schedule intervals):"]
+        for j in jobs[:15]:
+            lines.append(f"   · {j.get('job_name')}  last run: {j.get('last_run')}  ({j.get('schedule')})")
+        if len(jobs) > 15:
+            lines.append(f"   …and {len(jobs) - 15} more")
+        lines.append("Nothing failed, so no other alarm fired. Check the scheduler and worker.")
+        return "\n".join(lines)
     elif event == "backup.anomaly":
         return (f"🤖 Backup anomaly detected\n"
                 f"Job: {data.get('job_name', 'N/A')}\n"
