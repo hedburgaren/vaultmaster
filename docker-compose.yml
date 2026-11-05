@@ -123,9 +123,13 @@ services:
   # for the worker above. Needs only the database and Redis, so no backup,
   # archive, docker socket or key mounts.
   scheduler:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Same image as the worker, not a fresh build. The first deploy (2026-11-05)
+    # built a new image: requirements.txt pins redis 5.2.1 but not kombu, so the
+    # build pulled a kombu that demands redis-py 6.1 and the container crash-
+    # looped. The worker's image from 2026-09-20 has a matching pair. The code
+    # itself is mounted from ./api, so the image only supplies the libraries.
+    # Pinning kombu and rebuilding all four images is a separate change.
+    image: vmhedburgarense-worker:latest
     container_name: vaultmaster-scheduler
     restart: unless-stopped
     command: celery -A api.tasks.celery_app worker -l info -c 1 -Q scheduler -n scheduler@%h
