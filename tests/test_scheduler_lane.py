@@ -140,6 +140,16 @@ def test_scheduler_has_its_own_lane():
         check(routes.get(full, {}).get("queue") == "scheduler", f"{name} is routed to the scheduler queue")
     check(routes.get("api.tasks.backup_tasks.*", {}).get("queue") == "backup", "backups still go to the backup queue")
 
+    # The dict says what we meant; Celery's own router says what happens. The
+    # exact names must win over the "backup_tasks.*" pattern.
+    import api.tasks.backup_tasks  # noqa: F401  registers the tasks
+    router = celery_app.amqp.router
+    for name, queue in [("check_scheduled_jobs", "scheduler"), ("reap_stale_runs", "scheduler"),
+                        ("scan_stale_jobs", "scheduler"), ("run_backup_task", "backup"),
+                        ("check_server_health", "backup")]:
+        got = router.route({}, f"api.tasks.backup_tasks.{name}")["queue"].name
+        check(got == queue, f"Celery routes {name} to {queue} ({got})")
+
     compose = (ROOT / "docker-compose.yml").read_text()
     commands = dict(re.findall(r"\n  ([a-z_-]+):\n(?:    .*\n)*?    command: (.*)", compose))
     worker = commands.get("worker", "")
