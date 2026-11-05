@@ -2,6 +2,10 @@ fastapi==0.121.0
 starlette==0.49.1
 uvicorn[standard]==0.34.0
 celery[redis]==5.4.0
+# kombu pinned with redis (2026-11-05): unpinned, a fresh build pulled kombu 5.7,
+# whose Redis transport refuses redis-py below 6.1, and the new scheduler
+# container crash-looped with VersionMismatch. 5.5.4 declares redis <=5.2.1.
+kombu==5.5.4
 redis==5.2.1
 sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0

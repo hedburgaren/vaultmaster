@@ -171,7 +171,18 @@ def test_scheduler_has_its_own_lane():
         got = router.route({}, f"api.tasks.backup_tasks.{name}")["queue"].name
         check(got == queue, f"Celery routes {name} to {queue} ({got})")
 
-    compose = (ROOT / "docker-compose.yml").read_text()
+    beat = celery_app.conf.beat_schedule
+    check(any(v["task"].endswith(".scan_stale_jobs") for v in beat.values()), "beat schedules the stale-job scan")
+    tick = next(v for v in beat.values() if v["task"].endswith(".check_scheduled_jobs"))
+    check((tick.get("options") or {}).get("expires"), "a scheduler tick that waited too long expires instead of piling up")
+
+    compose_file = ROOT / "docker-compose.yml"
+    if not compose_file.exists():
+        # Inside the image only api/, tests/ and migrations/ exist; the
+        # compose checks belong to the repository run.
+        print("  skip compose checks: no docker-compose.yml here (running inside the image)")
+        return
+    compose = compose_file.read_text()
     commands = dict(re.findall(r"\n  ([a-z_-]+):\n(?:    .*\n)*?    command: (.*)", compose))
     worker = commands.get("worker", "")
     sched = commands.get("scheduler", "")
@@ -183,20 +194,19 @@ def test_scheduler_has_its_own_lane():
     check("scheduler" not in queues(worker), "the backup worker does not serve the scheduler queue")
     check(queues(sched) == {"scheduler"}, f"a separate worker serves only the scheduler queue ({sched!r})")
 
-    beat = celery_app.conf.beat_schedule
-    check(any(v["task"].endswith(".scan_stale_jobs") for v in beat.values()), "beat schedules the stale-job scan")
-    tick = next(v for v in beat.values() if v["task"].endswith(".check_scheduled_jobs"))
-    check((tick.get("options") or {}).get("expires"), "a scheduler tick that waited too long expires instead of piling up")
-
 
 def test_new_events_reach_someone():
     notifier = (ROOT / "api/services/notifier.py").read_text()
     migration = (ROOT / "migrations/versions/0010_stale_and_missed_triggers.py").read_text()
-    ui = (ROOT / "ui/src/app/(app)/notifications/page.tsx").read_text()
+    ui_file = ROOT / "ui/src/app/(app)/notifications/page.tsx"
+    ui = ui_file.read_text() if ui_file.exists() else None
+    if ui is None:
+        print("  skip panel check: no ui/ here (running inside the image)")
     for event in ("schedule.missed", "job.stale"):
         check(f'"{event}"' in notifier, f"{event} has a subject and a message")
         check(f'"{event}"' in migration, f"{event} is added to the channels that hear run.failed")
-        check(f"'{event}'" in ui, f"{event} can be chosen for a channel in the panel")
+        if ui is not None:
+            check(f"'{event}'" in ui, f"{event} can be chosen for a channel in the panel")
 
 
 class _FakeRedis:
@@ -211,6 +221,25 @@ class _FakeRedis:
             return None
         self.keys.add(key)
         return True
+
+
+def test_kombu_is_pinned_with_redis():
+    """2026-11-05: an unpinned kombu let a fresh image pull 5.7, which refuses
+    redis-py below 6.1, and the scheduler container crash-looped."""
+    req = (ROOT / "requirements.txt")
+    if not req.exists():
+        print("  skip: no requirements.txt here (running inside the image)")
+        return
+    text = req.read_text()
+    check(re.search(r"^kombu==", text, re.M) is not None, "kombu is pinned in requirements.txt")
+    import kombu
+    import redis
+    from kombu.transport import redis as kredis
+    src = Path(kredis.__file__).read_text()
+    m = re.search(r"redis\.VERSION < \((\d+), (\d+), (\d+)\)", src)
+    need = tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+    check(tuple(redis.VERSION[:3]) >= need,
+          f"installed kombu {kombu.__version__} accepts installed redis-py {redis.__version__} (needs {need})")
 
 
 def test_claim_once():
@@ -347,7 +376,8 @@ def test_check_scheduled_end_to_end():
 if __name__ == "__main__":
     for fn in [test_old_rule_skips_the_whole_window, test_new_rule_catches_up_behind_a_long_backup,
                test_catch_up_default_covers_the_incident, test_schedule_action_cases, test_is_stale_cases, test_scheduler_has_its_own_lane,
-               test_new_events_reach_someone, test_claim_once, test_check_scheduled_end_to_end]:
+               test_new_events_reach_someone, test_kombu_is_pinned_with_redis, test_claim_once,
+               test_check_scheduled_end_to_end]:
         print(fn.__name__)
         fn()
     print()
