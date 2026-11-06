@@ -28,6 +28,10 @@ from croniter import croniter
 # A tick this close to the fire time is the normal case.
 ON_TIME_SECONDS = 300
 
+# How far back cron_interval looks for the job's longest gap.
+INTERVAL_LOOKBACK = timedelta(days=7)
+INTERVAL_MAX_FIRES = 500
+
 NONE = "none"          # nothing to do for this fire time
 RUN = "run"            # due, on time
 CATCH_UP = "catch_up"  # due, late, still within the catch-up bound: run now
@@ -48,16 +52,27 @@ def latest_fire(cron_expr: str, now: datetime) -> datetime:
 
 
 def cron_interval(cron_expr: str, now: datetime) -> timedelta:
-    """The spacing between the two most recent fire times.
+    """The longest spacing between consecutive fire times over the last week.
 
-    For irregular expressions (weekdays only, several hours a day) this is
-    the latest gap, which is what a reader of "1.5 intervals" means: the
-    job should have run again by now.
+    For irregular expressions (weekdays only, several hours a day) the job's
+    cadence is its longest regular gap, not its latest one. The latest gap
+    raised a false job.stale on 2026-11-06: plastop's jobs run 12:30 and
+    20:30, the latest gap seen in the morning is 8 h, so 1.5 intervals was
+    12 h, while the night between 20:30 and 12:30 is 16 h by design. The
+    same rule would have alarmed every Monday for a weekdays-only job.
     """
     it = croniter(cron_expr, _aware(now))
-    last = it.get_prev(datetime)
-    before = it.get_prev(datetime)
-    return last - before
+    first = prev = it.get_prev(datetime)
+    longest = timedelta(0)
+    # A week covers every weekly pattern; the fire cap keeps a per-minute
+    # cron cheap, and 500 consecutive minutes are as regular as a week.
+    for _ in range(INTERVAL_MAX_FIRES):
+        fire = it.get_prev(datetime)
+        longest = max(longest, prev - fire)
+        prev = fire
+        if first - fire >= INTERVAL_LOOKBACK:
+            break
+    return longest
 
 
 def schedule_action(

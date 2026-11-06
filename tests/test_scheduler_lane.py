@@ -149,6 +149,23 @@ def test_is_stale_cases():
     # The three nights themselves: daily jobs, last run 10-28 night, checked 10-30 noon.
     check(sp.is_stale(DUE_JOBS[0], NIGHT - timedelta(days=2) + timedelta(hours=3), DEFINED, now, 1.5),
           "the 2026-10-29 case alarms by the second day at the latest")
+    # 2026-11-06: plastop's jobs, twice a day with a 16 h night. The morning
+    # after a normal 20:32 run is not stale; a whole missed day is.
+    twice = "30 12,20 * * *"
+    morning = datetime(2026, 11, 6, 9, 29, tzinfo=UTC)
+    evening_run = datetime(2026, 11, 5, 20, 32, tzinfo=UTC)
+    check(sp.cron_interval(twice, morning) == timedelta(hours=16), "twice a day, 8 h and 16 h gaps: the interval is 16 h")
+    check(not sp.is_stale(twice, evening_run, DEFINED, morning, 1.5), "plastop the morning after a normal evening run: not stale")
+    check(sp.is_stale(twice, evening_run, DEFINED, evening_run + timedelta(hours=25), 1.5),
+          "plastop with no run for 25 h: stale")
+    # Weekdays only: Monday morning after Friday's run is the normal case.
+    weekdays = "0 6 * * 1-5"
+    monday = datetime(2026, 11, 9, 10, 0, tzinfo=UTC)
+    friday = datetime(2026, 11, 6, 6, 0, tzinfo=UTC)
+    check(sp.cron_interval(weekdays, monday) == timedelta(days=3), "weekdays only: the interval is the weekend")
+    check(not sp.is_stale(weekdays, friday, DEFINED, monday, 1.5), "weekdays job on Monday after Friday's run: not stale")
+    check(sp.is_stale(weekdays, friday, DEFINED, friday + timedelta(days=5), 1.5), "weekdays job silent for five days: stale")
+    check(sp.cron_interval("* * * * *", morning) == timedelta(minutes=1), "a per-minute cron stays one minute")
 
 
 def test_scheduler_has_its_own_lane():
