@@ -7,6 +7,8 @@ import asyncssh
 
 logger = logging.getLogger(__name__)
 
+SSH_CONNECT_TIMEOUT = 15  # seconds, TCP connect plus SSH handshake
+
 LOCAL_HOSTS = {
     "127.0.0.1",
     "127.0.1.1",
@@ -76,6 +78,13 @@ def _build_connect_kwargs(server) -> dict:
         "port": getattr(server, 'port', 22) or 22,
         "username": getattr(server, 'ssh_user', None) or "root",
         "known_hosts": None,
+        # Without this a host that is off (plastop in the bag) holds the
+        # connect for the kernel's SYN retries, about 135 s. The worker has
+        # one slot, and on 2026-11-11 the five-minute health check of an
+        # offline plastop took 309 minutes of it, more than every backup
+        # together, so the nightly jobs ran hours late. A reachable host on
+        # the tailnet answers in well under a second, also over a relay.
+        "connect_timeout": SSH_CONNECT_TIMEOUT,
     }
 
     auth_type = getattr(server, 'auth_type', 'ssh_key')
@@ -158,7 +167,9 @@ async def test_ssh_connection(server) -> tuple[bool, str]:
             return True, f"Connected to {hostname}"
 
     except Exception as e:
-        err = str(e)
+        # A connect timeout raises TimeoutError with no text, which left
+        # last_error blank in the panel.
+        err = str(e) or f"{type(e).__name__} (no answer within {SSH_CONNECT_TIMEOUT} s)"
         if "Permission denied" in err:
             user = getattr(server, 'ssh_user', None) or 'root'
             host = getattr(server, 'host', '?')

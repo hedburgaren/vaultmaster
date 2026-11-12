@@ -239,6 +239,11 @@ class _FakeRedis:
         self.keys.add(key)
         return True
 
+    def exists(self, key):
+        if self.fail:
+            raise RuntimeError("down")
+        return 1 if key in self.keys else 0
+
 
 def test_kombu_is_pinned_with_redis():
     """2026-11-05: an unpinned kombu let a fresh image pull 5.7, which refuses
@@ -389,12 +394,51 @@ def test_check_scheduled_end_to_end():
     trig, _ = _drive_check_scheduled(_FakeDB([job], running={"job-a"}), late, _ClosableRedis())
     check(trig == [], "a run still in progress: not started")
 
+    # 2026-11-12: triggered on time, then queued behind a long backup for
+    # more than the catch-up bound. Queued is not missed.
+    r = _ClosableRedis()
+    trig, note = _drive_check_scheduled(_FakeDB([job]), fire + timedelta(seconds=40), r)
+    check(trig == [("job-a", "scheduler")], "on time: started")
+    trig, note = _drive_check_scheduled(_FakeDB([job]), fire + timedelta(hours=3), r)
+    check(trig == [] and note == [],
+          f"triggered, still queued 3 h later: no new start and no schedule.missed ({trig}, {note})")
+
+    class _ExistsFails(_ClosableRedis):
+        def exists(self, key):
+            raise RuntimeError("down")
+
+    trig, note = _drive_check_scheduled(_FakeDB([job]), fire + timedelta(hours=3), _ExistsFails())
+    check(trig == [] and [e for e, _ in note] == ["schedule.missed"],
+          f"trigger key unreadable: the miss is still reported ({trig}, {[e for e, _ in note]})")
+
+
+def test_ssh_connect_has_a_timeout():
+    """2026-11-11: no connect timeout, so every probe of an offline plastop
+    held the single worker slot for about 135 s."""
+    import inspect
+    import asyncssh
+    from api.services import ssh_client
+
+    class _Srv:
+        host = "100.89.72.46"
+        port = 22
+        ssh_user = "vaultmaster"
+        auth_type = "ssh_key"
+        ssh_key_path = None
+        meta = {}
+
+    kw = ssh_client._build_connect_kwargs(_Srv())
+    t = kw.get("connect_timeout")
+    check(isinstance(t, (int, float)) and 0 < t <= 30, f"connect_timeout is set and short ({t})")
+    opts = inspect.signature(asyncssh.SSHClientConnectionOptions.prepare).parameters
+    check("connect_timeout" in opts, f"installed asyncssh {asyncssh.__version__} knows connect_timeout")
+
 
 if __name__ == "__main__":
     for fn in [test_old_rule_skips_the_whole_window, test_new_rule_catches_up_behind_a_long_backup,
                test_catch_up_default_covers_the_incident, test_schedule_action_cases, test_is_stale_cases, test_scheduler_has_its_own_lane,
                test_new_events_reach_someone, test_kombu_is_pinned_with_redis, test_claim_once,
-               test_check_scheduled_end_to_end]:
+               test_check_scheduled_end_to_end, test_ssh_connect_has_a_timeout]:
         print(fn.__name__)
         fn()
     print()

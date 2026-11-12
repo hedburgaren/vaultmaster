@@ -1386,6 +1386,18 @@ def _claim_once(redis_client, key: str, ttl: int):
         return None
 
 
+def _was_triggered(redis_client, key: str) -> bool:
+    """True only when Redis answers and the trigger key is there. No Redis,
+    or an error, is False: then a missed run is reported as before."""
+    if redis_client is None:
+        return False
+    try:
+        return bool(redis_client.exists(key))
+    except Exception as exc:
+        logger.warning(f"_was_triggered: redis EXISTS failed for {key}: {exc}")
+        return False
+
+
 def _redis_or_none(caller: str):
     try:
         import redis as _redis  # type: ignore[import-not-found]
@@ -1466,6 +1478,17 @@ async def _check_scheduled():
                     continue
 
                 bucket = int(prev_time.timestamp())
+                if action == schedule_policy.MISSED and _was_triggered(
+                        redis_client, f"vm:last_scheduled:{job.id}:{bucket}"):
+                    # Triggered on time, still waiting in the backup queue.
+                    # The run row only appears when the worker starts it, so
+                    # "no run" here means "queued", not "missed". On
+                    # 2026-11-12 every nightly job got a schedule.missed
+                    # alarm while it sat in the queue and then ran. A job
+                    # that never gets its run is still caught by job.stale.
+                    logger.info("_check_scheduled: %s triggered for %s, still queued",
+                                job.name, prev_time)
+                    continue
                 if action == schedule_policy.MISSED:
                     # Too late to start now. Reported once per fire time; a
                     # job that keeps missing is also caught by scan_stale_jobs.
