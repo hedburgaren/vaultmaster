@@ -9,6 +9,9 @@ All notable changes to VaultMaster are documented here.
 - **Laptop check-in** : `POST /servers/checkin` (header `X-Checkin-Token`, rate limited, audited) queues the due jobs of the laptop's own server; admin endpoints to generate and revoke the per-server token (stored as a SHA-256 hash). New setting `checkin_min_interval_hours` (default 10). Laptop script, systemd user service and timer in `laptop/`.
 - Migration `0011`: `server.checkin_token_hash`, and `backup_job.schedule_cron` is nullable.
 
+### Maintenance
+- `python -m api.maintenance.encrypt_legacy_drive [--apply | --check-one]` encrypts, in place, the legacy plaintext backups on Google Drive (download, verify checksum, age-encrypt, upload, decrypt readback, then row update and removal of the plaintext). Dry run by default; orphans are only reported.
+
 ### Changed
 - A job with no schedule (cron NULL) is skipped by the scheduler and by the stale-job scan: no run, no `schedule.missed`, no `job.stale`. After deploy, the plastop jobs are set to NULL so only the check-in starts them.
 
