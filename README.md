@@ -46,7 +46,7 @@ cd ui && npm install && npx next build && npx next start --port 3100
 | **API** | FastAPI (Python 3.12), async, OpenAPI docs |
 | **Worker** | Celery with 4 concurrent workers |
 | **Scheduler** | Celery Beat (cron-based) |
-| **Queues** | `backup` (servers), `workstation` (servers tagged `desktop`, own worker), `scheduler`, `rotation`, `notification`, `validation` |
+| **Queues** | `backup` (servers), `workstation` (servers tagged `desktop`, own worker), `laptop` (servers tagged `intermittent`, own worker), `scheduler`, `rotation`, `notification`, `validation` |
 | **Database** | PostgreSQL 16 |
 | **Queue** | Redis 7 |
 | **Frontend** | Next.js 14, React, TailwindCSS |
@@ -59,11 +59,12 @@ cd ui && npm install && npx next build && npx next start --port 3100
 
 Every backup lands on the VaultMaster server and goes encrypted off-site. A
 backup run is queued on the lane of the server it backs up
-(`api/services/lanes.py`): a server tagged `desktop` is served by the
-`workstation-worker` container on the `workstation` queue, every other server
-by the `backup` queue. A desktop or laptop that is off or without a network
-can therefore hang its own SSH connection without holding up any other backup.
-The health probe of desktop servers runs on the workstation lane too.
+(`api/services/lanes.py`): a server tagged `intermittent` (checked first) is served by the
+`laptop-worker` container on the `laptop` queue, one tagged `desktop` by the
+`workstation-worker` on the `workstation` queue, every other server by the
+`backup` queue. A laptop that is off or without a network can therefore hang
+its own SSH connection without holding up plastdesk or any other backup. The
+health probes follow the same three lanes.
 
 A laptop that is not always online (tagged `intermittent`) has no cron on the
 server. Its jobs have `schedule_cron` NULL and are started by the laptop's

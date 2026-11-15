@@ -16,7 +16,7 @@ köar de backuper som är försenade.
 - Servern köar varje aktivt jobb på plastop vars senaste lyckade körning är
   äldre än `checkin_min_interval_hours` (standard 10 timmar) och som inte
   redan är köat eller körs. Svaret listar vad som köades och vad som hoppades
-  över och varför. Körningarna går via kön `workstation`, så ingen annan
+  över och varför. Körningarna går via kön `laptop`, så ingen annan
   backup kan fastna för att laptopen saknar nät.
 - Skriptet loggar en rad i journalen och misslyckas aldrig högljutt när
   laptopen är offline.

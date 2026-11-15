@@ -184,7 +184,9 @@ def test_lane_for_the_three_servers():
     from api.services.lanes import lane_for
     check(lane_for(HEDBURGAREN) == "backup", "hedburgaren (no tags) is served by the backup lane")
     check(lane_for(PLASTDESK) == "workstation", "plastdesk (desktop) is served by the workstation lane")
-    check(lane_for(PLASTOP) == "workstation", "plastop (desktop, intermittent) is served by the workstation lane")
+    check(lane_for(PLASTOP) == "laptop", "plastop (desktop, intermittent) is served by the laptop lane, checked before desktop")
+    check(lane_for(make_server("x", ["intermittent"])) == "laptop", "intermittent alone is the laptop lane")
+    check(lane_for(make_server("x", [" Intermittent "])) == "laptop", "the intermittent tag ignores case and spaces")
     check(lane_for(make_server("x", None)) == "backup", "a server with tags NULL is on the backup lane")
     check(lane_for(make_server("x", [" Desktop "])) == "workstation", "the desktop tag ignores case and spaces")
 
@@ -203,8 +205,8 @@ def test_scheduler_enqueues_on_the_lane_of_the_server():
     check(len(rec.calls) == 3, f"the scheduler started all three due jobs ({len(rec.calls)})")
     check(by_job.get(str(jobs[0][0].id)) == "backup", "scheduler: a hedburgaren job goes to backup")
     check(by_job.get(str(jobs[1][0].id)) == "workstation", "scheduler: a plastdesk job goes to workstation")
-    check(by_job.get(str(jobs[2][0].id)) == "workstation", "scheduler: a plastop job goes to workstation")
-    check(all(c["queue"] in ("backup", "workstation") for c in rec.calls),
+    check(by_job.get(str(jobs[2][0].id)) == "laptop", "scheduler: a plastop job goes to laptop")
+    check(all(c["queue"] in ("backup", "workstation", "laptop") for c in rec.calls),
           "scheduler: no enqueue leaves the queue to a routing pattern")
 
 
@@ -232,7 +234,7 @@ def test_trigger_endpoint_enqueues_on_the_lane_of_the_server():
         results[server.name] = (rec.calls, out)
     check([c["queue"] for c in results["hedburgaren"][0]] == ["backup"], "trigger: a hedburgaren job goes to backup")
     check([c["queue"] for c in results["plastdesk"][0]] == ["workstation"], "trigger: a plastdesk job goes to workstation")
-    check([c["queue"] for c in results["plastop"][0]] == ["workstation"], "trigger: a plastop job goes to workstation")
+    check([c["queue"] for c in results["plastop"][0]] == ["laptop"], "trigger: a plastop job goes to laptop")
     check(results["plastop"][1]["status"] == "queued", "trigger: still answers queued")
 
 
@@ -255,42 +257,41 @@ def test_no_code_path_enqueues_a_backup_around_the_lane_rule():
     beat = celery_app.conf.beat_schedule
     tasks = {v["task"] for v in beat.values()}
     check("api.tasks.backup_tasks.check_workstation_health" in tasks, "beat schedules the workstation health probe")
+    check(routes.get("api.tasks.backup_tasks.check_laptop_health") == {"queue": "laptop"},
+          "the laptop health probe is routed to the laptop queue by name")
+    check("api.tasks.backup_tasks.check_laptop_health" in tasks, "beat schedules the laptop health probe")
 
 
 # ── 3. replay: the workstation lane is blocked ───────────────────────────────
 
 @guarded
-def test_replay_blocked_workstation_does_not_delay_hedburgaren():
-    """plastop is unreachable and a desktop run hangs, so the workstation slot
-    never frees. Seventeen hedburgaren jobs due that night must all be queued
-    on "backup" and finish in time; the desktop jobs must queue on the lane
-    that is blocked, not on the one that is free."""
+def test_replay_laptop_hang_holds_no_other_lane():
+    """plastop is unreachable and its run hangs, so the laptop slot never
+    frees. Seventeen hedburgaren jobs and the plastdesk jobs due that night
+    must be queued on their own lanes and finish in time."""
     rec = Recorder()
     h_jobs = [(make_job(f"h-{i}", HEDBURGAREN), HEDBURGAREN) for i in range(17)]
-    d_jobs = [(make_job("d-hang", PLASTDESK), PLASTDESK), (make_job("p-away", PLASTOP), PLASTOP)]
-    with scheduler_patches(h_jobs + d_jobs, rec, FakeRedis()):
+    d_jobs = [(make_job(f"d-{i}", PLASTDESK), PLASTDESK) for i in range(3)]
+    l_jobs = [(make_job("p-hang", PLASTOP), PLASTOP), (make_job("p-away", PLASTOP), PLASTOP)]
+    with scheduler_patches(h_jobs + d_jobs + l_jobs, rec, FakeRedis()):
         asyncio.run(bt()._check_scheduled())
-    h_queues = rec.queues_for([j for j, _ in h_jobs])
-    d_queues = rec.queues_for([j for j, _ in d_jobs])
-    check(h_queues == ["backup"] * 17, f"all 17 hedburgaren jobs are queued on backup ({len(h_queues)})")
-    check(d_queues == ["workstation"] * 2, "the desktop jobs wait on workstation, the blocked lane")
+    check(rec.queues_for([j for j, _ in h_jobs]) == ["backup"] * 17, "all 17 hedburgaren jobs are queued on backup")
+    check(rec.queues_for([j for j, _ in d_jobs]) == ["workstation"] * 3, "the plastdesk jobs are queued on workstation")
+    check(rec.queues_for([j for j, _ in l_jobs]) == ["laptop"] * 2, "the plastop jobs wait on laptop, the blocked lane")
 
-    # Two single-slot workers, one minute per hedburgaren job. The workstation
-    # worker never frees (hang). The backup worker must clear its own queue.
-    backup_q = [c for c in rec.calls if c["queue"] == "backup"]
-    clock, done = 0, []
-    for c in backup_q:
-        clock += 1
-        done.append(clock)
-    check(len(done) == 17 and done[-1] <= 60,
-          f"the backup lane clears its 17 jobs in {done[-1]} min while the workstation slot is stuck")
-    workstation_done = [c for c in rec.calls if c["queue"] == "workstation"]
-    check(all(c["job_id"] not in {str(j.id) for j, _ in h_jobs} for c in workstation_done),
-          "no hedburgaren job is stuck behind the blocked workstation lane")
+    # Three single-slot workers, one minute per job. The laptop worker never
+    # frees (hang); the other two must clear their own queues.
+    for lane, n in (("backup", 17), ("workstation", 3)):
+        done = list(range(1, len([c for c in rec.calls if c["queue"] == lane]) + 1))
+        check(len(done) == n and done[-1] <= 60,
+              f"the {lane} lane clears its {n} jobs in {done[-1]} min while the laptop slot is stuck")
+    on_laptop = {c["job_id"] for c in rec.calls if c["queue"] == "laptop"}
+    others = {str(j.id) for j, _ in h_jobs + d_jobs}
+    check(not (on_laptop & others), "no hedburgaren or plastdesk job is stuck behind the laptop lane")
 
 
 @guarded
-def test_health_probe_of_desktop_servers_never_runs_on_backup():
+def test_health_probe_routing_per_lane():
     b = bt()
     probed = []
 
@@ -307,18 +308,20 @@ def test_health_probe_of_desktop_servers_never_runs_on_backup():
             return None
 
     from api.services import ssh_client
+    seen = {}
     with patched((b, "get_task_session", lambda: fake_session(Db())),
                  (ssh_client, "test_ssh_connection", probe)):
-        asyncio.run(b._check_health("backup"))
-        on_backup = list(probed)
-        probed.clear()
-        asyncio.run(b._check_health("workstation"))
-        on_workstation = list(probed)
-    check(on_backup == ["hedburgaren"], f"the backup-lane probe touches only hedburgaren ({on_backup})")
-    check(sorted(on_workstation) == ["plastdesk", "plastop"],
-          f"the workstation-lane probe touches the desktop servers ({on_workstation})")
-    check(hasattr(b, "check_workstation_health") and hasattr(b, "check_server_health"),
-          "both probe tasks exist")
+        for lane in ("backup", "workstation", "laptop"):
+            probed.clear()
+            asyncio.run(b._check_health(lane))
+            seen[lane] = list(probed)
+    check(seen["backup"] == ["hedburgaren"], f"the backup-lane probe touches only hedburgaren ({seen['backup']})")
+    check(seen["workstation"] == ["plastdesk"], f"the workstation-lane probe touches only plastdesk ({seen['workstation']})")
+    check(seen["laptop"] == ["plastop"], f"the laptop-lane probe touches only plastop ({seen['laptop']})")
+    check("plastop" not in seen["backup"] + seen["workstation"],
+          "no probe of an intermittent server runs on workstation or backup")
+    check(all(hasattr(b, n) for n in ("check_server_health", "check_workstation_health", "check_laptop_health")),
+          "all three probe tasks exist")
 
 
 @guarded
@@ -349,6 +352,7 @@ def test_offline_alarm_keeps_the_intermittent_exception():
                  (ssh_client, "test_ssh_connection", probe),
                  (notifier, "notify_event", notify)):
         asyncio.run(b._check_health("workstation"))
+        asyncio.run(b._check_health("laptop"))
     check(events == [("server.offline", "plastdesk")],
           f"plastdesk going offline alarms, plastop (intermittent) does not ({events})")
 
@@ -471,8 +475,8 @@ def test_checkin_queues_only_what_is_old_enough_and_free():
     check(queued == ["never-ran", "old-success"], f"check-in queues the 14 h old and the never-run job ({queued})")
     check(skipped.get("fresh-success") == "recent_success", "check-in skips a job with a success 3 h ago")
     check(skipped.get("running-now") == "already_running", "check-in skips a job that is running")
-    check(all(c["queue"] == "workstation" for c in rec.calls) and len(rec.calls) == 2,
-          "check-in runs go to the workstation lane")
+    check(all(c["queue"] == "laptop" for c in rec.calls) and len(rec.calls) == 2,
+          "check-in runs go to the laptop lane")
     check(all(c["triggered_by"] == "checkin" for c in rec.calls), "check-in runs are marked triggered_by=checkin")
     check(top.last_seen == now, "check-in stamps last_seen")
 

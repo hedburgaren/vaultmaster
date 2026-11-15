@@ -6,6 +6,9 @@ or a laptop (plastop) can be off, asleep or without a network, and an SSH
 connection to it can hang for its whole timeout. With one single-slot backup
 queue, that hang held every other backup behind it.
 
+A server tagged ``intermittent`` (plastop) has a lane of its own, ``laptop``,
+so that a laptop with no network cannot hold plastdesk either.
+
 The rule is one pure function, used by every place that enqueues a backup
 (the scheduler, the trigger endpoint and the laptop check-in): a server tagged
 ``desktop`` is served by its own worker on the ``workstation`` queue, every
@@ -16,7 +19,9 @@ be relied on for it.
 
 BACKUP_LANE = "backup"
 WORKSTATION_LANE = "workstation"
+LAPTOP_LANE = "laptop"
 DESKTOP_TAG = "desktop"
+INTERMITTENT_TAG = "intermittent"
 
 
 def is_desktop(server) -> bool:
@@ -24,8 +29,19 @@ def is_desktop(server) -> bool:
     return any(str(t).strip().lower() == DESKTOP_TAG for t in tags)
 
 
+def is_laptop(server) -> bool:
+    tags = getattr(server, "tags", None) or []
+    return any(str(t).strip().lower() == INTERMITTENT_TAG for t in tags)
+
+
 def lane_for(server) -> str:
-    """The queue name a backup run (or a health probe) of this server uses."""
+    """The queue name a backup run (or a health probe) of this server uses.
+
+    An intermittent server (plastop) has a lane of its own, checked before
+    desktop: a laptop with no network hangs its SSH connection, and that must
+    not hold plastdesk either."""
+    if is_laptop(server):
+        return LAPTOP_LANE
     return WORKSTATION_LANE if is_desktop(server) else BACKUP_LANE
 
 

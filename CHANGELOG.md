@@ -5,7 +5,7 @@ All notable changes to VaultMaster are documented here.
 ## [Unreleased]
 
 ### Added
-- **Workstation lane** : backups of servers tagged `desktop` (plastdesk, plastop) run on their own queue `workstation` with their own worker (`workstation-worker`), chosen by one rule (`api/services/lanes.py`) that the scheduler, the trigger endpoint and the check-in all use. An unreachable desktop can no longer hold up hedburgaren's backups. The health probe of desktop servers moved to the same lane (`check_workstation_health`).
+- **Workstation lane** : backups of servers tagged `desktop` (plastdesk) run on the queue `workstation` (`workstation-worker`), and servers tagged `intermittent` (plastop) on their own queue `laptop` (`laptop-worker`, checked before desktop), so a laptop with no network holds no other backup, chosen by one rule (`api/services/lanes.py`) that the scheduler, the trigger endpoint and the check-in all use. An unreachable desktop can no longer hold up hedburgaren's backups. Health probes follow the lanes (`check_server_health`, `check_workstation_health`, `check_laptop_health`).
 - **Laptop check-in** : `POST /servers/checkin` (header `X-Checkin-Token`, rate limited, audited) queues the due jobs of the laptop's own server; admin endpoints to generate and revoke the per-server token (stored as a SHA-256 hash). New setting `checkin_min_interval_hours` (default 10). Laptop script, systemd user service and timer in `laptop/`.
 - Migration `0011`: `server.checkin_token_hash`, and `backup_job.schedule_cron` is nullable.
 

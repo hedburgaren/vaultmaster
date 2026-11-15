@@ -1657,13 +1657,20 @@ def check_server_health():
 
 @celery_app.task(name="api.tasks.backup_tasks.check_workstation_health")
 def check_workstation_health():
-    """Ping the active desktop servers (queue workstation).
+    """Ping the active desktop servers that are not laptops (queue workstation).
 
     A desktop or laptop that is off makes its SSH probe wait out the whole
     timeout. That wait belongs in the workstation lane, never in the single
     slot that serves the server's own backups.
     """
     _run_async(_check_health("workstation"))
+
+
+@celery_app.task(name="api.tasks.backup_tasks.check_laptop_health")
+def check_laptop_health():
+    """Ping the active intermittent servers (queue laptop): a laptop that is
+    off hangs its probe, and that wait must hold no other lane."""
+    _run_async(_check_health("laptop"))
 
 
 async def _check_health(lane: str = "backup"):

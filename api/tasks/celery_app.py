@@ -37,6 +37,8 @@ celery_app.conf.update(
         # default for tasks that do not touch a desktop. The probe of desktop
         # servers is routed here by exact name so it can never occupy "backup".
         "api.tasks.backup_tasks.check_workstation_health": {"queue": "workstation"},
+        # Intermittent servers (the laptop) have their own lane and probe.
+        "api.tasks.backup_tasks.check_laptop_health": {"queue": "laptop"},
         "api.tasks.backup_tasks.*": {"queue": "backup"},
         "api.tasks.rotation_tasks.*": {"queue": "rotation"},
         "api.tasks.validation_tasks.*": {"queue": "validation"},
@@ -74,7 +76,11 @@ celery_app.conf.update(
         },
         "check-workstation-health": {
             "task": "api.tasks.backup_tasks.check_workstation_health",
-            "schedule": 300.0,  # every 5 minutes, desktop servers, queue workstation
+            "schedule": 300.0,  # every 5 minutes, other desktops, queue workstation
+        },
+        "check-laptop-health": {
+            "task": "api.tasks.backup_tasks.check_laptop_health",
+            "schedule": 300.0,  # every 5 minutes, intermittent servers, queue laptop
         },
         "scan-validation-candidates": {
             "task": "api.tasks.validation_tasks.scan_validation_candidates",
