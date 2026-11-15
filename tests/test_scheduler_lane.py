@@ -302,7 +302,10 @@ class _FakeDB:
             if isinstance(p, str) and p.startswith("job-"):
                 job_id = p
         if "FROM backup_job" in sql:
-            return _Result(self.jobs)
+            # The scheduler now loads (job, server) pairs so that each run is
+            # queued on the lane of its server (tests/test_workstation_lane).
+            server = type("_Srv", (), {"tags": []})()
+            return _Result([(j, server) for j in self.jobs])
         if "backup_run.status" in sql:
             class _Run:
                 started_at = NIGHT
@@ -348,7 +351,7 @@ def _drive_check_scheduled(db, now, redis):
              notifier.notify_event, bt.datetime)
     bt.get_task_session = session
     bt._redis_or_none = lambda caller: redis
-    bt.run_backup_task.apply_async = lambda args, kwargs: triggered.append((args[0], kwargs["triggered_by"]))
+    bt.run_backup_task.apply_async = lambda args, kwargs, queue=None: triggered.append((args[0], kwargs["triggered_by"]))
     notifier.notify_event = fake_notify
     bt.datetime = _Clock
     try:
