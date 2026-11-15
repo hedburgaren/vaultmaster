@@ -34,7 +34,7 @@ rollback_hint() {
   [ "$PULLED" = yes ] || return 0
   echo
   echo "ROLLBACK (kör inte utan Klådan):"
-  echo "  ssh hedburgaren 'cd $PROD && docker exec vaultmaster-api alembic downgrade 0010_stale_and_missed_triggers'"
+  echo "  ssh hedburgaren 'cd $PROD && docker exec -w /app -e PYTHONPATH=/app vaultmaster-api alembic downgrade 0010_stale_and_missed_triggers'"
   echo "  ssh hedburgaren 'cd $PROD && docker compose stop workstation-worker laptop-worker && git reset -q --hard $OLD'"
   echo "  ssh hedburgaren 'docker restart vaultmaster-worker vaultmaster-scheduler vaultmaster-beat vaultmaster-api'"
   echo "  Databasdump före migreringen: $DUMP"
@@ -52,19 +52,34 @@ for m in test_workstation_lane test_scheduler_lane test_quiet_hosts; do
   echo "ok lokalt: $m"
 done
 CUR=$(ssh hedburgaren "git -C $PROD rev-parse --short=7 HEAD")
-[ "$CUR" = "$OLD" ] || fail "produktionen står på $CUR, väntade $OLD. Inget ändrat."
+git -C "$MAIN" fetch -q origin
+ORIGIN=$(git -C "$MAIN" rev-parse origin/main)
+RESUME=no
+if [ "$CUR" != "$OLD" ] && [ "$CUR" = "${ORIGIN:0:7}" ]; then
+  # Avbruten körning: koden är redan pushad och dragen i produktionen, men inte migrerad eller omstartad.
+  RESUME=yes; NEW=$ORIGIN
+  git -C "$WT" merge-base --is-ancestor "$NEW" HEAD || fail "produktionens version ${NEW:0:7} finns inte i grenen"
+  echo "produktionen står redan på ${NEW:0:7} (avbruten körning), fortsätter från migreringen"
+elif [ "$CUR" = "$OLD" ]; then
+  NEW=$(git -C "$WT" rev-parse HEAD)
+else
+  fail "produktionen står på $CUR, väntade $OLD eller ${ORIGIN:0:7}. Inget ändrat."
+fi
 [ -z "$(ssh hedburgaren "git -C $PROD status --porcelain --untracked-files=no")" ] || fail "spårade filer ändrade i produktionen"
-EXPECTED=$(git -C "$WT" diff --name-only "$OLD" HEAD | sort)
-NEW=$(git -C "$WT" rev-parse HEAD)
+EXPECTED=$(git -C "$WT" diff --name-only "$OLD" "$NEW" | sort)
 echo "ok: produktionen på $OLD, ny version ${NEW:0:7}, $(wc -l <<<"$EXPECTED") filer"
 
 echo "== 2. main och push"
-git -C "$MAIN" fetch -q origin
-[ "$(git -C "$MAIN" rev-parse origin/main)" = "$(git -C "$MAIN" rev-parse "$OLD")" ] || fail "origin/main har flyttat sig sedan $OLD"
+if [ "$RESUME" = no ]; then
+[ "$ORIGIN" = "$(git -C "$MAIN" rev-parse "$OLD")" ] || fail "origin/main har flyttat sig sedan $OLD"
 git -C "$MAIN" merge -q --ff-only backup-flow
 git -C "$MAIN" push -q origin main
 [ "$(git -C "$MAIN" rev-parse origin/main)" = "$NEW" ] || fail "pushen gick inte fram"
 echo "ok: origin/main = ${NEW:0:7}"
+else
+  [ "$(git -C "$MAIN" rev-parse origin/main)" = "$NEW" ] || fail "origin/main är inte ${NEW:0:7}"
+  echo "ok: redan pushad"
+fi
 
 echo "== 3. Väntar på ledig worker"
 for i in $(seq 1 180); do
@@ -80,7 +95,7 @@ echo "== 4. Databasdump"
 ssh hedburgaren "docker exec vaultmaster-db sh -c 'pg_dump -Fc -U \"\$POSTGRES_USER\" \"\$POSTGRES_DB\"' > $DUMP && test -s $DUMP && ls -la $DUMP"
 
 echo "== 5. git pull och test i produktionens image"
-ssh hedburgaren "git -C $PROD pull --ff-only -q"
+[ "$RESUME" = yes ] || ssh hedburgaren "git -C $PROD pull --ff-only -q"
 PULLED=yes
 CHANGED=$(ssh hedburgaren "git -C $PROD diff --name-only $OLD HEAD" | sort)
 [ "$CHANGED" = "$EXPECTED" ] || { ssh hedburgaren "git -C $PROD reset -q --hard $OLD"; PULLED=no; fail "oväntade filer i pullen, återställt till $OLD"; }
@@ -91,8 +106,8 @@ for m in test_workstation_lane test_scheduler_lane; do
 done
 
 echo "== 6. Migrering och omstart"
-ssh hedburgaren "docker exec vaultmaster-api alembic upgrade head"
-ssh hedburgaren "docker exec vaultmaster-api alembic current" | tee /tmp/deploy-bf-alembic.txt
+ssh hedburgaren "docker exec -w /app -e PYTHONPATH=/app vaultmaster-api alembic upgrade head"
+ssh hedburgaren "docker exec -w /app -e PYTHONPATH=/app vaultmaster-api alembic current" | tee /tmp/deploy-bf-alembic.txt
 grep -q '0011' /tmp/deploy-bf-alembic.txt || fail "migreringen står inte på 0011"
 ssh hedburgaren "cd $PROD && docker compose up -d --no-deps workstation-worker laptop-worker"
 ssh hedburgaren "docker restart vaultmaster-worker vaultmaster-scheduler vaultmaster-beat vaultmaster-api >/dev/null"
