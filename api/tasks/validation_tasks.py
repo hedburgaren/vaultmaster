@@ -156,6 +156,10 @@ async def _scan_candidates() -> None:
         )
         jobs = result.scalars().all()
 
+        from api.models.server import Server
+        from api.services.lanes import enqueue_validation
+        servers = {s.id: s for s in (await db.execute(select(Server))).scalars().all()}
+
         queued = 0
         never_validated = []
         for j in jobs:
@@ -179,7 +183,7 @@ async def _scan_candidates() -> None:
                 continue
             if last_real is None:
                 never_validated.append(j.name)
-            validate_backup_job_task.delay(str(j.id), None, "scheduler")
+            enqueue_validation(j.id, servers.get(j.server_id), None, "scheduler")
             queued += 1
             logger.info(f"validation queued for job {j.name} ({j.id})")
 

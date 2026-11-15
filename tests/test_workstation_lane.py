@@ -87,6 +87,9 @@ class FakeRedis:
     def exists(self, key):
         return key in self.keys
 
+    def delete(self, key):
+        self.keys.discard(key)
+
     def close(self):
         pass
 
@@ -698,6 +701,161 @@ def test_retry_stays_on_the_lane_of_the_server():
         check(len(calls) == 1 and calls[0].get("queue") == lane,
               f"a failing {server.name} run retries on {lane} ({[c.get('queue') for c in calls]})")
         check(calls and calls[0].get("countdown") == 60, f"the {server.name} retry keeps its countdown")
+
+
+# ── 7. every task that opens SSH runs on the lane of its server ──────────────
+
+def ssh_world():
+    """Patch the SSH entry points so that plastop and plastdesk are 'unreachable'
+    and record which servers each task tried to reach."""
+    from api.services import ssh_client
+    reached = []
+
+    async def run_cmd(server, command, timeout=300):
+        reached.append(server.name)
+        return 1, "", "connect timed out"
+
+    return reached, patched((ssh_client, "run_remote_command", run_cmd))
+
+
+def orphan_scan(lane, servers):
+    from api.services import backup_executor
+    from api.tasks import cleanup_tasks, backup_tasks as b
+
+    class Db:
+        def __init__(self):
+            self.n = 0
+
+        async def execute(self, stmt):
+            self.n += 1
+            if self.n == 1:
+                return SimpleNamespace(all=lambda: [])
+            if self.n == 2:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: servers))
+            return SimpleNamespace(all=lambda: [])
+
+    async def work_dir(db):
+        return "/tmp/vm"
+
+    reached, ssh = ssh_world()
+    with ssh, patched((b, "get_task_session", lambda: fake_session(Db())),
+                      (backup_executor, "get_work_dir", work_dir)):
+        asyncio.run(cleanup_tasks._scan_orphans(lane))
+    return reached
+
+
+@guarded
+def test_orphan_scan_fans_out_per_lane():
+    servers = [HEDBURGAREN, PLASTDESK, PLASTOP]
+    check(orphan_scan("backup", servers) == ["hedburgaren"], "orphan scan, backup lane: SSHes only to hedburgaren")
+    check(orphan_scan("workstation", servers) == ["plastdesk"], "orphan scan, workstation lane: only plastdesk")
+    check(orphan_scan("laptop", servers) == ["plastop"], "orphan scan, laptop lane: only plastop")
+    from api.tasks.celery_app import celery_app
+    routes, beat = celery_app.conf.task_routes, celery_app.conf.beat_schedule
+    base = "api.tasks.cleanup_tasks.scan_orphan_temp_files"
+    check(routes.get(base + "_workstation") == {"queue": "workstation"} and routes.get(base + "_laptop") == {"queue": "laptop"},
+          "the per-lane orphan scans are routed to their own queues by name")
+    tasks = {v["task"] for v in beat.values()}
+    check({base, base + "_workstation", base + "_laptop"} <= tasks, "beat schedules all three orphan scans")
+
+
+@guarded
+def test_validations_and_restores_follow_the_lane_of_their_server():
+    from api.services import lanes
+    from api.tasks import validation_tasks, backup_tasks as b
+    rec_v, rec_r = Recorder(), Recorder()
+    with patched((validation_tasks.validate_backup_job_task, "apply_async", rec_v),
+                 (b.run_restore_task, "apply_async", rec_r)):
+        for srv in (HEDBURGAREN, PLASTDESK, PLASTOP):
+            lanes.enqueue_validation(uuid.uuid4(), srv, None, "scheduler")
+            lanes.enqueue_restore(srv, uuid.uuid4(), srv.id, "db", None, False)
+    check([c["queue"] for c in rec_v.calls] == ["validation", "workstation", "laptop"],
+          f"validations: hedburgaren stays on validation, plastdesk on workstation, plastop on laptop ({[c['queue'] for c in rec_v.calls]})")
+    check([c["queue"] for c in rec_r.calls] == ["backup", "workstation", "laptop"],
+          f"restores follow their target server ({[c['queue'] for c in rec_r.calls]})")
+
+    # The hourly scan and the manual endpoint use the same helper.
+    jobs = [make_job("v-h", HEDBURGAREN), make_job("v-d", PLASTDESK), make_job("v-p", PLASTOP)]
+    servers = [HEDBURGAREN, PLASTDESK, PLASTOP]
+
+    class Db:
+        def __init__(self):
+            self.n = 0
+
+        async def execute(self, stmt):
+            self.n += 1
+            if self.n == 1:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: jobs))
+            if self.n == 2:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: servers))
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    rec_s = Recorder()
+    with patched((validation_tasks, "get_task_session", lambda: fake_session(Db())),
+                 (validation_tasks.validate_backup_job_task, "apply_async", rec_s)):
+        asyncio.run(validation_tasks._scan_candidates())
+    check([c["queue"] for c in rec_s.calls] == ["validation", "workstation", "laptop"],
+          f"the hourly validation scan routes per lane ({[c['queue'] for c in rec_s.calls]})")
+    offenders = []
+    for path in (ROOT / "api").rglob("*.py"):
+        if path.name == "lanes.py":
+            continue
+        text = path.read_text()
+        for m in re.finditer(r"(validate_backup_job_task|run_restore_task)\s*\.\s*(delay|apply_async|apply)\b", text):
+            offenders.append(f"{path.relative_to(ROOT)}:{text[:m.start()].count(chr(10)) + 1}")
+    check(not offenders, f"validations and restores are enqueued only through lanes ({offenders})")
+
+
+@guarded
+def test_replay_unreachable_laptop_with_orphan_scan_and_validation_due():
+    """plastop is unreachable. The orphan scan and a plastop validation are due,
+    and hedburgaren's jobs are due too. Nothing that SSHes to plastop may sit
+    on a queue the backup worker serves."""
+    rec = Recorder()
+    h_jobs = [(make_job(f"h-{i}", HEDBURGAREN), HEDBURGAREN) for i in range(17)]
+    with scheduler_patches(h_jobs, rec, FakeRedis()):
+        asyncio.run(bt()._check_scheduled())
+    check(rec.queues_for([j for j, _ in h_jobs]) == ["backup"] * 17, "all 17 hedburgaren jobs are queued on backup")
+
+    from api.tasks import validation_tasks
+    from api.services import lanes
+    rec_v = Recorder()
+    with patched((validation_tasks.validate_backup_job_task, "apply_async", rec_v)):
+        lanes.enqueue_validation(uuid.uuid4(), PLASTOP, None, "scheduler")
+    served_by_backup_worker = {"backup", "rotation", "notification", "validation"}
+    check(rec_v.calls[0]["queue"] not in served_by_backup_worker, "the plastop validation is not on a queue the backup worker serves")
+
+    # The shared-lane orphan scan, run with plastop unreachable, never touches it.
+    reached = orphan_scan("backup", [HEDBURGAREN, PLASTDESK, PLASTOP])
+    check("plastop" not in reached and "plastdesk" not in reached,
+          f"the shared orphan scan does not SSH to plastop or plastdesk ({reached})")
+    check(len([c for c in rec.calls if c["queue"] == "backup"]) == 17, "the backup lane still has exactly its 17 jobs to clear")
+
+
+@guarded
+def test_checkin_releases_its_claim_when_enqueue_fails():
+    from api.services import checkin as svc
+    now = datetime.now(UTC)
+    top = make_server("plastop", ["desktop", "intermittent"])
+    job = make_job("p-job", top)
+    world = CheckinWorld([top], [job])
+    redis = FakeRedis()
+
+    def boom(*a, **k):
+        raise RuntimeError("broker down")
+
+    with world.patches(Recorder()), patched((bt().run_backup_task, "apply_async", boom)):
+        try:
+            asyncio.run(svc.process_checkin(None, top, redis, 10, now=now, claim=claim_once))
+            raised = False
+        except RuntimeError:
+            raised = True
+    check(raised, "a failing enqueue is not swallowed")
+    check(f"vm:checkin:{job.id}" not in redis.keys, "the claim is released, so the next check-in can queue the job")
+    rec = Recorder()
+    with world.patches(rec):
+        asyncio.run(svc.process_checkin(None, top, redis, 10, now=now, claim=claim_once))
+    check(len(rec.calls) == 1, "the next check-in queues the job")
 
 
 def main():

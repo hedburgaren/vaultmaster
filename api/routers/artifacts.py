@@ -90,14 +90,11 @@ async def restore_artifact(
     if error:
         raise HTTPException(status_code=422, detail=error)
 
-    from api.tasks.backup_tasks import run_restore_task
-    task = run_restore_task.delay(
-        str(artifact_id),
-        str(body.target_server_id) if body.target_server_id else None,
-        body.target_db_name,
-        body.target_path,
-        body.confirm_overwrite,
-    )
+    from api.models.server import Server
+    from api.services.lanes import enqueue_restore
+    target = await db.get(Server, body.target_server_id) if body.target_server_id else None
+    task = enqueue_restore(target, artifact_id, body.target_server_id, body.target_db_name,
+                           body.target_path, body.confirm_overwrite)
     return {"task_id": task.id, "status": "queued", "artifact_id": str(artifact_id)}
 
 

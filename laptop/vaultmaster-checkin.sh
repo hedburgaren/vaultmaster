@@ -42,11 +42,44 @@ if [ "$connectivity" != "full" ]; then
   exit 0
 fi
 
-# Den primära aktiva anslutningen får inte vara mobil och inte mätt.
-# Primär = den som bär default route.
-dev=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+# Bedöm den verkliga uplinken, inte ett VPN. plastop kör alltid Tailscale
+# (tailscale0) och kan ha WireGuard eller andra tun-enheter; de ignoreras.
+# Av de återstående default-routerna gäller den med lägst metric.
+is_vpn() {
+  # $1 = enhet. VPN om namnet eller NetworkManagers typ säger det.
+  local d="$1" t c ct
+  case "$d" in
+    tailscale*|tun*|tap*|wg*|ppp*) return 0 ;;
+  esac
+  t=$(nmcli -t -g GENERAL.TYPE device show "$d" 2>/dev/null | head -n 1)
+  case "$t" in
+    tun|wireguard|vpn|tailscale) return 0 ;;
+  esac
+  c=$(nmcli -t -g GENERAL.CONNECTION device show "$d" 2>/dev/null | head -n 1)
+  if [ -n "$c" ]; then
+    ct=$(nmcli -t -g connection.type connection show "$c" 2>/dev/null | head -n 1)
+    case "$ct" in
+      tun|wireguard|vpn) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+dev=""
+while read -r d; do
+  [ -z "$d" ] && continue
+  if is_vpn "$d"; then
+    continue
+  fi
+  dev="$d"
+  break
+done < <(ip -o route show default 2>/dev/null | awk '
+  { m = 0; d = ""
+    for (i = 1; i <= NF; i++) { if ($i == "metric") m = $(i+1); if ($i == "dev") d = $(i+1) }
+    print m, d }' | sort -n | awk '{print $2}')
+
 if [ -z "$dev" ]; then
-  log "ingen default route, hoppar över"
+  log "ingen verklig uplink (bara VPN eller ingen default route), hoppar över"
   exit 0
 fi
 ctype=$(nmcli -t -g GENERAL.TYPE device show "$dev" 2>/dev/null | head -n 1)
@@ -54,13 +87,13 @@ conn=$(nmcli -t -g GENERAL.CONNECTION device show "$dev" 2>/dev/null | head -n 1
 conn_type=$(nmcli -t -g connection.type connection show "$conn" 2>/dev/null | head -n 1)
 case "${ctype:-}:${conn_type:-}" in
   *gsm*|*cdma*|*bluetooth*)
-    log "primär anslutning är mobil eller bluetooth (${ctype}/${conn_type}), hoppar över"
+    log "uplinken $dev är mobil eller bluetooth (${ctype}/${conn_type}), hoppar över"
     exit 0 ;;
 esac
 metered=$(nmcli -t -g GENERAL.METERED device show "$dev" 2>/dev/null | head -n 1)
 case "${metered:-}" in
   yes|"yes (guessed)")
-    log "anslutningen är mätt (${metered}), hoppar över"
+    log "uplinken $dev är mätt (${metered}), hoppar över"
     exit 0 ;;
 esac
 

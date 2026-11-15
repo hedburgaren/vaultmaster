@@ -45,6 +45,8 @@ celery_app.conf.update(
         "api.tasks.security_tasks.*": {"queue": "notification"},
         "api.tasks.anomaly_tasks.*": {"queue": "notification"},
         "api.tasks.credential_tasks.*": {"queue": "notification"},
+        "api.tasks.cleanup_tasks.scan_orphan_temp_files_workstation": {"queue": "workstation"},
+        "api.tasks.cleanup_tasks.scan_orphan_temp_files_laptop": {"queue": "laptop"},
         "api.tasks.cleanup_tasks.*": {"queue": "rotation"},
         "api.tasks.storage_tasks.*": {"queue": "notification"},
     },
@@ -101,6 +103,14 @@ celery_app.conf.update(
         "scan-orphan-temp-files": {
             "task": "api.tasks.cleanup_tasks.scan_orphan_temp_files",
             "schedule": 21600.0,  # every 6h — sweeps abandoned tar.gz/dump.gz from work_dir
+        },
+        "scan-orphan-temp-files-workstation": {
+            "task": "api.tasks.cleanup_tasks.scan_orphan_temp_files_workstation",
+            "schedule": 21600.0,
+        },
+        "scan-orphan-temp-files-laptop": {
+            "task": "api.tasks.cleanup_tasks.scan_orphan_temp_files_laptop",
+            "schedule": 21600.0,
         },
         "refresh-storage-usage": {
             "task": "api.tasks.storage_tasks.refresh_storage_usage",

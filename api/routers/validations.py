@@ -82,7 +82,9 @@ async def trigger_validation(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    from api.tasks.validation_tasks import validate_backup_job_task
+    from api.models.server import Server
+    from api.services.lanes import enqueue_validation
+    server = await db.get(Server, job.server_id)
     artifact_id_str = str(body.artifact_id) if body.artifact_id else None
-    validate_backup_job_task.delay(str(job_id), artifact_id_str, "manual")
+    enqueue_validation(job_id, server, artifact_id_str, "manual")
     return {"queued": True, "job_id": str(job_id), "check_type": body.check_type}

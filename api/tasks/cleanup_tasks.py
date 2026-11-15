@@ -57,13 +57,29 @@ DEFAULT_ORPHAN_AGE_SECONDS = 12 * 3600
 
 @celery_app.task(name="api.tasks.cleanup_tasks.scan_orphan_temp_files")
 def scan_orphan_temp_files():
-    """Scan all servers' work_dir for orphaned temp files older than
-    DEFAULT_ORPHAN_AGE_SECONDS that aren't referenced by any artifact."""
+    """Scan the work_dir of the servers on the backup lane for orphaned temp
+    files older than DEFAULT_ORPHAN_AGE_SECONDS that aren't referenced by any
+    artifact. Desktops and laptops are scanned by their own lane's task below,
+    so an unreachable one cannot hold the shared slot."""
     from api.tasks.backup_tasks import _run_async
-    _run_async(_scan_orphans())
+    _run_async(_scan_orphans("backup"))
 
 
-async def _scan_orphans():
+@celery_app.task(name="api.tasks.cleanup_tasks.scan_orphan_temp_files_workstation")
+def scan_orphan_temp_files_workstation():
+    """The same scan for desktop servers (queue workstation)."""
+    from api.tasks.backup_tasks import _run_async
+    _run_async(_scan_orphans("workstation"))
+
+
+@celery_app.task(name="api.tasks.cleanup_tasks.scan_orphan_temp_files_laptop")
+def scan_orphan_temp_files_laptop():
+    """The same scan for intermittent servers (queue laptop)."""
+    from api.tasks.backup_tasks import _run_async
+    _run_async(_scan_orphans("laptop"))
+
+
+async def _scan_orphans(lane: str = "backup"):
     import shlex as _shlex
 
     from sqlalchemy import select
@@ -88,7 +104,8 @@ async def _scan_orphans():
                 referenced.add(fn)
 
         result = await db.execute(select(Server))
-        servers = result.scalars().all()
+        from api.services.lanes import lane_for
+        servers = [s for s in result.scalars().all() if lane_for(s) == lane]
 
         # Bug #2: per-server set of servers with an active run. Cleanup
         # must never touch a server while a run is in flight, because

@@ -54,3 +54,32 @@ def enqueue_backup(job, server, triggered_by: str):
         kwargs={"triggered_by": triggered_by},
         queue=lane_for(server),
     )
+
+
+def validation_queue_for(server) -> str:
+    """Validations of servers on the backup lane stay on the validation queue;
+    those of desktops and laptops run on the lane of their server, since a
+    restic check SSHes to the server and an unreachable one would otherwise
+    hold the shared slot."""
+    lane = lane_for(server)
+    return "validation" if lane == BACKUP_LANE else lane
+
+
+def enqueue_validation(job_id, server, artifact_id, triggered_by: str):
+    from api.tasks.validation_tasks import validate_backup_job_task
+
+    return validate_backup_job_task.apply_async(
+        args=[str(job_id), artifact_id, triggered_by],
+        queue=validation_queue_for(server),
+    )
+
+
+def enqueue_restore(server, artifact_id, target_server_id, target_db_name, target_path, confirm_overwrite):
+    """A restore SSHes to its target server, so it runs on that server's lane."""
+    from api.tasks.backup_tasks import run_restore_task
+
+    return run_restore_task.apply_async(
+        args=[str(artifact_id), str(target_server_id) if target_server_id else None,
+              target_db_name, target_path, confirm_overwrite],
+        queue=lane_for(server) if server is not None else BACKUP_LANE,
+    )

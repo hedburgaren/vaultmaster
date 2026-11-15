@@ -24,7 +24,14 @@ async def checkin(
     x_checkin_token: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    ip = request.client.host if request.client else None
+    # Same derivation as the audit middleware and the MCP server (first
+    # X-Forwarded-For, else the peer), so the check-in audit row names the same
+    # address as the generic row the middleware writes for this request. The
+    # rate limit itself uses the shared limiter, like every other public route:
+    # slowapi get_remote_address, the socket peer, which ignores the header and
+    # so cannot be dodged by a forged X-Forwarded-For.
+    from api.middleware.audit import _client_ip
+    ip = _client_ip(request)
     try:
         server = await svc.authenticate(db, x_checkin_token)
     except svc.CheckinRejected:

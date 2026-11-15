@@ -108,6 +108,17 @@ async def authenticate(db, raw_token):
     return server
 
 
+def release(redis_client, key: str) -> None:
+    """Drop a claim after a failed enqueue. Best effort: a Redis that fails
+    here just means the claim expires on its TTL."""
+    if redis_client is None:
+        return
+    try:
+        redis_client.delete(key)
+    except Exception as exc:
+        logger.warning(f"checkin: could not release claim {key}: {exc}")
+
+
 async def process_checkin(db, server, redis_client, min_interval_hours: float, now=None, claim=None):
     """Stamp last_seen and queue every due job of this server.
 
@@ -143,6 +154,12 @@ async def process_checkin(db, server, redis_client, min_interval_hours: float, n
             # worse than waiting for the next check-in 15 minutes later.
             skipped.append({"job": job.name, "reason": SKIP_NO_REDIS})
             continue
-        enqueue_backup(job, server, "checkin")
+        try:
+            enqueue_backup(job, server, "checkin")
+        except Exception:
+            # Nothing was queued, so the claim must not hold the job out of
+            # the next check-in for two hours.
+            release(redis_client, f"vm:checkin:{job.id}")
+            raise
         queued.append({"job": job.name, "queue": lane_for(server)})
     return {"server": server.name, "queued": queued, "skipped": skipped}
