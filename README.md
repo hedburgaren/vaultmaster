@@ -46,6 +46,7 @@ cd ui && npm install && npx next build && npx next start --port 3100
 | **API** | FastAPI (Python 3.12), async, OpenAPI docs |
 | **Worker** | Celery with 4 concurrent workers |
 | **Scheduler** | Celery Beat (cron-based) |
+| **Queues** | `backup` (servers), `workstation` (servers tagged `desktop`, own worker), `scheduler`, `rotation`, `notification`, `validation` |
 | **Database** | PostgreSQL 16 |
 | **Queue** | Redis 7 |
 | **Frontend** | Next.js 14, React, TailwindCSS |
@@ -53,6 +54,26 @@ cd ui && npm install && npx next build && npx next start --port 3100
 | **Storage** | rclone — local, S3, SFTP, B2, Google Drive |
 | **Encryption** | age (AES-256) |
 | **Monitoring** | Prometheus `/metrics` endpoint |
+
+## Queues and laptops
+
+Every backup lands on the VaultMaster server and goes encrypted off-site. A
+backup run is queued on the lane of the server it backs up
+(`api/services/lanes.py`): a server tagged `desktop` is served by the
+`workstation-worker` container on the `workstation` queue, every other server
+by the `backup` queue. A desktop or laptop that is off or without a network
+can therefore hang its own SSH connection without holding up any other backup.
+The health probe of desktop servers runs on the workstation lane too.
+
+A laptop that is not always online (tagged `intermittent`) has no cron on the
+server. Its jobs have `schedule_cron` NULL and are started by the laptop's
+check-in, `POST /api/v1/servers/checkin` with the header `X-Checkin-Token`,
+which the laptop sends when it is on and has a network that is not mobile. The
+server queues each active job of that server whose newest successful run is
+older than `checkin_min_interval_hours` (default 10) and that is not already
+queued or running. An admin generates the token with
+`POST /api/v1/servers/<id>/checkin-token` (shown once, stored as a hash) and
+revokes it with `DELETE`. The laptop side is in `laptop/`.
 
 ## Features
 
