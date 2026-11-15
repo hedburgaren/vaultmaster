@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # server.offline. 96 h covers a long weekend with the lid closed.
     intermittent_grace_hours: int = 96
 
+    # A laptop check-in (POST /servers/checkin) queues a job only when its
+    # newest successful run is at least this many hours old, so a laptop that
+    # reboots three times a day backs up once or twice, not three times.
+    checkin_min_interval_hours: float = 10
+
     # Credential vault — separate from JWT secret_key by design.
     # Format: "v1:<base64-Fernet-key>,v2:<base64-Fernet-key>"
     # The HIGHEST version number is used for new encryptions; all listed

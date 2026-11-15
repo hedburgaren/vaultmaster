@@ -152,10 +152,12 @@ app.add_middleware(
 )
 
 # Register routers
-from api.routers import auth, servers, jobs, runs, artifacts, storage, retention, notifications, dashboard, audit, webhooks, users, metrics, system_settings, validations, credentials, mcp_clients
+from api.routers import auth, checkin, servers, jobs, runs, artifacts, storage, retention, notifications, dashboard, audit, webhooks, users, metrics, system_settings, validations, credentials, mcp_clients
 from api.mcp import server as mcp_server
 
 app.include_router(auth.router, prefix="/api/v1")
+# checkin before servers: its route is authenticated by its own token, not a user login.
+app.include_router(checkin.router, prefix="/api/v1")
 app.include_router(servers.router, prefix="/api/v1")
 app.include_router(jobs.router, prefix="/api/v1")
 app.include_router(runs.router, prefix="/api/v1")

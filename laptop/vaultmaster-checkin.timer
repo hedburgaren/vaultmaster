@@ -1,0 +1,11 @@
+[Unit]
+Description=VaultMaster check-in vid start och var 15:e minut
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=vaultmaster-checkin.service
+
+[Install]
+WantedBy=timers.target

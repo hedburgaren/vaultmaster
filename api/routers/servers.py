@@ -12,6 +12,7 @@ from api.auth import get_current_user
 from api.database import get_db
 from api.models.server import Server
 from api.models.user import User
+from api.routers.users import require_admin
 from api.schemas import ServerCreate, ServerUpdate, ServerOut
 from api.services.ssh_client import test_ssh_connection, connectivity_is_testable, list_remote_directory, list_remote_databases, list_remote_docker, prune_docker_volumes
 
@@ -133,6 +134,52 @@ async def prune_volumes(server_id: uuid.UUID, db: AsyncSession = Depends(get_db)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     return await prune_docker_volumes(server)
+
+
+@router.post("/{server_id}/checkin-token")
+async def regenerate_checkin_token(
+    server_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """(Re)generate the laptop check-in token. Admin only. The raw token is
+    returned this once; only its hash is stored, and any earlier token stops
+    working."""
+    from api.routers.audit import log_action
+    from api.services.checkin import generate_token, hash_token
+
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    raw = generate_token()
+    server.checkin_token_hash = hash_token(raw)
+    await db.flush()
+    await log_action(db, action="server.checkin_token.generate", user=admin,
+                     resource_type="server", resource_id=str(server.id),
+                     detail=f"Check-in token generated for {server.name}")
+    return {"server": server.name, "token": raw, "header": "X-Checkin-Token",
+            "note": "Shown once. Store it in ~/.config/vaultmaster/checkin.env on the laptop."}
+
+
+@router.delete("/{server_id}/checkin-token", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_checkin_token(
+    server_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Revoke the check-in token: the laptop's calls are refused from now on."""
+    from api.routers.audit import log_action
+
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server.checkin_token_hash = None
+    await db.flush()
+    await log_action(db, action="server.checkin_token.revoke", user=admin,
+                     resource_type="server", resource_id=str(server.id),
+                     detail=f"Check-in token revoked for {server.name}")
 
 
 @router.get("/{server_id}", response_model=ServerOut)

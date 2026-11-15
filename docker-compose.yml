@@ -115,6 +115,41 @@ services:
     networks:
       - vaultmaster
 
+  # The workstation lane. Backups of desktop servers (plastdesk, plastop; tag
+  # "desktop") run here, not on the worker above, so a machine that is off or
+  # has no network can hang its own SSH connection without holding the one
+  # slot that serves hedburgaren's backups. Same image, env and mounts as the
+  # worker since it runs the same backup code, including the age identity
+  # (restore and validation stay on the worker; this lane only backs up).
+  # Image as for the scheduler below: the worker's existing image, no rebuild.
+  workstation-worker:
+    image: vmhedburgarense-worker:latest
+    container_name: vaultmaster-workstation-worker
+    restart: unless-stopped
+    command: celery -A api.tasks.celery_app worker -l info -c 1 -Q workstation -n workstation@%h
+    env_file:
+      - .env
+    environment:
+      TZ: Europe/Stockholm
+    volumes:
+      - ./api:/app/api
+      - /mnt/backup:/mnt/backup
+      - /srv/archive:/srv/archive
+      - /srv/archive/tmp/vaultmaster:/tmp/vaultmaster
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /root/.ssh:/root/.ssh:ro
+      - /root/.config/rclone:/root/.config/rclone
+      - /etc/vaultmaster/age-identity.key:/etc/vaultmaster/age-identity.key:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vaultmaster
+
   # The scheduler's own lane (card DEV-7). The worker above serves every
   # backup with one slot, so a long backup held the per-minute scheduler tick
   # for over an hour and the jobs due in that time were skipped. This worker

@@ -1,0 +1,10 @@
+[Unit]
+Description=VaultMaster check-in (ber servern köa försenade backuper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/vaultmaster-checkin.sh
+# Samma sak som skriptet kräver: inga andra än ägaren läser token.
+UMask=0077

@@ -16,7 +16,7 @@ class BackupJob(Base):
     backup_type: Mapped[str] = mapped_column(String(50), nullable=False)  # postgresql, docker_volumes, files, do_snapshot, custom
     server_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("server.id"), nullable=False)
     source_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    schedule_cron: Mapped[str] = mapped_column(String(100), nullable=False)  # cron expression
+    schedule_cron: Mapped[str | None] = mapped_column(String(100), nullable=True)  # cron expression; NULL = no schedule, started by the laptop check-in
     destination_ids: Mapped[list | None] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
     retention_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("retention_policy.id"))
     retention_overrides: Mapped[dict | None] = mapped_column(JSONB, default=dict)  # {dest_id: policy_id} per-destination override

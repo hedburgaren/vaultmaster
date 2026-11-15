@@ -164,7 +164,7 @@ class BackupJobOut(BaseModel):
     backup_type: str
     server_id: uuid.UUID
     source_config: dict
-    schedule_cron: str
+    schedule_cron: str | None
     destination_ids: list[uuid.UUID] | None
     retention_id: uuid.UUID | None
     retention_overrides: dict | None = {}

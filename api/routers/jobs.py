@@ -88,7 +88,9 @@ async def update_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     update_data = body.model_dump(exclude_unset=True)
-    if "schedule_cron" in update_data and not croniter.is_valid(update_data["schedule_cron"]):
+    # An explicit null removes the schedule: the job is then started by the
+    # laptop check-in only (see api/services/checkin.py).
+    if update_data.get("schedule_cron") is not None and not croniter.is_valid(update_data["schedule_cron"]):
         raise HTTPException(status_code=400, detail="Invalid cron expression")
     # Bug #23: gate custom-script backups behind admin both when switching INTO
     # custom and when editing an already-custom job (defense in depth).
@@ -140,8 +142,12 @@ async def trigger_job(
     # definition and not the execution is not a guard.
     _require_admin_for_custom({"backup_type": job.backup_type}, current_user, "trigger")
 
-    from api.tasks.backup_tasks import run_backup_task
-    task = run_backup_task.apply_async(args=[str(job_id)], kwargs={"triggered_by": "manual"})
+    from api.models.server import Server
+    from api.services.lanes import enqueue_backup
+    server = await db.get(Server, job.server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="Server not found")
+    task = enqueue_backup(job, server, "manual")
     # Bug #10: explicit audit entry tying the queued Celery task to the BackupJob.
     # The actual BackupRun.id is created inside the worker, so the task_id is
     # the durable correlation handle here.
@@ -168,6 +174,8 @@ async def schedule_preview(
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if not job.schedule_cron:
+        return {"schedule_cron": None, "next_runs": []}
     cron = croniter(job.schedule_cron, datetime.now(timezone.utc))
     next_runs = [cron.get_next(datetime).isoformat() for _ in range(count)]
     return {"schedule_cron": job.schedule_cron, "next_runs": next_runs}

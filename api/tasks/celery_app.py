@@ -30,6 +30,13 @@ celery_app.conf.update(
         # mount, which the scheduler container deliberately does not have.
         "api.tasks.backup_tasks.check_scheduled_jobs": {"queue": "scheduler"},
         "api.tasks.backup_tasks.scan_stale_jobs": {"queue": "scheduler"},
+        # The workstation lane (desktop and laptop servers), served by its own
+        # worker (compose service "workstation-worker"). A backup run is queued
+        # on the lane of its server by api.services.lanes.enqueue_backup, which
+        # passes the queue explicitly; the "backup" pattern below is only the
+        # default for tasks that do not touch a desktop. The probe of desktop
+        # servers is routed here by exact name so it can never occupy "backup".
+        "api.tasks.backup_tasks.check_workstation_health": {"queue": "workstation"},
         "api.tasks.backup_tasks.*": {"queue": "backup"},
         "api.tasks.rotation_tasks.*": {"queue": "rotation"},
         "api.tasks.validation_tasks.*": {"queue": "validation"},
@@ -58,9 +65,16 @@ celery_app.conf.update(
             "task": "api.tasks.backup_tasks.scan_stale_jobs",
             "schedule": 3600.0,
         },
+        # Two probes, one per lane. A desktop that is off makes its SSH probe
+        # hang for the whole timeout, and that wait must not sit in the one
+        # slot that serves the server's own backups.
         "check-server-health": {
             "task": "api.tasks.backup_tasks.check_server_health",
-            "schedule": 300.0,  # every 5 minutes
+            "schedule": 300.0,  # every 5 minutes, non-desktop servers, queue backup
+        },
+        "check-workstation-health": {
+            "task": "api.tasks.backup_tasks.check_workstation_health",
+            "schedule": 300.0,  # every 5 minutes, desktop servers, queue workstation
         },
         "scan-validation-candidates": {
             "task": "api.tasks.validation_tasks.scan_validation_candidates",

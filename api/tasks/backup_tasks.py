@@ -1413,6 +1413,44 @@ def check_scheduled_jobs():
     _run_async(_check_scheduled())
 
 
+async def _load_active_jobs(db):
+    """Every active job with the server it backs up, as (job, server) pairs."""
+    from sqlalchemy import select
+    from api.models.backup_job import BackupJob
+    from api.models.server import Server
+
+    rows = (await db.execute(
+        select(BackupJob, Server)
+        .join(Server, Server.id == BackupJob.server_id)
+        .where(BackupJob.is_active == True)
+    )).all()
+    return [(job, server) for job, server in rows]
+
+
+async def _has_run_since(db, job_id, since) -> bool:
+    from sqlalchemy import select
+    from api.models.backup_run import BackupRun
+
+    row = await db.execute(
+        select(BackupRun.id)
+        .where(BackupRun.job_id == job_id, BackupRun.created_at >= since)
+        .limit(1)
+    )
+    return row.first() is not None
+
+
+async def _running_run(db, job_id):
+    from sqlalchemy import select
+    from api.models.backup_run import BackupRun
+
+    result = await db.execute(
+        select(BackupRun)
+        .where(BackupRun.job_id == job_id, BackupRun.status == "running")
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
 async def _check_scheduled():
     """Start every active job whose latest fire time has not had its run.
 
@@ -1444,19 +1482,23 @@ async def _check_scheduled():
     redis_client = _redis_or_none("_check_scheduled")
 
     from api.services import schedule_policy
+    from api.services.lanes import enqueue_backup
     from api.services.notifier import notify_event
 
     catch_up_hours = float(getattr(get_settings(), "schedule_catch_up_hours", 2) or 2)
 
     async with get_task_session() as db:
-        result = await db.execute(select(BackupJob).where(BackupJob.is_active == True))
-        jobs = result.scalars().all()
+        jobs_with_servers = await _load_active_jobs(db)
 
         now = datetime.now(timezone.utc)
         missed = []
 
-        for job in jobs:
+        for job, server in jobs_with_servers:
             try:
+                if not job.schedule_cron:
+                    # No schedule: the job is started by something else (the
+                    # laptop check-in). Nothing is due, nothing can be missed.
+                    continue
                 prev_time = schedule_policy.latest_fire(job.schedule_cron, now)
                 # created_at, not updated_at: updated_at moves on any edit (a
                 # rename, a tag), and an edit must not erase a missed run.
@@ -1465,12 +1507,7 @@ async def _check_scheduled():
                 # Has this fire time had its run? Until 2026-11 the question
                 # was "is the fire time within 300 s of now", which turned a
                 # late tick into a silent skip (see schedule_policy).
-                run_result = await db.execute(
-                    select(BackupRun.id)
-                    .where(BackupRun.job_id == job.id, BackupRun.created_at >= prev_time)
-                    .limit(1)
-                )
-                has_run = run_result.first() is not None
+                has_run = await _has_run_since(db, job.id, prev_time)
 
                 action = schedule_policy.schedule_action(
                     prev_time, now, defined_at, has_run, catch_up_hours)
@@ -1501,12 +1538,7 @@ async def _check_scheduled():
                     continue
 
                 # Skip if this job already has a run still in progress.
-                running_result = await db.execute(
-                    select(BackupRun)
-                    .where(BackupRun.job_id == job.id, BackupRun.status == "running")
-                    .limit(1)
-                )
-                already_running = running_result.scalars().first()
+                already_running = await _running_run(db, job.id)
                 if already_running:
                     logger.info(f"Skipping {job.name}, previous run still in progress (started {already_running.started_at})")
                     continue
@@ -1533,7 +1565,7 @@ async def _check_scheduled():
                 else:
                     logger.info(f"Triggering scheduled backup: {job.name}")
                     triggered_by = "scheduler"
-                run_backup_task.apply_async(args=[str(job.id)], kwargs={"triggered_by": triggered_by})
+                enqueue_backup(job, server, triggered_by)
             except Exception as e:
                 logger.error(f"Error checking schedule for job {job.name}: {e}")
 
@@ -1581,6 +1613,10 @@ async def _do_scan_stale_jobs():
         stale = []
         for job in jobs:
             try:
+                if not job.schedule_cron:
+                    # No schedule (started by the laptop check-in): there is
+                    # no cadence to be stale against.
+                    continue
                 # created_at, not updated_at: an edit must not restart the clock.
                 defined_at = job.created_at
                 last = last_runs.get(job.id)
@@ -1615,20 +1651,32 @@ async def _do_scan_stale_jobs():
 
 @celery_app.task(name="api.tasks.backup_tasks.check_server_health")
 def check_server_health():
-    """Ping all active servers and update their status."""
-    _run_async(_check_health())
+    """Ping the active non-desktop servers (queue backup)."""
+    _run_async(_check_health("backup"))
 
 
-async def _check_health():
+@celery_app.task(name="api.tasks.backup_tasks.check_workstation_health")
+def check_workstation_health():
+    """Ping the active desktop servers (queue workstation).
+
+    A desktop or laptop that is off makes its SSH probe wait out the whole
+    timeout. That wait belongs in the workstation lane, never in the single
+    slot that serves the server's own backups.
+    """
+    _run_async(_check_health("workstation"))
+
+
+async def _check_health(lane: str = "backup"):
     from sqlalchemy import select
     from api.models.server import Server
     from api.services.ssh_client import test_ssh_connection, connectivity_is_testable
     from api.services.notifier import notify_event
+    from api.services.lanes import lane_for
     from api.services.quiet_hosts import is_intermittent
 
     async with get_task_session() as db:
         result = await db.execute(select(Server).where(Server.is_active == True))
-        servers = result.scalars().all()
+        servers = [s for s in result.scalars().all() if lane_for(s) == lane]
 
         for server in servers:
             success, message = await test_ssh_connection(server)
