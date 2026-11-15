@@ -613,10 +613,11 @@ def test_checkin_endpoint_over_http():
 
 # ── 6. failure notifications ─────────────────────────────────────────────────
 
-def run_failing_backup(server, last_success):
+def run_failing_backup(server, last_success, max_retries=0, retry_calls=None):
     """Drive the real _run_backup to a failed run and return the notifications."""
     b = bt()
     job = make_job("nightly-" + server.name, server)
+    job.max_retries = max_retries
     events = []
 
     async def notify(db, event, payload):
@@ -653,12 +654,23 @@ def run_failing_backup(server, last_success):
             return None
 
     from api.services import notifier, quiet_hosts, backup_executor
-    task = SimpleNamespace(request=SimpleNamespace(id="t-1"))
+    class Retried(Exception):
+        pass
+
+    def retry(**kwargs):
+        if retry_calls is not None:
+            retry_calls.append(kwargs)
+        return Retried("retry")
+
+    task = SimpleNamespace(request=SimpleNamespace(id="t-1"), retry=retry)
     with patched((b, "get_task_session", lambda: fake_session(Db())),
                  (notifier, "notify_event", notify),
                  (quiet_hosts, "last_success_at", last_ok),
                  (backup_executor, "execute_files_backup", failing_executor)):
-        asyncio.run(b._run_backup(task, str(job.id), "scheduler"))
+        try:
+            asyncio.run(b._run_backup(task, str(job.id), "scheduler"))
+        except Retried:
+            pass
     return job, events
 
 
@@ -676,6 +688,16 @@ def test_failures_still_notify_except_plastop_inside_its_grace():
     job, events = run_failing_backup(PLASTOP, datetime.now(UTC) - timedelta(hours=120))
     check(len([e for e, _ in events if e == "run.failed"]) == 1,
           "plastop with no success for 120 h alarms again")
+
+
+@guarded
+def test_retry_stays_on_the_lane_of_the_server():
+    for server, lane in ((PLASTOP, "laptop"), (PLASTDESK, "workstation"), (HEDBURGAREN, "backup")):
+        calls = []
+        run_failing_backup(server, None, max_retries=2, retry_calls=calls)
+        check(len(calls) == 1 and calls[0].get("queue") == lane,
+              f"a failing {server.name} run retries on {lane} ({[c.get('queue') for c in calls]})")
+        check(calls and calls[0].get("countdown") == 60, f"the {server.name} retry keeps its countdown")
 
 
 def main():

@@ -586,7 +586,12 @@ async def _run_backup(task, job_id: str, triggered_by: str = "manual"):
                     countdown = 60 * run.retry_count
                     retry_label = f"[retry {run.retry_count}/{job.max_retries} in {countdown}s] {error_msg[:200]}"
                     logger.warning(f"[{run.id}] {retry_label}")
-                    raise task.retry(exc=Exception(retry_label), countdown=countdown)
+                    # The retry must stay on the lane of the server. Without an
+                    # explicit queue the "backup" route pattern would take it, and
+                    # a failing laptop run would then hold hedburgaren's slot.
+                    from api.services.lanes import lane_for
+                    raise task.retry(exc=Exception(retry_label), countdown=countdown,
+                                     queue=lane_for(server))
 
             await db.commit()
 
