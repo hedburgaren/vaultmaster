@@ -89,8 +89,40 @@ class Ops:
         return await copy_file_to_storage(dest, local, sub_path)
 
     async def remove(self, dest, remote_path):
-        from api.services.rclone_client import delete_file_from_storage
-        return await delete_file_from_storage(dest, remote_path)
+        """Permanent removal: NOT moved to the Drive trash (a plaintext copy
+        left in the trash is still a plaintext copy on Drive). Only this tool
+        uses the flag; the rest of VaultMaster deletes as before."""
+        from api.services.rclone_client import (
+            _build_backend, _run_rclone, listing_says_absent, normalize_stored_path)
+
+        path = normalize_stored_path(remote_path)
+        remote, flags = _build_backend(dest)
+        target = path if ":" in path else f"{remote}/{path}"
+        code, _, err = await _run_rclone(
+            ["deletefile", "--drive-use-trash=false", target] + flags, timeout=300)
+        if code == 0:
+            return True, f"removed permanently (not in the Drive trash): {target}"
+        parent, _, name = target.rpartition("/")
+        lcode, listing, _ = await _run_rclone(["lsf", parent, "--files-only"] + flags, timeout=120)
+        if lcode == 0 and listing_says_absent(listing, name):
+            return True, f"already absent: {target}"
+        return False, f"permanent removal failed: {err.strip()[:200]}"
+
+    async def exists(self, dest, remote_path):
+        """True, False, or None when it cannot be told (treated as 'exists')."""
+        from api.services.rclone_client import (
+            _build_backend, _run_rclone, listing_says_absent, normalize_stored_path)
+
+        path = normalize_stored_path(remote_path)
+        remote, flags = _build_backend(dest)
+        target = path if ":" in path else f"{remote}/{path}"
+        parent, _, name = target.rpartition("/")
+        code, listing, _ = await _run_rclone(["lsf", parent, "--files-only"] + flags, timeout=120)
+        if code == 3:  # directory not found: nothing there
+            return False
+        if code != 0:
+            return None
+        return not listing_says_absent(listing, name)
 
     async def encrypt(self, src, dst, recipient):
         from api.services.restore_validator import _run
@@ -179,6 +211,14 @@ async def convert_file(rel: str, rows, dest, db, ops, workdir: str, recipient: s
 
     notes = []
     try:
+        # Never overwrite a file we did not write: a <file>.age that is already
+        # there is either a verified leftover (handled by verify_twin, not here)
+        # or something unknown, and the copy step would silently replace it.
+        # Unknown (the check itself failed) counts as present.
+        if await ops.exists(dest, full_path(new_rel, remote_prefix)) is not False:
+            return Result(aid, name, FAILED,
+                          f"{new_rel} already exists on the Drive (or its existence could not be "
+                          "checked): refusing to overwrite it; nothing was uploaded or removed")
         ok, msg = await ops.download(dest, old_path, plain)
         if not ok:
             return Result(aid, name, FAILED, f"download: {msg}")
@@ -274,15 +314,17 @@ async def find_drive_dest(db):
 
 
 async def live_artifacts(db, dest):
-    """Every live artifact row on this destination, whatever its is_encrypted
-    says: the flag is not trusted, the Drive listing decides what is plaintext."""
+    """Every artifact row on this destination that purge has not finished with,
+    whatever its is_encrypted says: the flag is not trusted, the Drive listing
+    decides what is plaintext. Rows flagged is_deleted but not yet purged are
+    included on purpose: a later purge must remove the .age file, not leave it
+    orphaned because the row still pointed at the old plaintext name."""
     from sqlalchemy import select
     from api.models.backup_artifact import BackupArtifact
 
     rows = (await db.execute(
         select(BackupArtifact)
         .where(BackupArtifact.storage_id == dest.id,
-               BackupArtifact.is_deleted == False,  # noqa: E712
                BackupArtifact.purged_at.is_(None))
         .order_by(BackupArtifact.created_at)
     )).scalars().all()
@@ -304,27 +346,81 @@ async def list_drive_files(dest, drive_dir: str):
     return [((f"{base}/" if base else "") + i["Path"], i.get("Size")) for i in items]
 
 
-def plan(files, rows, remote_prefix):
-    """Group the plaintext files on the Drive.
-
-    Returns (targets, leftovers). A target is (rel, size, [rows]); rows is empty
-    for an orphan. A leftover is a plaintext file whose encrypted twin is on the
-    Drive and has a row that says encrypted: a previous run died before the
-    plaintext was removed."""
-    present = {p for p, _ in files}
+def rows_by_rel(rows, remote_prefix):
     by_rel = {}
     for r in rows:
         by_rel.setdefault(rel_path(r.remote_path, remote_prefix), []).append(r)
-    targets, leftovers = [], []
+    return by_rel
+
+
+def plan(files, rows, remote_prefix):
+    """Group the plaintext files on the Drive.
+
+    Returns (targets, twins). A target is (rel, size, [rows]); rows is empty
+    for an orphan. A twin is a plaintext file whose `.age` name already exists on
+    the Drive (a previous run died before removing the plaintext, or something
+    else put a file there). Whatever any row says, it is only ever removed after
+    verify_twin proved the .age decrypts to exactly this plaintext; a conversion
+    never overwrites such a file."""
+    present = {p for p, _ in files}
+    by_rel = rows_by_rel(rows, remote_prefix)
+    targets, twins = [], []
     for path, size in files:
         if path.endswith(".age"):
             continue
-        twin = by_rel.get(path + ".age", [])
-        if path + ".age" in present and any(r.is_encrypted for r in twin):
-            leftovers.append(path)
+        if path + ".age" in present:
+            twins.append(path)
             continue
         targets.append((path, size, by_rel.get(path, [])))
-    return targets, leftovers
+    return targets, twins
+
+
+async def verify_twin(rel: str, rows, dest, db, ops, workdir: str, remote_prefix: str) -> Result:
+    """A plaintext file with an existing .age twin: prove the twin is the same
+    data, then remove the plaintext. Never trusts a row's is_encrypted."""
+    from api.services.age_crypto import AGE_SUFFIX
+
+    name = rel.rsplit("/", 1)[-1]
+    plain_path, twin_path = full_path(rel, remote_prefix), full_path(rel + AGE_SUFFIX, remote_prefix)
+    plain = os.path.join(workdir, "plain")
+    twin = os.path.join(workdir, "twin.age")
+    twin_out = os.path.join(workdir, "twin.plain")
+    aid = str(rows[0].id) if rows else "-"
+    try:
+        ok, msg = await ops.download(dest, plain_path, plain)
+        if not ok:
+            return Result(aid, name, FAILED, f"leftover check, download of the plaintext: {msg}")
+        ok, msg = await ops.download(dest, twin_path, twin)
+        if not ok:
+            return Result(aid, name, FAILED, f"leftover check, download of the .age: {msg}")
+        if not ops.is_age_file(twin):
+            return Result(aid, name, FAILED,
+                          f"{rel + AGE_SUFFIX} exists but is not an age file: plaintext kept, nothing overwritten")
+        await ops.decrypt(twin, twin_out)
+        plain_sha = sha256_file(plain)
+        if sha256_file(twin_out) != plain_sha:
+            return Result(aid, name, FAILED,
+                          f"{rel + AGE_SUFFIX} exists but does not decrypt to this plaintext: plaintext kept, "
+                          "nothing overwritten")
+        stale = [r for r in rows]  # rows still pointing at the plaintext name
+        if stale:
+            new_size, new_sum = os.path.getsize(twin), sha256_file(twin)
+            for r in stale:
+                r.filename, r.remote_path = name + AGE_SUFFIX, twin_path
+                r.size_bytes, r.checksum_sha256, r.is_encrypted = new_size, new_sum, True
+            from api.routers.audit import log_action
+            await log_action(db, action="artifact.encrypt_legacy", resource_type="backup_artifact",
+                             resource_id=aid,
+                             detail=f"Leftover plaintext {name} verified against its .age and rows repointed",
+                             meta={"new_path": twin_path, "plaintext_sha256": plain_sha, "ciphertext_sha256": new_sum,
+                                   "rows": [str(r.id) for r in stale]})
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        return Result(aid, name, FAILED, f"leftover check: {type(exc).__name__}: {exc}")
+    ok, msg = await ops.remove(dest, plain_path)
+    if not ok:
+        return Result(aid, name, FAILED, f"verified leftover, but the plaintext could not be removed: {msg}")
+    return Result(aid, name, DONE, f"verified leftover: the .age decrypts to this file; plaintext {msg}")
 
 
 # ── the run ──────────────────────────────────────────────────────────────────
@@ -379,9 +475,11 @@ async def run(apply: bool, drive_dir: str, ops=None, session_factory=None, out=p
             if trows and any(r.is_encrypted for r in trows):
                 flag = " [row says is_encrypted=true, file is plaintext]"
             out(f"  {label:6} {rel}  ({size} bytes){flag}")
-    out(f"leftover plaintext of already converted files: {len(leftovers)}")
+    out(f"plaintext files whose .age already exists (verified by decrypting before the plaintext is removed): {len(leftovers)}")
     for p in leftovers:
-        out(f"  leftover {p}")
+        out(f"  twin     {p}")
+    out("plaintext removal is PERMANENT: the Drive trash is bypassed (--drive-use-trash=false), "
+        "so no plaintext copy stays recoverable there")
 
     if not apply:
         out("dry run: nothing changed. Re-run with --apply to convert.")
@@ -407,19 +505,49 @@ async def run(apply: bool, drive_dir: str, ops=None, session_factory=None, out=p
         summary.add(res)
         out(f"  {res.status}: {res.name} {res.detail}")
 
-    # Leftovers: the encrypted twin exists on Drive and has a row that says so.
+    # Twins: the .age already exists. Removed only after it decrypts to the plaintext.
+    by_rel = rows_by_rel(rows, remote_prefix)
     for p in leftovers:
-        ok, msg = await ops.remove(dest, full_path(p, remote_prefix))
-        summary.add(Result("-", p, DONE if ok else FAILED, f"leftover plaintext: {msg}"))
-        out(f"  {'removed leftover' if ok else 'FAILED leftover'}: {p} {msg}")
+        workdir = tempfile.mkdtemp(prefix="vm-encrypt-legacy-", dir=base)
+        try:
+            async with session_factory() as db:
+                from sqlalchemy import select
+                from api.models.backup_artifact import BackupArtifact
+                fresh = []
+                for r in by_rel.get(p, []):
+                    row = (await db.execute(
+                        select(BackupArtifact).where(BackupArtifact.id == r.id)
+                    )).scalar_one_or_none()
+                    if row is not None:
+                        fresh.append(row)
+                res = await verify_twin(p, fresh, dest, db, ops, workdir, remote_prefix)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+        summary.add(res)
+        out(f"  {res.status}: {res.name} {res.detail}")
 
     counts = {}
     for r in summary.results:
         counts[r.status] = counts.get(r.status, 0) + 1
-    out("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    out("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        + "; plaintext was removed permanently, not moved to the Drive trash")
     if summary.failed:
         out("NOT everything is encrypted: look at the FAILED lines above.")
     return 1 if summary.failed else 0
+
+
+async def expected_plaintext_sha(session_factory, artifact):
+    """The plaintext sha256 the conversion recorded in its audit entry, if any."""
+    from sqlalchemy import select
+    from api.models.audit_log import AuditLog
+
+    async with session_factory() as db:
+        entry = (await db.execute(
+            select(AuditLog).where(AuditLog.action == "artifact.encrypt_legacy",
+                                   AuditLog.resource_id == str(artifact.id))
+            .order_by(AuditLog.created_at.desc()).limit(1)
+        )).scalars().first()
+    return ((entry.meta or {}).get("plaintext_sha256")) if entry else None
 
 
 async def check_one(ops=None, session_factory=None, out=print, workbase=None, artifact_id=None) -> int:
@@ -474,8 +602,38 @@ async def check_one(ops=None, session_factory=None, out=print, workbase=None, ar
         out(f"first bytes: {head!r}  age header: {is_age}")
         out(f"readable as gzip without the key: {gz_readable}")
         out(f"readable as tar without the key: {tar_readable}")
-        good = is_age and not gz_readable and not tar_readable
-        out("RESULT: " + ("encrypted, unreadable without the key" if good else "NOT PROTECTED"))
+        unreadable = is_age and not gz_readable and not tar_readable
+
+        # And with the key: the downloaded bytes are the ones the row records,
+        # and they decrypt to the plaintext whose sha the conversion logged.
+        downloaded_sha = sha256_file(local)
+        sha_matches_row = downloaded_sha == (artifact.checksum_sha256 or "").lower()
+        out(f"sha256 of the downloaded file equals the row's checksum: {sha_matches_row}")
+        decryptable, plain_ok = False, None
+        try:
+            await ops.decrypt(local, os.path.join(workdir, "decrypted"))
+            decrypted = os.path.join(workdir, "decrypted")
+            decrypted_sha = sha256_file(decrypted)
+            decryptable = os.path.getsize(decrypted) > 0
+            out(f"decrypts with the key: {decryptable}; sha256 of the decrypted file: {decrypted_sha}")
+            expected = None
+            try:
+                expected = await expected_plaintext_sha(session_factory, artifact)
+            except Exception as exc:  # noqa: BLE001
+                out(f"(no audit entry to compare against: {exc})")
+            if expected:
+                plain_ok = decrypted_sha == expected
+                out(f"equals the plaintext sha recorded at conversion: {plain_ok}")
+            else:
+                with open(decrypted, "rb") as fh:
+                    plain_ok = fh.read(2) == b"\x1f\x8b" or tarfile.is_tarfile(decrypted)
+                out(f"no recorded plaintext sha (artifact not converted by this tool); decrypted file is a "
+                    f"gzip or tar archive: {plain_ok}")
+        except Exception as exc:  # noqa: BLE001
+            out(f"could not decrypt with the key: {type(exc).__name__}: {exc}")
+        good = unreadable and sha_matches_row and decryptable and plain_ok is True
+        out("RESULT: " + ("encrypted: unreadable without the key, decrypts correctly with it"
+                          if good else "NOT PROVEN: see the lines above"))
         return 0 if good else 1
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

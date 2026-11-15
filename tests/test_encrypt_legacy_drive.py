@@ -55,6 +55,9 @@ class StubOps:
         self.removed = []
         self.uploaded = []
 
+    async def exists(self, dest, path):
+        return path in self.d.files
+
     async def download(self, dest, path, local):
         if path not in self.d.files:
             return False, "not found"
@@ -375,6 +378,99 @@ def test_leftover_plaintext_is_removed_on_rerun_and_failure_exits_non_zero():
     check(rc == 1 and any("NOT everything" in l for l in lines) and not bad.is_encrypted, "a failing file: exit non-zero and a final warning")
 
 
+def test_existing_age_file_is_never_overwritten():
+    d = Drive()
+    a = make_row(d)
+    old = f"{PREFIX}/{rel_of(a)}"
+    foreign = old + ".age"
+    d.files[foreign] = HEADER + b"someone else's file"
+    before = dict(vars(a))
+    ops, db = StubOps(d), FakeDb()
+    r = convert(rel_of(a), [a], ops, db)
+    check(r.status == m.FAILED and "refusing to overwrite" in r.detail, f"a name collision fails the file ({r.detail})")
+    check(d.files[foreign] == HEADER + b"someone else's file", "the existing .age is untouched")
+    check(not ops.uploaded and not ops.removed and vars(a) == before and old in d.files,
+          "nothing uploaded, nothing removed (a file the tool did not create is never deleted), row and plaintext kept")
+
+    class Unknown(StubOps):
+        async def exists(self, dest, path):
+            return None
+    d2 = Drive()
+    a2 = make_row(d2)
+    r2 = convert(rel_of(a2), [a2], Unknown(d2), FakeDb())
+    check(r2.status == m.FAILED and not a2.is_encrypted, "if existence cannot be checked, it counts as present")
+
+
+def test_twin_is_verified_by_decrypting_before_the_plaintext_goes():
+    d = Drive()
+    content = b"leftover dump"
+    a = make_row(d, "t.dump.gz", content, job="T", encrypted=True)  # flag says encrypted, row still on the plaintext
+    old = f"{PREFIX}/{rel_of(a)}"
+    d.files[old + ".age"] = HEADER + content[::-1]
+    ops, db = StubOps(d), FakeDb()
+    with tempfile.TemporaryDirectory() as wd:
+        r = asyncio.run(m.verify_twin(rel_of(a), [a], DEST, db, ops, wd, PREFIX))
+    check(r.status == m.DONE and old not in d.files and old + ".age" in d.files,
+          f"a twin that decrypts to the plaintext lets the plaintext go ({r.status})")
+    check(a.remote_path == old + ".age" and a.filename.endswith(".age") and a.is_encrypted
+          and a.checksum_sha256 == sha(d.files[old + ".age"]), "rows still on the plaintext name are repointed at the twin")
+
+    for label, twin_bytes in (("different content", HEADER + b"something else"[::-1]), ("not an age file", b"\x1f\x8bnot age")):
+        d2 = Drive()
+        b = make_row(d2, "u.dump.gz", content, job="U", encrypted=True)
+        o2 = f"{PREFIX}/{rel_of(b)}"
+        d2.files[o2 + ".age"] = twin_bytes
+        ops2 = StubOps(d2)
+        with tempfile.TemporaryDirectory() as wd:
+            r2 = asyncio.run(m.verify_twin(rel_of(b), [b], DEST, FakeDb(), ops2, wd, PREFIX))
+        check(r2.status == m.FAILED and o2 in d2.files and not ops2.removed and d2.files[o2 + ".age"] == twin_bytes,
+              f"a twin with {label}: plaintext kept, nothing removed or overwritten")
+
+    # Through run(): the row's flag is ignored, the twin must prove itself.
+    d3 = Drive()
+    c = make_row(d3, "w.dump.gz", content, job="W", encrypted=True)
+    d3.files[f"{PREFIX}/{rel_of(c)}.age"] = HEADER + b"garbage"
+    rc, lines = run_tool(d3, [c], StubOps(d3))
+    check(rc == 1 and f"{PREFIX}/{rel_of(c)}" in d3.files, "run: a row saying encrypted does not make an unverified twin a leftover")
+
+
+def test_plaintext_removal_is_permanent_not_trash():
+    from api.services import rclone_client
+    calls = []
+
+    async def fake_rclone(args, timeout=60):
+        calls.append(args)
+        return 0, "", ""
+
+    saved = (rclone_client._run_rclone, rclone_client._build_backend)
+    rclone_client._run_rclone = fake_rclone
+    rclone_client._build_backend = lambda dest: (PREFIX, ["--drive-token=x"])
+    try:
+        ok, msg = asyncio.run(m.Ops().remove(DEST, "Copied to :drive:/hedburgaren/J/f.gz"))
+    finally:
+        rclone_client._run_rclone, rclone_client._build_backend = saved
+    check(ok and calls[0][0] == "deletefile" and "--drive-use-trash=false" in calls[0]
+          and ":drive:/hedburgaren/J/f.gz" in calls[0], "the tool's removal passes --drive-use-trash=false, on the normalised path")
+    check("permanently" in msg, "and says so")
+    d = Drive()
+    a = make_row(d)
+    rc, lines = run_tool(d, [a], StubOps(d))
+    check(any("permanently" in l and "trash" in l for l in lines), "the apply summary says removal was permanent")
+    d = Drive()
+    a = make_row(d)
+    rc, lines = run_tool(d, [a], StubOps(d), apply=False)
+    check(any("PERMANENT" in l and "trash" in l for l in lines), "the dry run states that removal bypasses the Drive trash")
+
+
+def test_a_deleted_but_unpurged_row_is_updated_too():
+    d = Drive()
+    a = make_row(d, "gone.dump.gz", b"retired", job="R")
+    a.is_deleted = True  # flagged by rotation, not yet purged
+    rc, _ = run_tool(d, [a], StubOps(d))
+    check(rc == 0 and a.is_encrypted and a.filename.endswith(".age") and a.remote_path.endswith(".age"),
+          "a row with is_deleted=true and no purged_at is converted too, so a later purge removes the .age")
+
+
 def test_rows_are_selected_without_looking_at_the_flag():
     from sqlalchemy.dialects import postgresql
 
@@ -386,18 +482,25 @@ def test_rows_are_selected_without_looking_at_the_flag():
     cap = Cap()
     asyncio.run(m.live_artifacts(cap, DEST))
     sql = str(cap.stmt.compile(dialect=postgresql.dialect()))
-    check("storage_id" in sql and "is_deleted" in sql and "purged_at IS NULL" in sql and "is_encrypted" not in sql.split("WHERE", 1)[1],
-          "the row query is limited to the Drive destination, live rows, and ignores is_encrypted")
+    where = sql.split("WHERE", 1)[1]
+    check("storage_id" in where and "purged_at IS NULL" in where and "is_encrypted" not in where and "is_deleted" not in where,
+          "the row query is limited to the Drive destination and unpurged rows; neither is_encrypted nor is_deleted is consulted")
 
 
 def test_check_one():
+    plain = b"the original dump"
+    cipher = HEADER + plain[::-1]
     d = Drive()
-    enc_art = SimpleNamespace(id=uuid.uuid4(), remote_path=f"{PREFIX}/hedburgaren/J/x.gz.age", size_bytes=5)
-    d.files[enc_art.remote_path] = HEADER + b"\x8a\x13binary"
+    art = SimpleNamespace(id=uuid.uuid4(), remote_path=f"{PREFIX}/hedburgaren/J/x.gz.age", size_bytes=len(cipher),
+                          checksum_sha256=sha(cipher))
+    d.files[art.remote_path] = cipher
 
-    def sess_for(art):
+    def sess_for(audit_sha):
         class Db:
             async def execute(self, stmt):
+                if "audit_log" in str(stmt):
+                    entry = SimpleNamespace(meta={"plaintext_sha256": audit_sha}) if audit_sha else None
+                    return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: entry))
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: art, all=lambda: []))
 
         class S:
@@ -413,16 +516,37 @@ def test_check_one():
     async def dests(_db):
         return [DEST]
     m.find_drive_dest = dests
+
+    def go(audit_sha, ops=None):
+        lines = []
+        with tempfile.TemporaryDirectory() as base:
+            rc = asyncio.run(m.check_one(ops=ops or StubOps(d), session_factory=sess_for(audit_sha),
+                                         out=lines.append, workbase=base))
+        return rc, lines
     try:
-        lines = []
-        with tempfile.TemporaryDirectory() as base:
-            rc = asyncio.run(m.check_one(ops=StubOps(d), session_factory=sess_for(enc_art), out=lines.append, workbase=base))
-        check(rc == 0 and any("RESULT: encrypted" in l for l in lines), "check-one: an age file passes (header, not gzip, not tar)")
-        d.files[enc_art.remote_path] = gzip.compress(b"plain dump")
-        lines = []
-        with tempfile.TemporaryDirectory() as base:
-            rc = asyncio.run(m.check_one(ops=StubOps(d), session_factory=sess_for(enc_art), out=lines.append, workbase=base))
-        check(rc == 1 and any("NOT PROTECTED" in l for l in lines), "check-one: a gzip file is reported as not protected")
+        rc, lines = go(sha(plain))
+        check(rc == 0 and any("RESULT: encrypted" in l for l in lines), "check-one: age header, no gzip/tar, decrypts, sha equals the recorded plaintext sha")
+        check(any("equals the plaintext sha recorded at conversion: True" in l for l in lines), "check-one: shows the decrypted sha against the recorded one")
+        rc, lines = go(sha(b"another file"))
+        check(rc == 1 and any("recorded at conversion: False" in l for l in lines), "check-one: a decrypted file that differs from the recorded plaintext fails")
+        rc, lines = go(sha(plain), StubOps(d, break_decrypt=True))
+        check(rc == 1, "check-one: a decryption that does not give the original fails")
+
+        class NoKey(StubOps):
+            async def decrypt(self, src, dst):
+                raise Exception("no identity")
+        rc, lines = go(sha(plain), NoKey(d))
+        check(rc == 1 and any("could not decrypt" in l for l in lines), "check-one: without the key it cannot claim decryptability")
+
+        art.checksum_sha256 = "0" * 64
+        rc, lines = go(sha(plain))
+        check(rc == 1 and any("equals the row's checksum: False" in l for l in lines), "check-one: a file that differs from the row's checksum fails")
+        art.checksum_sha256 = sha(cipher)
+
+        d.files[art.remote_path] = gzip.compress(b"plain dump")
+        art.checksum_sha256 = sha(d.files[art.remote_path])
+        rc, lines = go(None)
+        check(rc == 1 and any("NOT PROVEN" in l for l in lines), "check-one: a gzip file is reported as not protected")
     finally:
         m.find_drive_dest = saved
 
