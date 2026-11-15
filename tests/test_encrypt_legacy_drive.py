@@ -5,11 +5,17 @@ Run: python -m tests.test_encrypt_legacy_drive
 No database, rclone or age binary: the Drive is a dict, the crypto is a
 reversible stand-in that writes a real age header, and the session is a fake.
 The code under test is the real api/maintenance/encrypt_legacy_drive.py.
+
+The data it was shaped by (2026-11): 56 plaintext files on the Drive, 49 with a
+live artifact row whose remote_path is rclone's message ("Copied to
+:drive:/hedburgaren/<job>/<file>"), 34 of those rows claiming is_encrypted=true
+for a plaintext file, stored checksums that may not match, and 7 files with no
+row at all.
 """
 
 import asyncio
+import gzip
 import hashlib
-import os
 import sys
 import tempfile
 import uuid
@@ -115,88 +121,157 @@ class FakeDb:
         return SimpleNamespace(scalar_one_or_none=lambda: art)
 
 
-def make_artifact(drive, name="vaultmaster_20260630_041549.dump.gz", content=b"plaintext dump bytes",
-                  checksum=None, job="VaultMaster DB"):
-    path = f"{PREFIX}/hedburgaren/{job}/{name}"
-    drive.files[path] = content
-    return SimpleNamespace(id=uuid.uuid4(), filename=name, remote_path=path, size_bytes=len(content),
+def put(drive, job, name, content):
+    rel = f"hedburgaren/{job}/{name}"
+    drive.files[f"{PREFIX}/{rel}"] = content
+    return rel
+
+
+def make_row(drive, name="vaultmaster_20260630_041549.dump.gz", content=b"plaintext dump bytes",
+             checksum=None, job="VaultMaster DB", encrypted=False, legacy_prefix=True):
+    """An artifact row as production has them: the stored path is rclone's
+    message, and is_encrypted may lie."""
+    rel = put(drive, job, name, content)
+    stored = f"{PREFIX}/{rel}"
+    return SimpleNamespace(id=uuid.uuid4(), filename=name,
+                           remote_path=("Copied to " + stored) if legacy_prefix else stored,
+                           size_bytes=len(content),
                            checksum_sha256=checksum if checksum is not None else sha(content),
-                           is_encrypted=False, is_deleted=False, purged_at=None)
+                           is_encrypted=encrypted, is_deleted=False, purged_at=None)
 
 
 DEST = SimpleNamespace(name="Google Drive", backend="gdrive", id=uuid.uuid4())
 
 
-def convert(artifact, ops, db):
+def convert(rel, rows, ops, db):
     with tempfile.TemporaryDirectory() as wd:
-        return asyncio.run(m.convert_one(artifact, DEST, db, ops, wd, "age1recipient", PREFIX))
+        return asyncio.run(m.convert_file(rel, rows, DEST, db, ops, wd, "age1recipient", PREFIX))
 
 
-def test_mismatch_is_skipped_and_nothing_changes():
+def rel_of(row):
+    return m.rel_path(row.remote_path, PREFIX)
+
+
+def test_prefix_normalisation():
+    legacy = "Copied to :drive:/hedburgaren/NocoDB DB/nocodb_20260630_183049.dump.gz"
+    today = ":drive:/hedburgaren/NocoDB DB/nocodb_20260630_183049.dump.gz"
+    want = "hedburgaren/NocoDB DB/nocodb_20260630_183049.dump.gz"
+    check(m.rel_path(legacy, PREFIX) == want, "the 'Copied to :drive:/' prefix is stripped to the Drive path")
+    check(m.rel_path(today, PREFIX) == want, "today's stored format maps to the same path")
+    check(m.rel_path(" Copied to " + today, PREFIX) == want, "stray whitespace around the prefix is tolerated")
+    check(m.full_path(want, PREFIX) == today, "and back: the path used for rclone is today's format")
+
+    # A listing entry matches its legacy row by directory and file name.
     d = Drive()
-    a = make_artifact(d, checksum="0" * 64)
-    before = dict(vars(a))
-    ops, db = StubOps(d), FakeDb()
-    r = convert(a, ops, db)
-    check(r.status == m.SKIP_MISMATCH, f"a checksum mismatch is skipped and reported ({r.status})")
-    check(vars(a) == before and not ops.uploaded and not db.commits, "mismatch: row untouched, nothing uploaded, no commit")
-    check(a.remote_path in d.files, "mismatch: the plaintext is still on the Drive")
-    r2 = convert(make_artifact(d, "x.gz", checksum="pending"), StubOps(d), FakeDb())
-    check(r2.status == m.SKIP_UNVERIFIABLE, "a row with no usable checksum is skipped, not guessed at")
+    row = make_row(d)
+    targets, leftovers = m.plan([(rel_of(row), 20)], [row], PREFIX)
+    check(len(targets) == 1 and targets[0][2] == [row] and not leftovers, "a legacy-path row is matched to its Drive file")
 
 
-def test_failure_after_upload_leaves_row_and_plaintext_and_removes_ciphertext():
+def test_the_flag_is_not_trusted_for_selection():
     d = Drive()
-    a = make_artifact(d)
-    before = dict(vars(a))
-    plain_before = d.files[a.remote_path]
-    ops = StubOps(d, break_decrypt=True)
-    r = convert(a, ops, FakeDb())
-    check(r.status == m.FAILED and "decrypted readback" in r.detail, f"a bad readback fails ({r.detail})")
-    check(ops.uploaded and ops.uploaded[0] not in d.files, "the uploaded ciphertext is removed again")
-    check(vars(a) == before, "the row is untouched")
-    check(d.files.get(a.remote_path) == plain_before, "the plaintext is untouched")
-
-    # A database failure at the very end behaves the same.
-    d2 = Drive()
-    a2 = make_artifact(d2)
-    before2 = dict(vars(a2))
-    ops2, db2 = StubOps(d2), FakeDb(fail_commit=True)
-    r2 = convert(a2, ops2, db2)
-    check(r2.status == m.FAILED and "row update" in r2.detail, f"a failing commit fails the artifact ({r2.detail})")
-    check(vars(a2) == before2 and db2.rollbacks == 1, "commit failure: row restored, rolled back")
-    check(ops2.uploaded[0] not in d2.files and a2.remote_path in d2.files,
-          "commit failure: ciphertext removed, plaintext kept")
-
-    d3 = Drive()
-    a3 = make_artifact(d3)
-    r3 = convert(a3, StubOps(d3, fail_upload=True), FakeDb())
-    check(r3.status == m.FAILED and a3.is_encrypted is False and a3.remote_path in d3.files, "a failed upload changes nothing")
+    liar = make_row(d, "liar.dump.gz", b"lie", job="A", encrypted=True)
+    honest = make_row(d, "honest.dump.gz", b"yes", job="B", encrypted=False)
+    files = [(rel_of(liar), 3), (rel_of(honest), 3)]
+    targets, _ = m.plan(files, [liar, honest], PREFIX)
+    check({t[0] for t in targets} == {rel_of(liar), rel_of(honest)},
+          "selection comes from the listing: a row saying is_encrypted=true is still converted when its file is plaintext")
+    # An .age file in the listing is never a target, whatever any row says.
+    targets, _ = m.plan([("hedburgaren/A/x.gz.age", 9)], [], PREFIX)
+    check(not targets, "a file ending in .age is not plaintext")
 
 
-def test_success_updates_the_row_like_the_executor():
+def test_lying_row_is_converted_and_corrected():
     d = Drive()
     content = b"PlastShop dump \x00\x01 bytes" * 50
-    a = make_artifact(d, "utv.plastshop.se_20260630_180049.dump.gz", content, job="PlastShop Odoo DB")
-    old_path = a.remote_path
+    a = make_row(d, "utv.plastshop.se_20260630_180049.dump.gz", content, job="PlastShop Odoo DB", encrypted=True)
+    old = f"{PREFIX}/{rel_of(a)}"
     ops, db = StubOps(d), FakeDb()
-    r = convert(a, ops, db)
-    new_path = old_path + ".age"
+    r = convert(rel_of(a), [a], ops, db)
+    new_path = old + ".age"
     cipher = d.files.get(new_path, b"")
     check(r.status == m.DONE, f"converted ({r.status} {r.detail})")
     check(a.filename == "utv.plastshop.se_20260630_180049.dump.gz.age", "filename gets the executor's .age suffix")
-    check(a.remote_path == new_path == f"{PREFIX}/hedburgaren/PlastShop Odoo DB/{a.filename}",
-          "remote path: same directory, the stored path returned by the upload")
+    check(a.remote_path == new_path and not a.remote_path.startswith("Copied to"),
+          "remote_path is today's format (the stored path the upload returns), without the broken prefix")
     check(a.size_bytes == len(cipher) and a.size_bytes != len(content), "size_bytes is the size of the encrypted file")
     check(a.checksum_sha256 == sha(cipher), "checksum_sha256 is the sha256 of the encrypted file")
-    check(a.is_encrypted is True and cipher.startswith(HEADER), "is_encrypted is true, and the Drive holds an age file")
-    check(old_path not in d.files, "the plaintext is gone from the Drive")
+    check(a.is_encrypted is True and cipher.startswith(HEADER), "is_encrypted is true, and now it is true")
+    check(old not in d.files, "the plaintext is gone from the Drive")
     check(db.commits == 1 and len(db.added) == 1 and db.added[0].action == "artifact.encrypt_legacy",
           "one transaction with one audit entry")
-    check(sha(StubOps(d).d.files[new_path][len(HEADER):][::-1]) == sha(content), "the ciphertext decrypts to the original")
+    check("is_encrypted=true but the Drive file was plaintext" in db.added[0].detail,
+          "the audit entry records that the flag was wrong")
+    check(sha(d.files[new_path][len(HEADER):][::-1]) == sha(content), "the ciphertext decrypts to the original")
 
 
-def patch_run(drive, rows, enc_paths=(), orphans=(), extra_files=()):
+def test_checksum_mismatch_still_converts_and_is_recorded():
+    d = Drive()
+    a = make_row(d, checksum="0" * 64)
+    old = f"{PREFIX}/{rel_of(a)}"
+    plain = d.files[old]
+    db = FakeDb()
+    r = convert(rel_of(a), [a], StubOps(d), db)
+    check(r.status == m.DONE_MISMATCH, f"a stored checksum that does not match does not stop the conversion ({r.status})")
+    check("stored checksum did not match" in db.added[0].detail and "stored checksum did not match" in r.detail,
+          "the mismatch is in the audit detail and in the summary line")
+    check(a.is_encrypted and a.checksum_sha256 == sha(d.files[old + ".age"]),
+          "the row gets the checksum of the ciphertext, replacing the wrong one")
+    check(sha(d.files[old + ".age"][len(HEADER):][::-1]) == sha(plain),
+          "the round trip was checked against the sha of the downloaded file")
+    check(old not in d.files, "plaintext removed after verification")
+
+
+def test_failure_after_upload_leaves_rows_and_plaintext_and_removes_ciphertext():
+    d = Drive()
+    a = make_row(d)
+    before = dict(vars(a))
+    old = f"{PREFIX}/{rel_of(a)}"
+    plain_before = d.files[old]
+    ops = StubOps(d, break_decrypt=True)
+    r = convert(rel_of(a), [a], ops, FakeDb())
+    check(r.status == m.FAILED and "decrypted readback" in r.detail, f"a bad readback fails ({r.detail})")
+    check(ops.uploaded and ops.uploaded[0] not in d.files, "the uploaded ciphertext is removed again")
+    check(vars(a) == before and d.files.get(old) == plain_before, "row and plaintext untouched")
+
+    d2 = Drive()
+    a2 = make_row(d2)
+    before2 = dict(vars(a2))
+    ops2, db2 = StubOps(d2), FakeDb(fail_commit=True)
+    r2 = convert(rel_of(a2), [a2], ops2, db2)
+    check(r2.status == m.FAILED and vars(a2) == before2 and db2.rollbacks == 1, "a failing commit restores the row and rolls back")
+    check(ops2.uploaded[0] not in d2.files and f"{PREFIX}/{rel_of(a2)}" in d2.files,
+          "commit failure: ciphertext removed, plaintext kept")
+
+    d3 = Drive()
+    a3 = make_row(d3)
+    r3 = convert(rel_of(a3), [a3], StubOps(d3, fail_upload=True), FakeDb())
+    check(r3.status == m.FAILED and a3.is_encrypted is False and f"{PREFIX}/{rel_of(a3)}" in d3.files, "a failed upload changes nothing")
+
+
+def test_orphan_is_encrypted_in_place_without_a_row():
+    d = Drive()
+    rel = put(d, "ARC Gruppen Odoo DB", "arcgruppen.se_20260502_135352.dump.gz", b"orphan dump")
+    old = f"{PREFIX}/{rel}"
+    ops, db = StubOps(d), FakeDb()
+    r = convert(rel, [], ops, db)
+    cipher = d.files.get(old + ".age", b"")
+    check(r.status == m.DONE_ORPHAN, f"an orphan is converted ({r.status})")
+    check(cipher.startswith(HEADER) and sha(cipher[len(HEADER):][::-1]) == sha(b"orphan dump"),
+          "the age file is on the Drive and round-trips to the original")
+    check(old not in d.files, "the plaintext is removed only after verification")
+    check(len(db.added) == 1 and db.added[0].resource_type == "drive_file" and db.added[0].resource_id == rel
+          and "orphan" in db.added[0].detail, "the orphan is audit-logged, with its path")
+
+    d2 = Drive()
+    rel2 = put(d2, "J", "o.gz", b"orphan")
+    ops2 = StubOps(d2, break_decrypt=True)
+    r2 = convert(rel2, [], ops2, FakeDb())
+    check(r2.status == m.FAILED and f"{PREFIX}/{rel2}" in d2.files and not any(p.endswith(".age") for p in d2.files),
+          "a failed orphan round trip leaves the plaintext and no ciphertext")
+
+
+def patch_run(drive, rows):
     """Patch discovery so run() works without a database or rclone."""
     db = FakeDb(artifacts=rows)
 
@@ -210,22 +285,17 @@ def patch_run(drive, rows, enc_paths=(), orphans=(), extra_files=()):
     async def dests(_db):
         return [DEST]
 
-    async def plain_rows(_db, _dest):
-        return [r for r in rows if not r.is_encrypted]
-
-    async def enc(_db, _dest):
-        return set(enc_paths)
+    async def live(_db, _dest):
+        return list(rows)
 
     async def listing(_dest, _dir):
-        files = [(p.split(":drive:/", 1)[1], len(b)) for p, b in drive.files.items()]
-        return files
+        return [(p.split(":drive:/", 1)[1], len(b)) for p, b in drive.files.items()]
 
     from api.services import rclone_client
-    saved = [(m, "find_drive_dest", m.find_drive_dest), (m, "plaintext_artifacts", m.plaintext_artifacts),
-             (m, "encrypted_artifact_paths", m.encrypted_artifact_paths), (m, "list_drive_files", m.list_drive_files),
+    saved = [(m, "find_drive_dest", m.find_drive_dest), (m, "live_artifacts", m.live_artifacts),
+             (m, "list_drive_files", m.list_drive_files),
              (rclone_client, "_build_backend", rclone_client._build_backend)]
-    m.find_drive_dest, m.plaintext_artifacts, m.encrypted_artifact_paths = dests, plain_rows, enc
-    m.list_drive_files = listing
+    m.find_drive_dest, m.live_artifacts, m.list_drive_files = dests, live, listing
     rclone_client._build_backend = lambda dest: (PREFIX, [])
 
     def restore():
@@ -234,80 +304,90 @@ def patch_run(drive, rows, enc_paths=(), orphans=(), extra_files=()):
     return (lambda: Sess()), db, restore
 
 
-def run_apply(drive, rows, ops, apply=True, **kw):
+def run_tool(drive, rows, ops, apply=True):
     from api.services import age_crypto
     saved = (age_crypto.validate_public_key, age_crypto.assert_keypair_roundtrips)
     age_crypto.validate_public_key = lambda k: "age1recipient"
     age_crypto.assert_keypair_roundtrips = lambda: None
-    sess, db, restore = patch_run(drive, rows, **kw)
+    sess, db, restore = patch_run(drive, rows)
     lines = []
     try:
         with tempfile.TemporaryDirectory() as base:
-            rc = asyncio.run(m.run(apply, "hedburgaren", ops=ops, session_factory=sess, out=lines.append, workbase=base))
+            rc = asyncio.run(m.run(apply, "", ops=ops, session_factory=sess, out=lines.append, workbase=base))
     finally:
         restore()
         age_crypto.validate_public_key, age_crypto.assert_keypair_roundtrips = saved
     return rc, lines
 
 
-def test_orphans_are_never_touched_and_dry_run_changes_nothing():
+def test_dry_run_prints_the_three_groups_and_changes_nothing():
     d = Drive()
-    a = make_artifact(d)
-    orphan = f"{PREFIX}/hedburgaren/Old Job/orphan_20260414_010101.tar.gz"
-    d.files[orphan] = b"nobody knows this one"
+    ok = make_row(d, "ok.dump.gz", b"okay", job="A")
+    lie = make_row(d, "lie.dump.gz", b"liar", job="B", encrypted=True)
+    sized = make_row(d, "size.dump.gz", b"sized", job="C")
+    sized.size_bytes = 999999  # the row's size disagrees with the Drive file
+    put(d, "D", "orphan1.gz", b"o1")
+    put(d, "D", "orphan2.gz", b"o2o2")
     snapshot = dict(d.files)
-    rc, lines = run_apply(d, [a], StubOps(d), apply=False)
-    check(rc == 0 and d.files == snapshot and not a.is_encrypted, "dry run: exit 0 and nothing changed")
-    check(any("orphan" in l and "orphan_20260414" in l for l in lines), "dry run: the orphan is reported")
-    check(any("convert" in l and a.filename in l for l in lines), "dry run: the artifact to convert is listed")
-    ops = StubOps(d)
-    rc, lines = run_apply(d, [a], ops)
-    check(rc == 0 and a.is_encrypted, f"apply: the artifact is converted (rc={rc})")
-    check(d.files.get(orphan) == b"nobody knows this one" and orphan not in ops.removed, "apply: the orphan is untouched")
+    total = sum(len(b) for b in d.files.values())
+    rc, lines = run_tool(d, [ok, lie, sized], StubOps(d), apply=False)
+    text = "\n".join(lines)
+    check(rc == 0 and d.files == snapshot and lie.remote_path.startswith("Copied to") and lie.filename == "lie.dump.gz", "dry run: exit 0, Drive and rows unchanged")
+    check("plaintext files on the Drive: 5 (" + str(total) + " bytes)" in text, "dry run: total count and bytes")
+    check("looks consistent: 1 " in text, "dry run: one row that looks fine")
+    check("wrong flag or size differs (checksum is verified when applying): 2 " in text, "dry run: two rows with wrong flag or size")
+    check("orphans, no artifact row (encrypted in place too, no row is created): 2 " in text, "dry run: two orphans")
+    check("is_encrypted=true, file is plaintext" in text and "orphan1.gz" in text, "dry run: lists the lying row and the orphans")
 
 
-def test_resume_skips_done_and_a_failure_exits_non_zero():
+def test_apply_converts_all_three_groups_and_resumes():
     d = Drive()
-    a, b = make_artifact(d, "a.dump.gz", b"aaa"), make_artifact(d, "b.dump.gz", b"bbb", job="n8n Data")
-    rc, _ = run_apply(d, [a, b], StubOps(d))
-    check(rc == 0 and a.is_encrypted and b.is_encrypted, "first run converts both")
+    ok = make_row(d, "ok.dump.gz", b"okay", job="A")
+    lie = make_row(d, "lie.dump.gz", b"liar", job="B", encrypted=True)
+    bad = make_row(d, "bad.dump.gz", b"badsum", job="C", checksum="2" * 64)
+    orphan_rel = put(d, "D", "orphan.gz", b"orph")
+    rc, lines = run_tool(d, [ok, lie, bad], StubOps(d))
+    plain_left = [p for p in d.files if not p.endswith(".age")]
+    check(rc == 0 and not plain_left, f"apply: no plaintext is left on the Drive (rc={rc}, left={plain_left})")
+    check(ok.is_encrypted and lie.is_encrypted and bad.is_encrypted, "apply: every row is encrypted")
+    check(f"{PREFIX}/{orphan_rel}.age" in d.files, "apply: the orphan is encrypted too")
+    check(any("converted (stored checksum did not match)=1" in l for l in lines)
+          and any("converted (no artifact row)=1" in l for l in lines), "apply: the summary counts mismatch and orphan")
     ops = StubOps(d)
-    rc, lines = run_apply(d, [a, b], ops)
-    check(rc == 0 and not ops.uploaded and not ops.removed, "second run: nothing to do, nothing uploaded or removed")
+    rc, lines = run_tool(d, [ok, lie, bad], ops)
+    check(rc == 0 and not ops.uploaded and not ops.removed, "a second run does nothing: resumable")
+
+
+def test_leftover_plaintext_is_removed_on_rerun_and_failure_exits_non_zero():
+    d = Drive()
+    c = make_row(d, "c.dump.gz", b"ccc")
+    old = f"{PREFIX}/{rel_of(c)}"
+    rc, _ = run_tool(d, [c], StubOps(d, fail_remove_plain=True))
+    check(rc == 1 and c.is_encrypted and old in d.files, "plaintext removal failed: exit non-zero, row already encrypted")
+    ops = StubOps(d)
+    rc, _ = run_tool(d, [c], ops)
+    check(rc == 0 and old not in d.files and c.remote_path in d.files,
+          "the re-run removes the leftover plaintext, never the ciphertext")
 
     d2 = Drive()
-    good, bad = make_artifact(d2, "g.dump.gz", b"g"), make_artifact(d2, "z.dump.gz", b"z", checksum="1" * 64, job="Other")
-    rc, lines = run_apply(d2, [good, bad], StubOps(d2))
-    check(rc == 1 and good.is_encrypted and not bad.is_encrypted, "one skipped artifact: the other still converts, exit is non-zero")
-    check(any("summary:" in l for l in lines) and any("NOT everything" in l for l in lines), "a final summary is printed")
-
-    # The plaintext could not be removed after the row changed: a re-run cleans the leftover.
-    d3 = Drive()
-    c = make_artifact(d3, "c.dump.gz", b"ccc")
-    old = c.remote_path
-    rc, _ = run_apply(d3, [c], StubOps(d3, fail_remove_plain=True))
-    check(rc == 1 and c.is_encrypted and old in d3.files, "plaintext removal failed: exit non-zero, row already encrypted")
-    ops = StubOps(d3)
-    rc, lines = run_apply(d3, [c], ops, enc_paths=[c.remote_path])
-    check(rc == 0 and old not in d3.files and c.remote_path in d3.files, "the re-run removes the leftover plaintext, never the ciphertext")
+    bad = make_row(d2, "z.dump.gz", b"z")
+    rc, lines = run_tool(d2, [bad], StubOps(d2, break_decrypt=True))
+    check(rc == 1 and any("NOT everything" in l for l in lines) and not bad.is_encrypted, "a failing file: exit non-zero and a final warning")
 
 
-def test_only_the_drive_and_only_live_plaintext_rows_are_selected():
+def test_rows_are_selected_without_looking_at_the_flag():
     from sqlalchemy.dialects import postgresql
 
     class Cap:
-        def __init__(self):
-            self.stmt = None
-
         async def execute(self, stmt):
             self.stmt = stmt
             return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     cap = Cap()
-    asyncio.run(m.plaintext_artifacts(cap, DEST))
+    asyncio.run(m.live_artifacts(cap, DEST))
     sql = str(cap.stmt.compile(dialect=postgresql.dialect()))
-    check("storage_id" in sql and "is_encrypted" in sql and "is_deleted" in sql and "purged_at IS NULL" in sql,
-          "the query is limited to the Drive destination, unencrypted, not deleted, not purged (local copies never selected)")
+    check("storage_id" in sql and "is_deleted" in sql and "purged_at IS NULL" in sql and "is_encrypted" not in sql.split("WHERE", 1)[1],
+          "the row query is limited to the Drive destination, live rows, and ignores is_encrypted")
 
 
 def test_check_one():
@@ -338,7 +418,6 @@ def test_check_one():
         with tempfile.TemporaryDirectory() as base:
             rc = asyncio.run(m.check_one(ops=StubOps(d), session_factory=sess_for(enc_art), out=lines.append, workbase=base))
         check(rc == 0 and any("RESULT: encrypted" in l for l in lines), "check-one: an age file passes (header, not gzip, not tar)")
-        import gzip
         d.files[enc_art.remote_path] = gzip.compress(b"plain dump")
         lines = []
         with tempfile.TemporaryDirectory() as base:

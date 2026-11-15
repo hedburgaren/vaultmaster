@@ -8,8 +8,14 @@ area and the age identity):
     python -m api.maintenance.encrypt_legacy_drive --check-one
 
 Why: policy (2026-07-19) says nothing unencrypted may sit on Google Drive, and
-56 monthly retention copies from before that date still do. They are restore
+the monthly retention copies from before that date still do. They are restore
 points, so they are converted, not removed.
+
+What is plaintext is decided by the Drive listing, never by the database: every
+file under the Drive root that does not end in .age. The is_encrypted flag on
+the rows is not trusted (34 rows claimed encryption for plaintext files), and
+the stored path is normalised first (about 8300 rows carry rclone's message,
+"Copied to :drive:/...", as their path).
 
 The result must be indistinguishable from what the backup executor writes
 today, so every field follows it:
@@ -17,20 +23,23 @@ today, so every field follows it:
 - the file is `age -r <AGE_PUBLIC_KEY>` of the existing file (the executor's
   `... | gzip | age`), named `<old filename>.age` (age_crypto.AGE_SUFFIX), in
   the same remote directory (server/job/filename layout);
+- `remote_path` is the path the upload returns, in today's format;
 - `checksum_sha256` and `size_bytes` describe the ENCRYPTED file on disk (the
   executor runs sha256sum and stat on the file it produced, after age);
 - `is_encrypted` is set only after the uploaded copy was downloaded again,
-  decrypted with the identity, and its sha256 equals the original's. Bytes, not
-  intent, which is the rule age_crypto.py exists for.
+  decrypted with the identity, and its sha256 equals that of the downloaded
+  plaintext. Bytes, not intent, which is the rule age_crypto.py exists for.
 
-Per artifact, one at a time: download, verify the stored checksum, encrypt,
-upload, download the uploaded copy and decrypt it, compare, and only then
-update the row (with an audit entry, in one transaction) and remove the
-plaintext. Any failure before that point leaves the plaintext and the row
-untouched and removes the ciphertext that was uploaded. A second run skips
+Per file, one at a time: download, encrypt, upload, download the uploaded copy
+and decrypt it, compare, and only then update the rows (with an audit entry, in
+one transaction) and remove the plaintext. Any failure before that point leaves
+the plaintext and the rows untouched and removes the ciphertext that was
+uploaded. A stored checksum that does not match the Drive file does not stop
+the conversion (the Drive file is the backup we have); it is recorded in the
+audit entry and the summary. Files with no artifact row (orphans) are
+encrypted the same way, audit-logged, and no row is created. A second run skips
 what is done. Local (hedburgaren archive) copies are never touched: local
-plaintext is exempt by policy. Drive files with no artifact row are reported
-and never touched.
+plaintext is exempt by policy.
 """
 
 import argparse
@@ -39,7 +48,6 @@ import gzip
 import hashlib
 import logging
 import os
-import re
 import shutil
 import sys
 import tarfile
@@ -48,15 +56,14 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("encrypt_legacy_drive")
 
-DEFAULT_DRIVE_DIR = "hedburgaren"
+# The whole Drive root, so that nothing plaintext hides outside one folder.
+DEFAULT_DRIVE_DIR = ""
 WORK_BASE = os.environ.get("VM_WORK_DIR", "/tmp/vaultmaster")
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
-# Statuses of one artifact
+# Statuses of one Drive file
 DONE = "converted"
-SKIP_MISMATCH = "skipped: checksum mismatch"
-SKIP_UNVERIFIABLE = "skipped: no usable stored checksum"
-SKIP_NAME = "skipped: filename already ends in .age"
+DONE_MISMATCH = "converted (stored checksum did not match)"
+DONE_ORPHAN = "converted (no artifact row)"
 FAILED = "FAILED"
 
 
@@ -121,47 +128,46 @@ class Summary:
         return [r for r in self.results if r.status == FAILED]
 
 
-# ── the conversion of one artifact ───────────────────────────────────────────
+# ── paths ────────────────────────────────────────────────────────────────────
 
-def new_names(artifact, remote_prefix: str):
-    """(new filename, new stored path, sub path for the upload), by the
-    executor's layout: the same directory, the same name plus .age."""
-    from api.services.age_crypto import AGE_SUFFIX
+def rel_path(stored: str, remote_prefix: str) -> str:
+    """A stored path or a Drive path as the path under the remote root, with
+    the broken "Copied to " prefix removed."""
     from api.services.rclone_client import normalize_stored_path
 
-    old_path = normalize_stored_path(artifact.remote_path)
-    new_filename = artifact.filename + AGE_SUFFIX
-    new_path = old_path + AGE_SUFFIX
+    p = normalize_stored_path(stored)
     prefix = remote_prefix.rstrip("/") + "/"
-    if old_path.startswith(prefix):
-        sub = old_path[len(prefix):]
-    else:
-        sub = old_path.lstrip("/")
-    return new_filename, new_path, sub + AGE_SUFFIX
+    return p[len(prefix):] if p.startswith(prefix) else p.lstrip("/")
 
 
-async def convert_one(artifact, dest, db, ops, workdir: str, recipient: str, remote_prefix: str) -> Result:
-    """Convert one artifact. Never raises; returns what happened."""
-    from api.services.rclone_client import normalize_stored_path
+def full_path(rel: str, remote_prefix: str) -> str:
+    """The path in today's stored format: <remote>/<rel>."""
+    return f"{remote_prefix.rstrip('/')}/{rel}"
 
-    aid = str(artifact.id)
-    name = artifact.filename
-    if name.endswith(".age"):
-        return Result(aid, name, SKIP_NAME)
-    stored = (artifact.checksum_sha256 or "").strip().lower()
-    if not _SHA256_RE.match(stored):
-        return Result(aid, name, SKIP_UNVERIFIABLE, f"stored checksum {stored[:16]!r}")
 
-    old_path = normalize_stored_path(artifact.remote_path)
-    new_filename, _, sub_path = new_names(artifact, remote_prefix)
+# ── the conversion of one file ───────────────────────────────────────────────
+
+async def convert_file(rel: str, rows, dest, db, ops, workdir: str, recipient: str, remote_prefix: str) -> Result:
+    """Encrypt one plaintext Drive file in place. `rows` are the artifact rows
+    that point at it (none for an orphan). Never raises; returns what happened.
+
+    The Drive file is the backup we have: a stored checksum that does not match
+    is recorded, not a reason to leave the file in plaintext. The round trip is
+    checked against the sha of the downloaded file itself."""
+    from api.services.age_crypto import AGE_SUFFIX
+
+    name = rel.rsplit("/", 1)[-1]
+    old_path = full_path(rel, remote_prefix)
+    new_rel = rel + AGE_SUFFIX
     plain = os.path.join(workdir, "plain")
     cipher = os.path.join(workdir, "cipher.age")
     check_in = os.path.join(workdir, "check.age")
     check_out = os.path.join(workdir, "check.plain")
     uploaded = None
+    aid = str(rows[0].id) if rows else "-"
 
-    original = {k: getattr(artifact, k) for k in
-                ("filename", "remote_path", "size_bytes", "checksum_sha256", "is_encrypted")}
+    original = [{k: getattr(r, k) for k in
+                 ("filename", "remote_path", "size_bytes", "checksum_sha256", "is_encrypted")} for r in rows]
 
     async def drop_upload():
         if uploaded:
@@ -171,13 +177,19 @@ async def convert_one(artifact, dest, db, ops, workdir: str, recipient: str, rem
                 return f" (ALSO could not remove the uploaded ciphertext {uploaded}: {msg})"
         return ""
 
+    notes = []
     try:
         ok, msg = await ops.download(dest, old_path, plain)
         if not ok:
             return Result(aid, name, FAILED, f"download: {msg}")
         actual = sha256_file(plain)
-        if actual != stored:
-            return Result(aid, name, SKIP_MISMATCH, f"stored {stored[:16]}.. actual {actual[:16]}..")
+        for r in rows:
+            stored = (r.checksum_sha256 or "").strip().lower()
+            if stored != actual:
+                notes.append(f"stored checksum did not match (stored {stored[:16]!r}, file {actual[:16]})")
+                break
+        if any(r.is_encrypted for r in rows):
+            notes.append("row claimed is_encrypted=true but the Drive file was plaintext")
 
         await ops.encrypt(plain, cipher, recipient)
         if not ops.is_age_file(cipher) or os.path.getsize(cipher) == 0:
@@ -185,7 +197,7 @@ async def convert_one(artifact, dest, db, ops, workdir: str, recipient: str, rem
         new_size = os.path.getsize(cipher)
         new_sum = sha256_file(cipher)
 
-        ok, msg = await ops.upload(dest, cipher, sub_path)
+        ok, msg = await ops.upload(dest, cipher, new_rel)
         if not ok:
             return Result(aid, name, FAILED, f"upload: {msg}")
         uploaded = msg  # the stored path, as the executor records it
@@ -199,20 +211,31 @@ async def convert_one(artifact, dest, db, ops, workdir: str, recipient: str, rem
         if sha256_file(check_out) != actual:
             return Result(aid, name, FAILED, "decrypted readback does not equal the original" + await drop_upload())
 
-        # Only now does the row change: one transaction with the audit entry.
-        artifact.filename = new_filename
-        artifact.remote_path = uploaded
-        artifact.size_bytes = new_size
-        artifact.checksum_sha256 = new_sum
-        artifact.is_encrypted = True
+        # Only now does anything change: rows and audit entry in one transaction.
+        for r in rows:
+            r.filename = name + AGE_SUFFIX
+            r.remote_path = uploaded
+            r.size_bytes = new_size
+            r.checksum_sha256 = new_sum
+            r.is_encrypted = True
         try:
             from api.routers.audit import log_action
+            detail = f"Legacy plaintext Drive file encrypted in place: {name} -> {name + AGE_SUFFIX}"
+            if notes:
+                detail += "; " + "; ".join(notes)
+            if not rows:
+                detail += "; no artifact row exists for this file (orphan), none was created"
             await log_action(
-                db, action="artifact.encrypt_legacy", resource_type="backup_artifact",
-                resource_id=aid,
-                detail=f"Legacy plaintext Drive artifact encrypted in place: {name} -> {new_filename}",
-                meta={"old_path": old_path, "new_path": uploaded, "old_size": original["size_bytes"],
-                      "new_size": new_size, "plaintext_sha256": actual, "ciphertext_sha256": new_sum},
+                db, action="artifact.encrypt_legacy",
+                resource_type="backup_artifact" if rows else "drive_file",
+                resource_id=aid if rows else rel,
+                detail=detail,
+                meta={"old_path": old_path, "new_path": uploaded,
+                      "old_size": original[0]["size_bytes"] if original else None,
+                      "new_size": new_size, "plaintext_sha256": actual, "ciphertext_sha256": new_sum,
+                      "rows": [str(r.id) for r in rows], "orphan": not rows,
+                      "checksum_mismatch": any("checksum" in n for n in notes),
+                      "flag_was_wrong": any("is_encrypted" in n for n in notes)},
             )
             await db.commit()
         except Exception as exc:
@@ -220,19 +243,22 @@ async def convert_one(artifact, dest, db, ops, workdir: str, recipient: str, rem
                 await db.rollback()
             except Exception:
                 pass
-            for k, v in original.items():
-                setattr(artifact, k, v)
+            for r, o in zip(rows, original):
+                for k, v in o.items():
+                    setattr(r, k, v)
             return Result(aid, name, FAILED, f"row update: {exc}" + await drop_upload())
     except Exception as exc:  # noqa: BLE001
         return Result(aid, name, FAILED, f"{type(exc).__name__}: {exc}" + await drop_upload())
 
-    # The row points at the verified ciphertext now. Remove the plaintext.
+    # Rows (if any) point at the verified ciphertext now. Remove the plaintext.
+    status = DONE_ORPHAN if not rows else (DONE_MISMATCH if any("checksum" in n for n in notes) else DONE)
     ok, msg = await ops.remove(dest, old_path)
     if not ok:
         return Result(aid, name, FAILED,
                       f"converted, but the plaintext {old_path} could not be removed: {msg}. "
                       "A re-run removes it as a leftover.")
-    return Result(aid, name, DONE, f"{old_path} -> {uploaded}")
+    return Result(aid, name, status,
+                  f"{old_path} -> {uploaded}" + (f" [{'; '.join(notes)}]" if notes else ""))
 
 
 # ── discovery ────────────────────────────────────────────────────────────────
@@ -247,14 +273,15 @@ async def find_drive_dest(db):
     return list(dests)
 
 
-async def plaintext_artifacts(db, dest):
+async def live_artifacts(db, dest):
+    """Every live artifact row on this destination, whatever its is_encrypted
+    says: the flag is not trusted, the Drive listing decides what is plaintext."""
     from sqlalchemy import select
     from api.models.backup_artifact import BackupArtifact
 
     rows = (await db.execute(
         select(BackupArtifact)
         .where(BackupArtifact.storage_id == dest.id,
-               BackupArtifact.is_encrypted == False,  # noqa: E712
                BackupArtifact.is_deleted == False,  # noqa: E712
                BackupArtifact.purged_at.is_(None))
         .order_by(BackupArtifact.created_at)
@@ -262,66 +289,49 @@ async def plaintext_artifacts(db, dest):
     return list(rows)
 
 
-async def encrypted_artifact_paths(db, dest):
-    from sqlalchemy import select
-    from api.models.backup_artifact import BackupArtifact
-    from api.services.rclone_client import normalize_stored_path
-
-    rows = (await db.execute(
-        select(BackupArtifact.remote_path).where(BackupArtifact.storage_id == dest.id,
-                                                 BackupArtifact.is_encrypted == True,  # noqa: E712
-                                                 BackupArtifact.is_deleted == False)  # noqa: E712
-    )).all()
-    return {normalize_stored_path(r[0]) for r in rows}
-
-
 async def list_drive_files(dest, drive_dir: str):
-    """(relative path, size) of every file under drive_dir on the Drive."""
+    """(path under the remote root, size) of every file under drive_dir."""
     import json
     from api.services.rclone_client import _build_backend, _run_rclone
 
     remote, flags = _build_backend(dest)
-    code, out, err = await _run_rclone(
-        ["lsjson", "-R", "--files-only", f"{remote}/{drive_dir.strip('/')}"] + flags, timeout=900)
-    if code != 0:
-        raise RuntimeError(f"could not list the Drive path {drive_dir}: {err.strip()[:200]}")
-    items = json.loads(out or "[]")
     base = drive_dir.strip("/")
-    return [(f"{base}/{i['Path']}", i.get("Size")) for i in items]
+    target = f"{remote}/{base}" if base else remote
+    code, out, err = await _run_rclone(["lsjson", "-R", "--files-only", target] + flags, timeout=900)
+    if code != 0:
+        raise RuntimeError(f"could not list the Drive path {drive_dir!r}: {err.strip()[:200]}")
+    items = json.loads(out or "[]")
+    return [((f"{base}/" if base else "") + i["Path"], i.get("Size")) for i in items]
 
 
-def classify_files(files, rows, encrypted_paths, remote_prefix):
-    """Split the plaintext files on the Drive into those with a row to convert,
-    leftovers of an already converted artifact, and true orphans."""
-    from api.services.rclone_client import normalize_stored_path
+def plan(files, rows, remote_prefix):
+    """Group the plaintext files on the Drive.
 
-    prefix = remote_prefix.rstrip("/") + "/"
-
-    def rel(p):
-        p = normalize_stored_path(p)
-        return p[len(prefix):] if p.startswith(prefix) else p.lstrip("/")
-
-    row_paths = {rel(r.remote_path) for r in rows}
-    enc_rel = {rel(p) for p in encrypted_paths}
+    Returns (targets, leftovers). A target is (rel, size, [rows]); rows is empty
+    for an orphan. A leftover is a plaintext file whose encrypted twin is on the
+    Drive and has a row that says encrypted: a previous run died before the
+    plaintext was removed."""
     present = {p for p, _ in files}
-    with_row, leftovers, orphans = [], [], []
+    by_rel = {}
+    for r in rows:
+        by_rel.setdefault(rel_path(r.remote_path, remote_prefix), []).append(r)
+    targets, leftovers = [], []
     for path, size in files:
         if path.endswith(".age"):
             continue
-        if path in row_paths:
-            with_row.append(path)
-        elif path + ".age" in enc_rel and path + ".age" in present:
+        twin = by_rel.get(path + ".age", [])
+        if path + ".age" in present and any(r.is_encrypted for r in twin):
             leftovers.append(path)
-        else:
-            orphans.append((path, size))
-    return with_row, leftovers, orphans
+            continue
+        targets.append((path, size, by_rel.get(path, [])))
+    return targets, leftovers
 
 
 # ── the run ──────────────────────────────────────────────────────────────────
 
 async def run(apply: bool, drive_dir: str, ops=None, session_factory=None, out=print, workbase=None) -> int:
     from api.services import age_crypto
-    from api.services.rclone_client import _build_backend, normalize_stored_path
+    from api.services.rclone_client import _build_backend
 
     if session_factory is None:
         from api.tasks.backup_tasks import get_task_session as session_factory
@@ -339,63 +349,77 @@ async def run(apply: bool, drive_dir: str, ops=None, session_factory=None, out=p
             out(f"expected exactly one gdrive storage destination, found {len(dests)}: refusing")
             return 2
         dest = dests[0]
-        rows = await plaintext_artifacts(db, dest)
-        enc_paths = await encrypted_artifact_paths(db, dest)
-        row_ids = [r.id for r in rows]
+        rows = await live_artifacts(db, dest)
     remote_prefix, _ = _build_backend(dest)
 
     files = await list_drive_files(dest, drive_dir)
-    _, leftovers, orphans = classify_files(files, rows, enc_paths, remote_prefix)
+    targets, leftovers = plan(files, rows, remote_prefix)
+
+    ok_rows, odd_rows, orphans = [], [], []
+    for rel, size, trows in targets:
+        if not trows:
+            orphans.append((rel, size, trows))
+        elif any(r.is_encrypted for r in trows) or any(r.size_bytes != size for r in trows):
+            odd_rows.append((rel, size, trows))
+        else:
+            ok_rows.append((rel, size, trows))
+
+    def total(group):
+        return sum(sz or 0 for _, sz, _ in group)
 
     out(f"Drive destination: {dest.name}")
-    out(f"plaintext artifacts with a row: {len(rows)} ({sum(r.size_bytes or 0 for r in rows)} bytes)")
-    for r in rows:
-        out(f"  convert  {normalize_stored_path(r.remote_path)}  ({r.size_bytes} bytes)")
-    out(f"leftover plaintext of already converted artifacts: {len(leftovers)}")
+    out(f"plaintext files on the Drive: {len(targets)} ({total(targets)} bytes)")
+    out(f"  with an artifact row, looks consistent: {len(ok_rows)} ({total(ok_rows)} bytes)")
+    out(f"  with an artifact row, wrong flag or size differs (checksum is verified when applying): "
+        f"{len(odd_rows)} ({total(odd_rows)} bytes)")
+    out(f"  orphans, no artifact row (encrypted in place too, no row is created): {len(orphans)} ({total(orphans)} bytes)")
+    for label, group in (("ok", ok_rows), ("odd", odd_rows), ("orphan", orphans)):
+        for rel, size, trows in group:
+            flag = ""
+            if trows and any(r.is_encrypted for r in trows):
+                flag = " [row says is_encrypted=true, file is plaintext]"
+            out(f"  {label:6} {rel}  ({size} bytes){flag}")
+    out(f"leftover plaintext of already converted files: {len(leftovers)}")
     for p in leftovers:
         out(f"  leftover {p}")
-    out(f"orphans (plaintext on Drive, no artifact row; report only, never touched): {len(orphans)}")
-    for p, size in orphans:
-        out(f"  orphan   {p}  ({size} bytes)")
 
     if not apply:
         out("dry run: nothing changed. Re-run with --apply to convert.")
         return 0
 
     base = workbase or (WORK_BASE if os.path.isdir(WORK_BASE) else None)
-    for artifact_id in row_ids:
+    for rel, _size, trows in ok_rows + odd_rows + orphans:
         workdir = tempfile.mkdtemp(prefix="vm-encrypt-legacy-", dir=base)
-        res = None
         try:
             async with session_factory() as db:
                 from sqlalchemy import select
                 from api.models.backup_artifact import BackupArtifact
-                artifact = (await db.execute(
-                    select(BackupArtifact).where(BackupArtifact.id == artifact_id)
-                )).scalar_one_or_none()
-                if artifact is None or artifact.is_encrypted or artifact.is_deleted:
-                    continue  # done by someone else since the listing
-                res = await convert_one(artifact, dest, db, ops, workdir, recipient, remote_prefix)
+                fresh = []
+                for r in trows:
+                    row = (await db.execute(
+                        select(BackupArtifact).where(BackupArtifact.id == r.id)
+                    )).scalar_one_or_none()
+                    if row is not None:
+                        fresh.append(row)
+                res = await convert_file(rel, fresh, dest, db, ops, workdir, recipient, remote_prefix)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
-        if res is not None:
-            summary.add(res)
-            out(f"  {res.status}: {res.name} {res.detail}")
+        summary.add(res)
+        out(f"  {res.status}: {res.name} {res.detail}")
 
-    # Leftovers: the encrypted twin exists on Drive and has a verified row.
+    # Leftovers: the encrypted twin exists on Drive and has a row that says so.
     for p in leftovers:
-        ok, msg = await ops.remove(dest, f"{remote_prefix.rstrip('/')}/{p}")
+        ok, msg = await ops.remove(dest, full_path(p, remote_prefix))
         summary.add(Result("-", p, DONE if ok else FAILED, f"leftover plaintext: {msg}"))
         out(f"  {'removed leftover' if ok else 'FAILED leftover'}: {p} {msg}")
 
     counts = {}
     for r in summary.results:
         counts[r.status] = counts.get(r.status, 0) + 1
-    out("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) + f"; orphans untouched={len(orphans)}")
-    skipped = [r for r in summary.results if r.status.startswith("skipped")]
-    if skipped or summary.failed:
-        out("NOT everything is encrypted: look at the skipped and FAILED lines above.")
-    return 1 if (summary.failed or skipped) else 0
+    out("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    if summary.failed:
+        out("NOT everything is encrypted: look at the FAILED lines above.")
+    return 1 if summary.failed else 0
 
 
 async def check_one(ops=None, session_factory=None, out=print, workbase=None, artifact_id=None) -> int:
@@ -417,7 +441,8 @@ async def check_one(ops=None, session_factory=None, out=print, workbase=None, ar
         q = select(BackupArtifact).where(BackupArtifact.storage_id == dest.id,
                                          BackupArtifact.is_encrypted == True,  # noqa: E712
                                          BackupArtifact.is_deleted == False,  # noqa: E712
-                                         BackupArtifact.purged_at.is_(None))
+                                         BackupArtifact.purged_at.is_(None),
+                                         BackupArtifact.filename.like("%.age"))
         if artifact_id:
             q = q.where(BackupArtifact.id == artifact_id)
         else:
@@ -461,7 +486,7 @@ def main(argv=None) -> int:
     p.add_argument("--apply", action="store_true", help="convert (default is a dry run)")
     p.add_argument("--check-one", action="store_true", help="download one encrypted Drive artifact and show it is unreadable")
     p.add_argument("--artifact-id", help="with --check-one: a specific artifact")
-    p.add_argument("--drive-dir", default=DEFAULT_DRIVE_DIR, help="Drive path to scan for orphans (default hedburgaren)")
+    p.add_argument("--drive-dir", default=DEFAULT_DRIVE_DIR, help="Drive path to scan (default: the whole Drive root)")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.check_one:
