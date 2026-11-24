@@ -325,7 +325,7 @@ class _Job:
         self.updated_at = DEFINED
 
 
-def _drive_check_scheduled(db, now, redis):
+def _drive_check_scheduled(db, now, redis, notify_result=None):
     """Run the real _check_scheduled once with the database, Redis, broker,
     notifier and clock replaced. Returns (triggered, notified)."""
     import asyncio
@@ -341,6 +341,7 @@ def _drive_check_scheduled(db, now, redis):
 
     async def fake_notify(_db, event, data):
         notified.append((event, data))
+        return notify_result
 
     class _Clock(datetime):
         @classmethod

@@ -1384,6 +1384,7 @@ STALE_KEY_TTL = 26 * 3600
 MISSED_WINDOW_SECONDS = 45 * 60
 MISSED_WINDOW_KEY = "vm:missed_window"
 MISSED_PENDING_KEY = "vm:missed_pending"
+MISSED_WORK_KEY = "vm:missed_work"
 
 
 def _claim_once(redis_client, key: str, ttl: int):
@@ -1410,51 +1411,88 @@ def _was_triggered(redis_client, key: str) -> bool:
         return False
 
 
+def _missed_entry_key(item: dict) -> str:
+    return f"{item.get('job_id') or item['job_name']}:{item['fire_time']}"
+
+
 def _missed_items_to_send(redis_client, new_items: list) -> list:
     """Which missed-run items go out in this pass.
 
     2026-11-12: one scheduler fault produced 36 separate alarms in four hours,
     one per job. Now at most one message per MISSED_WINDOW_SECONDS: the pass
     that finds the window closed sends everything waiting plus its own finds;
-    a pass that finds it open parks its finds in Redis for the next one. One
-    entry per job, so a job is never listed twice in a digest. Without Redis
-    (or on a Redis error) nothing can be parked, so the pass sends what it has:
-    louder, never quieter."""
-    by_job = {}
+    a pass that finds it open parks its finds in Redis for the next one.
+
+    Nothing is dropped before it is delivered. The batch is moved atomically
+    (RENAME) to MISSED_WORK_KEY and stays there until _missed_confirm is told
+    the send worked; a batch left there by a failed or crashed send is merged
+    back and retried by the next pass, window or not. Entries are keyed by job
+    and fire time, so a second fire time of a parked job is kept too.
+
+    Without Redis (or on a Redis error) nothing can be parked, so the pass
+    sends what it has: louder, never quieter."""
+    by_key = {}
     for item in new_items:
-        by_job.setdefault(item.get("job_id") or item["job_name"], item)
-    new_items = list(by_job.values())
+        by_key.setdefault(_missed_entry_key(item), item)
     if redis_client is None:
-        return new_items
-    if not new_items and not _has_pending_missed(redis_client):
-        return []
-    claimed = _claim_once(redis_client, MISSED_WINDOW_KEY, MISSED_WINDOW_SECONDS)
-    if claimed is None:
-        return new_items
+        return list(by_key.values())
     try:
-        if claimed is False:
-            for key, item in by_job.items():
-                redis_client.hsetnx(MISSED_PENDING_KEY, str(key), json.dumps(item))
-            redis_client.expire(MISSED_PENDING_KEY, MISSED_KEY_TTL)
-            return []
-        waiting = redis_client.hgetall(MISSED_PENDING_KEY) or {}
-        redis_client.delete(MISSED_PENDING_KEY)
+        # A batch from an earlier failed send goes back into the pending set.
+        leftover = redis_client.hgetall(MISSED_WORK_KEY) or {}
+        for key, raw in leftover.items():
+            redis_client.hsetnx(MISSED_PENDING_KEY, key, raw)
+        if leftover:
+            redis_client.delete(MISSED_WORK_KEY)
+        if not by_key and not redis_client.exists(MISSED_PENDING_KEY):
+            return []  # nothing to send: do not spend the window
     except Exception as exc:
         logger.warning(f"_missed_items_to_send: redis failed: {exc}")
-        return new_items
+        return list(by_key.values())
+    claimed = True if leftover else _claim_once(
+        redis_client, MISSED_WINDOW_KEY, MISSED_WINDOW_SECONDS)
+    if claimed is None:
+        return list(by_key.values())
+    try:
+        for key, item in by_key.items():
+            redis_client.hsetnx(MISSED_PENDING_KEY, key, json.dumps(item))
+        redis_client.expire(MISSED_PENDING_KEY, MISSED_KEY_TTL)
+        if claimed is False:
+            return []
+        try:
+            redis_client.rename(MISSED_PENDING_KEY, MISSED_WORK_KEY)
+        except Exception as exc:
+            if "no such key" in str(exc).lower():
+                return []
+            raise
+        redis_client.expire(MISSED_WORK_KEY, MISSED_KEY_TTL)
+        waiting = redis_client.hgetall(MISSED_WORK_KEY) or {}
+    except Exception as exc:
+        logger.warning(f"_missed_items_to_send: redis failed: {exc}")
+        return list(by_key.values())
+    items = []
     for key, raw in waiting.items():
         try:
-            by_job.setdefault(key, json.loads(raw))
+            items.append(json.loads(raw))
         except ValueError:
             logger.warning(f"_missed_items_to_send: unreadable pending entry {key}")
-    return list(by_job.values())
+    return items
 
 
-def _has_pending_missed(redis_client) -> bool:
+def _missed_confirm(redis_client, delivered: bool):
+    """The send worked: the work batch can go. If not, it stays for a retry."""
+    if redis_client is None or not delivered:
+        return
     try:
-        return bool(redis_client.exists(MISSED_PENDING_KEY))
-    except Exception:
-        return False
+        redis_client.delete(MISSED_WORK_KEY)
+    except Exception as exc:
+        logger.warning(f"_missed_confirm: redis failed: {exc}")
+
+
+def _missed_delivered(result) -> bool:
+    """notify_event reports failure in its return value, it does not raise."""
+    if not isinstance(result, dict):
+        return True
+    return bool(result.get("any_success") or result.get("no_channels"))
 
 
 def _redis_or_none(caller: str):
@@ -1629,11 +1667,14 @@ async def _check_scheduled():
                 logger.error(f"Error checking schedule for job {job.name}: {e}")
 
         to_send = _missed_items_to_send(redis_client, missed)
+        result = None
         if len(to_send) == 1:
-            await notify_event(db, "schedule.missed", {**to_send[0], "catch_up_hours": catch_up_hours})
+            result = await notify_event(db, "schedule.missed", {**to_send[0], "catch_up_hours": catch_up_hours})
         elif to_send:
             to_send.sort(key=lambda i: (i["fire_time"], i["job_name"]))
-            await notify_event(db, "schedule.missed", {"jobs": to_send, "catch_up_hours": catch_up_hours})
+            result = await notify_event(db, "schedule.missed", {"jobs": to_send, "catch_up_hours": catch_up_hours})
+        if to_send:
+            _missed_confirm(redis_client, _missed_delivered(result))
 
     if redis_client is not None:
         try:

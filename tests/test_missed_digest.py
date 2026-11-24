@@ -26,12 +26,20 @@ class _HashRedis(_ClosableRedis):
     def hsetnx(self, key, field, value):
         self.hashes.setdefault(key, {}).setdefault(field, value)
 
+    def rename(self, src, dst):
+        if src not in self.hashes:
+            raise RuntimeError("ERR no such key")
+        self.hashes[dst] = self.hashes.pop(src)
+
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
 
     def delete(self, key):
         self.hashes.pop(key, None)
         self.keys.discard(key)
+
+    def hlen(self, key):
+        return len(self.hashes.get(key, {}))
 
     def expire(self, key, ttl):
         pass
@@ -114,6 +122,67 @@ def test_same_job_is_not_resent_in_a_window():
     check(n == [], "and not after the window closes either")
 
 
+FAILED_SEND = {"delivered": [], "failed": ["telegram"], "any_success": False}
+
+
+def test_failed_send_keeps_the_batch_and_retries():
+    r = _HashRedis()
+    jobs = _jobs(4)
+    _, note = _drive_check_scheduled(_FakeDB(jobs), FIRE + timedelta(hours=3), r, FAILED_SEND)
+    check(len(note) == 1, "first pass tries to send")
+    check(len(r.hashes.get("vm:missed_work", {})) == 4, "failed send: the four entries are kept")
+    # window is open, but a batch that was never delivered is retried at once
+    _, note = _drive_check_scheduled(_FakeDB(jobs), FIRE + timedelta(hours=3, minutes=1), r)
+    check(len(note) == 1 and len(note[0][1].get("jobs", [])) == 4, "next pass resends all four")
+    check("vm:missed_work" not in r.hashes, "delivered: the work batch is cleared")
+    _, note = _drive_check_scheduled(_FakeDB(jobs), FIRE + timedelta(hours=3, minutes=2), r)
+    check(note == [], "and nothing is sent a third time")
+
+
+def test_a_miss_arriving_during_the_take_is_not_lost():
+    class _Racy(_HashRedis):
+        raced = False
+
+        def hgetall(self, key):
+            out = super().hgetall(key)
+            if key == "vm:missed_work" and out and not self.raced:
+                self.raced = True
+                self.hsetnx("vm:missed_pending", "late:t", '{"job_id": "late", "job_name": "late", "fire_time": "t"}')
+            return out
+
+    r = _Racy()
+    _, note = _drive_check_scheduled(_FakeDB(_jobs(2)), FIRE + timedelta(hours=3), r)
+    check(len(note) == 1 and len(note[0][1]["jobs"]) == 2, "the batch holds the two that were there")
+    check("late:t" in r.hashes.get("vm:missed_pending", {}), "the entry written mid-take is still pending")
+    r.close_window()
+    _, note = _drive_check_scheduled(_FakeDB(_jobs(2)), FIRE + timedelta(hours=4), r)
+    check(len(note) == 1 and note[0][1].get("job_name") == "late",
+          "and goes out with the next digest")
+
+
+def test_an_empty_pass_does_not_spend_the_window():
+    r = _HashRedis()
+    _, note = _drive_check_scheduled(_FakeDB([_Job("job-a", "35 2 * * *")]), FIRE + timedelta(seconds=40), r)
+    check("vm:missed_window" not in r.keys, "nothing missed: the window is not claimed")
+    _, note = _drive_check_scheduled(_FakeDB([_Job("job-b", "35 2 * * *")]), FIRE + timedelta(hours=3), r)
+    check(len(note) == 1, "so the first real miss goes out at once")
+
+
+def test_two_fire_times_of_one_job_are_both_kept():
+    from api.tasks.backup_tasks import _missed_items_to_send, _missed_confirm
+    r = _HashRedis()
+    a = {"job_id": "j", "job_name": "j", "fire_time": "2026-11-12T02:35"}
+    b = {"job_id": "j", "job_name": "j", "fire_time": "2026-11-13T02:35"}
+    first = _missed_items_to_send(r, [{"job_id": "x", "job_name": "x", "fire_time": "t"}])
+    check(len(first) == 1, "window opens")
+    _missed_confirm(r, True)
+    check(_missed_items_to_send(r, [a]) == [], "parked")
+    check(_missed_items_to_send(r, [b]) == [], "parked, second fire time of the same job")
+    r.close_window()
+    out = _missed_items_to_send(r, [])
+    check(sorted(i["fire_time"] for i in out) == [a["fire_time"], b["fire_time"]], "both are sent")
+
+
 def test_without_redis_nothing_is_lost():
     # Unchanged from before: the per-fire-time claim needs Redis, so with Redis
     # down no miss is reported at all (job.stale is the backstop). The digest
@@ -138,7 +207,9 @@ def test_other_events_untouched():
 if __name__ == "__main__":
     for fn in [test_single_missed_job_is_unchanged, test_many_missed_in_one_pass_give_one_digest,
                test_misses_inside_a_window_wait_for_the_next_one, test_two_windows_give_two_messages,
-               test_same_job_is_not_resent_in_a_window, test_without_redis_nothing_is_lost,
+               test_same_job_is_not_resent_in_a_window, test_failed_send_keeps_the_batch_and_retries,
+               test_a_miss_arriving_during_the_take_is_not_lost, test_an_empty_pass_does_not_spend_the_window,
+               test_two_fire_times_of_one_job_are_both_kept, test_without_redis_nothing_is_lost,
                test_other_events_untouched]:
         print(fn.__name__)
         fn()
