@@ -346,6 +346,17 @@ def _format_event_message(event: str, data: dict) -> str:
                 f"Name: {data.get('name', 'N/A')}\n"
                 f"Type: {data.get('credential_type', 'N/A')}\n"
                 f"Expired: {data.get('expires_at', 'N/A')}")
+    elif event == "schedule.missed" and data.get("jobs"):
+        jobs = data["jobs"]
+        lines = [f"⏰ {len(jobs)} scheduled backups did not start"]
+        for j in jobs[:50]:
+            lines.append(f"   · {j.get('job_name', 'N/A')}  due: {j.get('fire_time', 'N/A')} UTC")
+        if len(jobs) > 50:
+            lines.append(f"   ...and {len(jobs) - 50} more")
+        lines.append(f"The scheduler saw each of them more than {data.get('catch_up_hours', '?')} h late, "
+                     f"so they were not started now. Each runs again at its next scheduled time; "
+                     f"start them by hand if that is too long to wait.")
+        return "\n".join(lines)
     elif event == "schedule.missed":
         return (f"⏰ Scheduled backup did not start\n"
                 f"Job: {data.get('job_name', 'N/A')}\n"

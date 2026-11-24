@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -1377,6 +1378,12 @@ async def _do_verify_checksum(artifact_id: str) -> dict:
 TRIGGER_KEY_TTL = 2 * 86400
 MISSED_KEY_TTL = 2 * 86400
 STALE_KEY_TTL = 26 * 3600
+# Missed-run alarms are batched: at most one message per window. The first miss
+# opens the window and goes out at once; misses that arrive while it is open
+# wait in a Redis hash and go out together, in one digest, when it has closed.
+MISSED_WINDOW_SECONDS = 45 * 60
+MISSED_WINDOW_KEY = "vm:missed_window"
+MISSED_PENDING_KEY = "vm:missed_pending"
 
 
 def _claim_once(redis_client, key: str, ttl: int):
@@ -1400,6 +1407,53 @@ def _was_triggered(redis_client, key: str) -> bool:
         return bool(redis_client.exists(key))
     except Exception as exc:
         logger.warning(f"_was_triggered: redis EXISTS failed for {key}: {exc}")
+        return False
+
+
+def _missed_items_to_send(redis_client, new_items: list) -> list:
+    """Which missed-run items go out in this pass.
+
+    2026-11-12: one scheduler fault produced 36 separate alarms in four hours,
+    one per job. Now at most one message per MISSED_WINDOW_SECONDS: the pass
+    that finds the window closed sends everything waiting plus its own finds;
+    a pass that finds it open parks its finds in Redis for the next one. One
+    entry per job, so a job is never listed twice in a digest. Without Redis
+    (or on a Redis error) nothing can be parked, so the pass sends what it has:
+    louder, never quieter."""
+    by_job = {}
+    for item in new_items:
+        by_job.setdefault(item.get("job_id") or item["job_name"], item)
+    new_items = list(by_job.values())
+    if redis_client is None:
+        return new_items
+    if not new_items and not _has_pending_missed(redis_client):
+        return []
+    claimed = _claim_once(redis_client, MISSED_WINDOW_KEY, MISSED_WINDOW_SECONDS)
+    if claimed is None:
+        return new_items
+    try:
+        if claimed is False:
+            for key, item in by_job.items():
+                redis_client.hsetnx(MISSED_PENDING_KEY, str(key), json.dumps(item))
+            redis_client.expire(MISSED_PENDING_KEY, MISSED_KEY_TTL)
+            return []
+        waiting = redis_client.hgetall(MISSED_PENDING_KEY) or {}
+        redis_client.delete(MISSED_PENDING_KEY)
+    except Exception as exc:
+        logger.warning(f"_missed_items_to_send: redis failed: {exc}")
+        return new_items
+    for key, raw in waiting.items():
+        try:
+            by_job.setdefault(key, json.loads(raw))
+        except ValueError:
+            logger.warning(f"_missed_items_to_send: unreadable pending entry {key}")
+    return list(by_job.values())
+
+
+def _has_pending_missed(redis_client) -> bool:
+    try:
+        return bool(redis_client.exists(MISSED_PENDING_KEY))
+    except Exception:
         return False
 
 
@@ -1535,7 +1589,7 @@ async def _check_scheduled():
                     # Too late to start now. Reported once per fire time; a
                     # job that keeps missing is also caught by scan_stale_jobs.
                     if _claim_once(redis_client, f"vm:missed:{job.id}:{bucket}", MISSED_KEY_TTL) is True:
-                        missed.append({"job_name": job.name,
+                        missed.append({"job_id": str(job.id), "job_name": job.name,
                                        "fire_time": prev_time.isoformat(timespec="minutes")})
                     else:
                         logger.warning("_check_scheduled: %s missed its run at %s (not reported again)",
@@ -1574,8 +1628,12 @@ async def _check_scheduled():
             except Exception as e:
                 logger.error(f"Error checking schedule for job {job.name}: {e}")
 
-        for item in missed:
-            await notify_event(db, "schedule.missed", {**item, "catch_up_hours": catch_up_hours})
+        to_send = _missed_items_to_send(redis_client, missed)
+        if len(to_send) == 1:
+            await notify_event(db, "schedule.missed", {**to_send[0], "catch_up_hours": catch_up_hours})
+        elif to_send:
+            to_send.sort(key=lambda i: (i["fire_time"], i["job_name"]))
+            await notify_event(db, "schedule.missed", {"jobs": to_send, "catch_up_hours": catch_up_hours})
 
     if redis_client is not None:
         try:
