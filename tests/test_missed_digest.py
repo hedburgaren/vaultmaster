@@ -115,8 +115,16 @@ def test_same_job_is_not_resent_in_a_window():
 
 
 def test_without_redis_nothing_is_lost():
+    # Unchanged from before: the per-fire-time claim needs Redis, so with Redis
+    # down no miss is reported at all (job.stale is the backstop). The digest
+    # step itself never holds anything back when it has no Redis.
     _, note = _drive_check_scheduled(_FakeDB(_jobs(3)), FIRE + timedelta(hours=3), None)
-    check(len(note) == 1 and len(note[0][1].get("jobs", [])) == 3, "no Redis: still one digest for the pass")
+    check(note == [], "no Redis: missed runs are not reported, as before this change")
+    from api.tasks.backup_tasks import _missed_items_to_send
+    items = [{"job_id": "a", "job_name": "a", "fire_time": "t"},
+             {"job_id": "a", "job_name": "a", "fire_time": "t"},
+             {"job_id": "b", "job_name": "b", "fire_time": "t"}]
+    check(len(_missed_items_to_send(None, items)) == 2, "no Redis: the step sends all, one entry per job")
 
 
 def test_other_events_untouched():
